@@ -533,6 +533,7 @@
   <ul>
     <li><a href="#top" class="nav-link active">Opening</a></li>
     <li><a href="#why" class="nav-link">Why this matters to a theorist</a></li>
+    <li><a href="#how-to-read" class="nav-link">How to read this survey</a></li>
     <li><a href="#skeleton" class="nav-link">The skeleton</a></li>
     <li><a href="#tension" class="nav-link">The central tension</a></li>
   </ul>
@@ -563,11 +564,14 @@
 
   <div class="nav-heading">Putting it together</div>
   <ul>
+    <li><a href="#patterns" class="nav-link">Design patterns · algebraic view</a></li>
     <li><a href="#code" class="nav-link">Reading real code</a></li>
     <li><a href="#landscape" class="nav-link">Framework landscape</a></li>
     <li><a href="#beyond" class="nav-link">Beyond chat</a></li>
     <li><a href="#scaling" class="nav-link">Scaling chain</a></li>
     <li><a href="#pitfalls" class="nav-link">Pitfalls (踩坑录)</a></li>
+    <li><a href="#checklist" class="nav-link">Researcher's checklist</a></li>
+    <li><a href="#open" class="nav-link">Open questions</a></li>
     <li><a href="#reading" class="nav-link">Reading list</a></li>
   </ul>
 </aside>
@@ -579,15 +583,13 @@
       <header>
         <div class="eyebrow">An engineering survey · for the mathematically inclined</div>
         <h1>RL Infrastructure for the Mathematically Inclined</h1>
-        <p class="subtitle">A field survey of reinforcement-learning post-training systems — six engineering primitives, three kernel-level DSLs, the training backbone, the quantization problem, and the nine production frameworks you'd actually use. Aimed at mathematicians and RL theorists who want to read the source code of <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a>, <a href="https://github.com/triton-lang/triton">Triton</a> and recognize what's mathematically interesting about the engineering choices.</p>
+        <p class="subtitle">A field survey of reinforcement-learning post-training systems — six engineering primitives, three kernel-level DSLs, the training backbone, the quantization problem, two case studies, five recurring design patterns, a researcher's checklist, and open questions at the systems–theory boundary. Written for mathematicians and RL theorists who want to read the source code of <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a>, <a href="https://github.com/triton-lang/triton">Triton</a> and recognize what's mathematically interesting about the engineering choices.</p>
         <div class="byline">
-          <span>~40 min read</span>
+          <span>~55 min read</span>
           <span>·</span>
-          <span>19 repos surveyed</span>
+          <span>19 repos surveyed · 8 diagrams · 10+ code excerpts</span>
           <span>·</span>
-          <span>8 diagrams · 10+ code excerpts</span>
-          <span>·</span>
-          <span>incl. Miles · slime · SGLang RL team writeups</span>
+          <span>5 design patterns · 9-question checklist · 7 open questions</span>
         </div>
       </header>
 
@@ -606,6 +608,38 @@
         </blockquote>
 
         <p>The mathematician's instinct here is the right one: if you can't verify the infrastructure, treat the results as conjecture. The good news is that the infrastructure is open source, and the patterns are surprisingly elegant once you have a vocabulary. The aim of this survey is to give you the vocabulary.</p>
+      </section>
+
+      <section id="how-to-read">
+        <h2>How to read this survey</h2>
+
+        <p>The most useful thing I can tell a theorist before they start is that this material has a particular structure that rewards a particular reading mindset. The skeleton (next section) and the central tension are the only two ideas you cannot skip; everything else is variation. If you have an hour, read those two and the six engineering primitives and stop — you'll have the structural picture. If you have a weekend, read everything in order. If you came here looking for a specific framework, jump to the framework landscape and use its links into the rest of the survey as a vocabulary glossary.</p>
+
+        <p>Three reading mindsets reward different kinds of attention.</p>
+
+        <h4>The structural reading</h4>
+
+        <p>Treat each engineering primitive as an algebraic statement: <em>here is the invariant the primitive preserves; here is the operation that establishes it</em>. The hybrid engine establishes mutual exclusion on GPU ownership. The four <code>update_weights_from_*</code> paths are a functor lifted across four topology categories. R3 establishes a fixed-point invariant on MoE routing decisions across precision regimes. RadixAttention × GRPO is a categorical product whose savings multiply. Read this way and the survey looks like a small algebra textbook with concrete examples — which is what it is.</p>
+
+        <h4>The computational reading</h4>
+
+        <p>Treat each primitive as an asymptotic statement: <em>here is what gets cheaper and by how much, and here is what the next bottleneck is</em>. The hybrid engine takes GPU utilization from 45–55% to 85–90%. Handle-tuple weight sync drops a 50ms-per-tensor cost to sub-millisecond. RadixAttention turns a 4× prefill cost into 1× plus 4× decode. Partial rollout turns 18s of idle into 2× throughput at the price of measurable off-policy bias. Read this way and the scaling chain section (which we'll get to) becomes the survey's organizing principle.</p>
+
+        <h4>The empirical reading</h4>
+
+        <p>Treat each primitive as an assumption set under which a paper's claim holds: <em>here is what is invisibly assumed when the paper says "trained with GRPO"</em>. The variance reduction of group sampling assumes the prefix cache is reused. The on-policy interpretation of PPO/GRPO assumes the off-policy ratio is bounded. The MoE training stability claim assumes routing replay or unified precision. Read this way and the pitfalls section and the researcher's checklist (toward the end) become essential reading.</p>
+
+        <p>The three mindsets are complementary, not exclusive. The point of distinguishing them is that the same paragraph in this survey carries three kinds of content. A senior systems engineer might dwell on the asymptotics; a category-theorist might dwell on the invariants; an empirical-RL researcher might dwell on the assumption set. The page tries to surface all three, but you decide which to weight.</p>
+
+        <h4>Why theorists usually skip this material — and what they miss</h4>
+
+        <p>The honest reason most theoretically-trained RL people skip infrastructure is that the field's papers do most of the engineering exposition in appendices that read like release notes. "We use GRPO with group size 8" hides what's mathematically interesting (why 8, what the prefix cache buys, what the staleness correction does); "Training is done on a 128-H100 cluster" hides the parallelism choices. The body of the paper foregrounds the algorithm and treats the infrastructure as an implementation detail, when in fact the infrastructure is often where the empirical story is decided.</p>
+
+        <p>What you miss by skipping: you miss the fact that <strong>the engineering choices are themselves a contribution to the algorithm's behavior</strong>. Two papers can both claim "GRPO + Megatron" and report different numbers, and the difference lives in choices that the body never describes. Once you internalize the survey's vocabulary, the engineering exposition starts answering questions you'd previously have asked of the math. That's the conversion the survey aims for.</p>
+
+        <blockquote class="pull">
+          A useful default: assume the systems choices materially shaped any empirical RL result, until the paper proves otherwise.
+        </blockquote>
       </section>
 
       <section id="skeleton">
@@ -1148,6 +1182,50 @@ obs_ids = encode(full)[trim:]   # delta tokens only</code></pre>
         <p>For a theorist this matters because the empirical claims in the field's papers (DeepSeek-R1, GLM-5.1, K2-Thinking, Doubao-1.5-pro) are produced under these specific infrastructure choices. If your work depends on understanding why those models behave as they do, the choices above are the assumption set you're implicitly invoking.</p>
       </section>
 
+      <section id="patterns">
+        <h2>Engineering design patterns — the algebraic view</h2>
+
+        <p>Five patterns recur across every framework in the survey. Once you see them named, the rest of the page reads as variations on a small set of themes. I lay them out here as a synthesis of what the previous sections have already shown.</p>
+
+        <h3>1. Functor — one verb, many topologies</h3>
+
+        <p>The four <code>update_weights_from_*</code> methods are the canonical example. There is one operation ("write the new policy into the inference engine") lifted across four different categories of physical configuration (same process / shared disk / NCCL group / CUDA IPC). The interface is fixed; the implementation per category is what differs. The same pattern appears in SkyRL's three-backend abstraction (vLLM / SGLang / OpenAI API) and in verl's training-backend choice (FSDP / FSDP2 / Megatron).</p>
+
+        <p>The mathematical statement: an operation lifted to a category of topologies, with a consistency obligation downstream (the <code>flush_cache_after_weight_update</code> contract). For a theorist, this is the cleanest example of "the abstraction does mathematical work" in the survey — the verb is the same, the meaning is preserved, but the cost varies by category.</p>
+
+        <h3>2. Categorical product — multiplicative composition</h3>
+
+        <p>RadixAttention × GRPO is the example I lead with elsewhere because it's the most beautiful. An algorithmic choice (group sampling, for variance reduction) exposes a sharing pattern (a common prefix). A data structure (the prefix tree) exposes a sharing mechanism (reference-counted nodes). Their composition multiplies savings — 4× prefill cost becomes 1× plus tails — and reference counting makes cache lifetime automatic.</p>
+
+        <p>The pattern recurs elsewhere. The hybrid engine × Megatron 5D parallelism: colocation chooses one GPU per role at a time, while Megatron handles the parallelism within a role; their composition is what makes 462B-parameter training feasible. R3 routing replay × FP8 inference: routing replay ensures expert selection is identical, FP8 makes it economical; together they make MoE RL stable. Whenever you see "the system advantage is doing the heavy lifting," you're looking at a categorical product.</p>
+
+        <h3>3. Mutual exclusion as serialization</h3>
+
+        <p>The hybrid engine (训推一体) is the central instance. The GPU is in exactly one of two states at any moment (training-mode or inference-mode); transitions are explicit; concurrency contracts are checked structurally with <code>assert is_fully_idle()</code>. This is the engineering version of a state machine with two states and well-defined transitions — but its real significance is that <em>shared state with mutable ownership has no race conditions when ownership is exclusive</em>. Concurrent programming's worst class of bugs is structurally unavailable.</p>
+
+        <p>The same pattern shows up in subtler places. RadixAttention's <code>inc_lock_ref</code> / <code>dec_lock_ref</code> establishes mutual exclusion between active readers and the eviction policy — a node with <code>lock_ref &gt; 0</code> simply cannot be evicted. Use-after-free is unrepresentable. The structural argument is the same; the state machine is just per-node instead of global.</p>
+
+        <h3>4. Identity invariant under reparameterization</h3>
+
+        <p>This is the deepest pattern, and Miles' R3 is the canonical case. The mathematical statement: <em>routing(x, θ, fp8) ≡ routing(x, θ, bf16)</em>, enforced by replay rather than by hoping numerics agree. Two computations that should give the same answer but might not, made to give the same answer by recording one and replaying the other.</p>
+
+        <p>The QAT pipeline does the same thing differently — fake quantization in the forward pass establishes <em>loss(θ, bf16) ≈ loss(θ, int4)</em> by inserting the int4 noise into the training distribution. STE (Straight-Through Estimator) makes the backward pass behave as if int4 weren't there. Both are identity invariants under a reparameterization (precision regime, in this case) maintained by explicit engineering rather than mathematical equality.</p>
+
+        <p>For a theorist this is the most interesting pattern because it appears whenever an engineering shortcut (lower precision, async update, partial rollout) creates a mathematical inconsistency that has to be closed by another mechanism. The shortcut + the fix together are the contribution; neither alone is.</p>
+
+        <h3>5. Buffer-then-fold — bounding asymptotic complexity</h3>
+
+        <p>The multimodal tensor merge in multi-turn rollout (Section above) is the clean example. Naïve concatenation per turn: O(n²). Buffer-then-fold: O(n). The same input-output behavior; two different complexity profiles distinguished only by where the allocation boundary sits.</p>
+
+        <p>The pattern recurs in AReaL's <code>_PendingWeightUpdateBucket</code> (queue NCCL broadcasts in memory-bounded buckets, fire them at the end), in verl's <code>DataProto.union</code> (merge fields lazily, materialize the full batch once at dispatch time), and in slime's bucket-based weight sync (avoid OOM by streaming updates in slices). The unifying claim: do not perform an O(n) operation inside an O(n) loop unless you must.</p>
+
+        <h3>The synthesis</h3>
+
+        <p>Once you have these five patterns, reading a new RL framework becomes pattern-matching. The first time you see RLinf's M2Flow scheduler, you ask: "what's the functor here, and what's the consistency obligation downstream?" The first time you see cosmos-rl's async reward microservice, you ask: "what's the mutual exclusion contract, and what's the buffer-then-fold strategy?" The first time you read a new framework's <code>train.py</code>, the five patterns are the lens.</p>
+
+        <p>This is why the survey insists on names. Naming the patterns turns "what's going on in this code" into "which of the five patterns is this." The latter is a search; the former is reading.</p>
+      </section>
+
       <section id="code">
         <h2>Reading real code: verl's <code>fit()</code> loop</h2>
 
@@ -1388,6 +1466,92 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
         </aside>
       </section>
 
+      <section id="checklist">
+        <h2>A researcher's checklist — what to verify before trusting an RL result</h2>
+
+        <p>If the empirical content of the previous sections distilled to anything actionable, it would be a short list of questions you should be able to answer about any RL paper before you treat its numbers as evidence for its theoretical claims. I list nine. They are intentionally ordered by how often they materially affect results — the first three matter more than the last three.</p>
+
+        <h4>1. Which framework was the training run on?</h4>
+
+        <p>The most important single question, and the one papers most often answer vaguely. "We used GRPO" tells you the algorithm. The framework choice — Miles vs verl vs SLIME vs OpenRLHF — tells you which set of engineering primitives shaped the run. Routinely, two groups training "the same algorithm" report different numbers because their frameworks make different choices about staleness, prefix caching, weight sync, and precision alignment.</p>
+
+        <h4>2. Inference engine and rollout topology?</h4>
+
+        <p>SGLang vs vLLM matters because of the RadixAttention prefix-cache difference (especially for GRPO group sampling). Colocated vs disaggregated rollout matters because of the weight-sync path. "vLLM with disaggregated rollout" and "SGLang with hybrid engine" can produce noticeably different sample-efficiency curves under the same algorithm and the same model. A paper that does not name the inference engine has not described its experimental setup.</p>
+
+        <h4>3. Precision regime, and what enforces train-infer consistency?</h4>
+
+        <p>BF16 train + BF16 infer is the safe case. FP8 inference + BF16 training is the dangerous case for MoE models without R3-style routing replay. INT4 inference + BF16 training requires QAT. The question to ask: <em>in what precision are the logprobs that drive the loss computed, and where do they come from</em>? If the answer is "FP8 inference engine" without further qualification, you should expect numerical drift. If the answer is "recomputed in BF16 on the training engine," good — that's the safe pattern.</p>
+
+        <h4>4. On-policy or async? Off-policy ratio cap?</h4>
+
+        <p>Strict on-policy RL is rare at any scale. If the framework uses partial rollout (most do, above 256 GPUs), the result is technically off-policy, and there should be either an explicit importance-sampling correction (Miles' TIS/MIS) or an explicit staleness bound (Kimi K1.5's curriculum scheduling, AReaL's bucket size). The question: <em>is the off-policy ratio reported, capped, or even monitored</em>? If none of those, the on-policy claim is unverified.</p>
+
+        <h4>5. Was logprob recomputed on the trainer or trusted from inference?</h4>
+
+        <p>The "BERT-era unsolved bug" — inference kernels fuse operations differently from training kernels, producing different logprobs for the same input. Every well-engineered framework recomputes logprobs on the training engine. If a paper trains on inference-engine logprobs, the loss has a numerical bias that grows with training. Worth checking in the framework's source even if the paper doesn't say.</p>
+
+        <h4>6. For MoE models: is routing replay enabled?</h4>
+
+        <p>The MoE-specific version of question 3. Without R3 (or equivalent), the gradient signal has a noise floor from routing divergence between inference and training. DeepSeek-V3, Qwen3-MoE, GPT-OSS, Mixtral — all need this. A paper training one of these without naming the routing-replay mechanism is implicitly trusting that the precision regimes agree exactly, which they typically don't.</p>
+
+        <h4>7. Group size N for GRPO?</h4>
+
+        <p>GRPO's variance reduction scales with group size. The prefix-cache savings also scale with group size (more completions sharing a prefix). The optimal N depends on the cluster, the model, and the task. Papers often report N=8 or N=16 with no ablation. If you're trying to reproduce or compare against a result, the group size is part of the experimental setup, not a hyperparameter.</p>
+
+        <h4>8. For multi-turn experiments: token budget, max_turns, truncation policy?</h4>
+
+        <p>Multi-turn trajectories have long tails. A 32-turn rollout with no per-turn limit gives different results from a 32-turn rollout with a 4096-token per-turn cap. Whether observation tokens are loss-masked (they should be) is part of the setup. Whether the chat-template preamble is repeated each turn (it shouldn't be — see the dummy-messages trick) is part of the setup. Papers comparing agents trained under different multi-turn settings often aren't comparing the same thing.</p>
+
+        <h4>9. Compute budget per training step, and where time is spent?</h4>
+
+        <p>The least-asked but most-revealing question. A training run reports "256 H100-days for the full schedule" and the breakdown between rollout, reward, and gradient update is typically 60% / 5% / 35%. If a paper compares two algorithms but doesn't break down where the time went, the comparison may be artifact of one method exploiting prefix caching better, not of the algorithm being inherently faster. The wandb-style timing breakdown (gen / reward / old_log_prob / values / adv / update_critic / update_actor) that verl's <code>marked_timer</code> blocks produce is what you actually want to see in a paper's appendix.</p>
+
+        <blockquote class="pull">
+          A paper that doesn't answer the first three of these has not described its experiment. A paper that doesn't answer the first six is not reproducible from its text alone. The 8th and 9th are luxury — but where the most interesting comparisons live.
+        </blockquote>
+
+        <p>None of this is to claim that papers should be ignored unless they answer all nine questions. It is to say that the empirical comparisons you make in your head while reading the field's papers should always include "and what is implicitly assumed about questions 1 through 6." The discipline of working through this checklist is what the survey's vocabulary is for.</p>
+      </section>
+
+      <section id="open">
+        <h2>Open questions at the systems–theory boundary</h2>
+
+        <p>A short list of unresolved questions where a mathematically-minded RL person could plausibly contribute. These are not "research suggestions" so much as the cluster of problems the survey's content gestures at without solving.</p>
+
+        <h4>TPU-native RL infrastructure</h4>
+
+        <p>The Cambrian-MLLM blog establishes that almost none of the GPU-RL stack ports to TPUs cleanly. Static shapes, XLA compilation, the absence of NCCL, the awkwardness of Ray on TPU pods — all of these forbid the patterns the survey covers. The question is whether a different set of patterns can deliver the same outcome on TPU hardware: tile-based parallelism, AOT-compiled rollout pipelines, JAX-native weight sync. No framework today fills this gap. Building one is at least a year of senior engineering, but the design space is genuinely open.</p>
+
+        <h4>Formal verification of weight-sync correctness</h4>
+
+        <p>TileLang's Z3 theorem-prover integration into the TVM arithmetic analyzer is the first credible attempt to bring SMT-style verification into the GPU DSL. The weight-sync contract — that the inference engine's Python tensors point to the same physical memory the trainer wrote, with no aliasing or stride mismatches — is the kind of contract that would benefit from a machine-checked proof. Current implementations rely on careful code review plus runtime asserts. A formal treatment is missing.</p>
+
+        <h4>Tight off-policy bounds under partial rollout</h4>
+
+        <p>TIS and MIS truncate or mask importance weights to control variance, but the bias-variance tradeoff is hand-tuned. The theoretical question: under what conditions on the staleness distribution does partial rollout converge to the same fixed point as strict on-policy training, with how much added variance? Miles' TIS/MIS implementation is a starting point; a tight analysis would let frameworks set the truncation threshold automatically rather than as a hyperparameter.</p>
+
+        <h4>MoE routing under quantization — beyond R3</h4>
+
+        <p>R3 (Rollout Routing Replay) is a fix, not a theorem. The deeper question: <em>under what conditions on the routing computation does a precision-induced top-k flip materially affect downstream learning</em>? If the answer is "always," R3 is permanent. If the answer is "only when the expert affinities are within ε of each other," there might be a quantization scheme that preserves routing without explicit replay. This is the kind of question a numerical analyst could answer.</p>
+
+        <h4>Theoretical basis for DDRL</h4>
+
+        <p>cosmos-rl's Data-Regularized DRL replaces the KL term in standard PPO with a reward maximization objective plus the standard diffusion training loss. The empirical results are good; the theoretical basis is light. What's the corresponding policy-improvement guarantee? Under what conditions does the diffusion loss act as an implicit KL regularizer? The video-generation RL frontier needs this analysis to mature.</p>
+
+        <h4>Multi-agent RL as a category of interacting policies</h4>
+
+        <p>RLinf's multi-agent support (rStar2, WideSeek-R1) and the broader multi-agent RL literature lack a clean systems abstraction. The category-theoretic framing — agents as objects, message-passing as morphisms — is intuitive but doesn't yet correspond to a framework primitive. A mathematically clean abstraction here would have systems consequences.</p>
+
+        <h4>The diffusion–autoregressive bridge</h4>
+
+        <p>cosmos-rl supports both diffusion world models (Cosmos-Predict, SANA, SD3) and autoregressive LLMs (Qwen, LLaMA, DeepSeek) — but they go through fundamentally different inference paths (the <code>diffusers</code> backend vs vLLM). The two paradigms increasingly need to interact: video generation conditioned on language, robot policies that output both continuous actions and language explanations. A unified RL framework that treats both as first-class is an open systems problem.</p>
+
+        <blockquote class="pull">
+          Each of these is a real research direction, not a textbook exercise. The field's progress is increasingly going to depend on people who can think across the systems–theory boundary — which is the audience this survey is written for.
+        </blockquote>
+      </section>
+
       <section id="reading">
         <h2>A reading list for the theoretically inclined</h2>
 
@@ -1477,6 +1641,7 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
     <h4>On this page</h4>
     <ul>
       <li><a href="#why">Why this matters</a></li>
+      <li><a href="#how-to-read">How to read this</a></li>
       <li><a href="#skeleton">The skeleton</a></li>
       <li><a href="#tension">The central tension</a></li>
       <li><a href="#primitives">Six primitives</a></li>
@@ -1486,11 +1651,14 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
       <li><a href="#multi-turn">Multi-turn agentic RL</a></li>
       <li><a href="#miles-pipeline">Miles · DeepSeek-V3</a></li>
       <li><a href="#recent">Recent advances</a></li>
+      <li><a href="#patterns">Design patterns</a></li>
       <li><a href="#code">Reading real code</a></li>
       <li><a href="#landscape">Framework landscape</a></li>
       <li><a href="#beyond">Beyond chat</a></li>
       <li><a href="#scaling">Scaling chain</a></li>
       <li><a href="#pitfalls">Pitfalls</a></li>
+      <li><a href="#checklist">Researcher's checklist</a></li>
+      <li><a href="#open">Open questions</a></li>
       <li><a href="#reading">Reading list</a></li>
     </ul>
   </aside>
