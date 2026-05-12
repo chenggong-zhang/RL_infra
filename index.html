@@ -558,7 +558,10 @@
   <div class="nav-heading">Case studies</div>
   <ul>
     <li><a href="#multi-turn" class="nav-link">Multi-turn agentic RL</a></li>
+    <li><a href="#slime-pipeline" class="nav-link">slime · upstream framework</a></li>
     <li><a href="#miles-pipeline" class="nav-link">Miles · DeepSeek-V3</a></li>
+    <li><a href="#verl-pipeline" class="nav-link">verl · HybridFlow</a></li>
+    <li><a href="#deepseek-v4" class="nav-link">DeepSeek V4 · OPD-heavy</a></li>
     <li><a href="#recent" class="nav-link">Recent advances</a></li>
   </ul>
 
@@ -571,6 +574,7 @@
     <li><a href="#scaling" class="nav-link">Scaling chain</a></li>
     <li><a href="#pitfalls" class="nav-link">Pitfalls (踩坑录)</a></li>
     <li><a href="#checklist" class="nav-link">Researcher's checklist</a></li>
+    <li><a href="#reading-plan" class="nav-link">19-repo reading plan</a></li>
     <li><a href="#open" class="nav-link">Open questions</a></li>
     <li><a href="#reading" class="nav-link">Reading list</a></li>
   </ul>
@@ -583,13 +587,13 @@
       <header>
         <div class="eyebrow">An engineering survey · for the mathematically inclined</div>
         <h1>RL Infrastructure for the Mathematically Inclined</h1>
-        <p class="subtitle">A field survey of reinforcement-learning post-training systems — six engineering primitives, three kernel-level DSLs, the training backbone, the quantization problem, two case studies, five recurring design patterns, a researcher's checklist, and open questions at the systems–theory boundary. Written for mathematicians and RL theorists who want to read the source code of <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a>, <a href="https://github.com/triton-lang/triton">Triton</a> and recognize what's mathematically interesting about the engineering choices.</p>
+        <p class="subtitle">A field survey of reinforcement-learning post-training systems — six engineering primitives, three kernel-level DSLs, the training backbone, the quantization problem, five production case studies (multi-turn agentic · slime · Miles · verl · DeepSeek V4), six recurring design patterns, a researcher's checklist, a 19-repo reading plan, and open questions at the systems–theory boundary. Written for mathematicians and RL theorists who want to read the source code of <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a>, <a href="https://github.com/triton-lang/triton">Triton</a> and recognize what's mathematically interesting about the engineering choices.</p>
         <div class="byline">
-          <span>~55 min read</span>
+          <span>~95 min read</span>
           <span>·</span>
-          <span>19 repos surveyed · 8 diagrams · 10+ code excerpts</span>
+          <span>20 repos surveyed · 9 diagrams · 16+ code excerpts</span>
           <span>·</span>
-          <span>5 design patterns · 9-question checklist · 7 open questions</span>
+          <span>5 case studies · 6 design patterns · 9-question checklist · 19-repo reading plan</span>
         </div>
       </header>
 
@@ -1095,10 +1099,164 @@ obs_ids = encode(full)[trim:]   # delta tokens only</code></pre>
         </aside>
       </section>
 
+      <section id="slime-pipeline">
+        <h2>Engineering case study — slime, the clean upstream framework</h2>
+
+        <p>Before Miles became Miles, there was <a href="https://github.com/THUDM/slime">slime</a> — the SGLang-native post-training framework that Miles forked. slime is the RL framework behind <strong>GLM-5.1, GLM-5, GLM-4.7, GLM-4.6, and GLM-4.5</strong>. Where Miles bets on MoE production hardening (low precision, R3 routing replay, fault tolerance, weight-version checks), slime bets on something different: <strong>clean interface boundaries</strong>. The smallest framework that gets Megatron, SGLang, and Ray to cooperate, with extension points for everything else.</p>
+
+        <p>Reading slime alongside Miles is the cleanest way to learn what's essential in an RL framework and what's production glue. Miles teaches you what large-scale stability costs; slime teaches you what the framework actually has to do. If you only read one case study to understand the post-training skeleton, read this one. If you only deploy one framework at trillion-parameter scale, deploy Miles.</p>
+
+        <h3>Same five phases, different controller style</h3>
+
+        <p>slime's <code>train.py</code> runs the same five-phase loop as Miles — rollout → train → save → sync → eval — but the controller idiom is different. Miles uses <code>asyncio</code> with <code>await</code> on every cross-actor call. slime uses Ray <code>ObjectRef</code>s with synchronous <code>ray.get</code>. The trade is straightforward:</p>
+
+        <table>
+          <thead><tr><th>Style</th><th>Reads like</th><th>Pro</th><th>Con</th></tr></thead>
+          <tbody>
+            <tr><td>Miles · asyncio</td><td>concurrent Python</td><td>natural overlap of independent tasks</td><td>steeper if you've never read async code</td></tr>
+            <tr><td>slime · ray.get</td><td>a script, one phase at a time</td><td>reads top-to-bottom, debuggable</td><td>harder to overlap critic and actor training</td></tr>
+          </tbody>
+        </table>
+
+        <p>Both work. The synchronous controller is easier to read end-to-end — which is part of why slime is a better starting point for a theorist. The async controller is easier to extend with overlapping computation — which is part of why Miles forked when it needed more concurrency knobs.</p>
+
+        <p>The one place slime <em>does</em> use refs to overlap work is critic-actor coupling. When a critic is present, slime calls <code>critic.async_train()</code> first (returning Ray refs), then passes those refs as <code>external_data=value_refs</code> into <code>actor.async_train()</code>. The actor only needs values when it computes the policy loss, so this overlap is essentially free — the critic computes while the actor sets up.</p>
+
+        <h3>The three-module architecture, made visible</h3>
+
+        <p>slime's README states the architecture in three boxes: <em>training (Megatron) → data buffer → rollout (SGLang + router)</em>. The training module reads from the buffer; the rollout module writes to it; the buffer manages prompts, samples, and custom data generation.</p>
+
+        <p>This is the same skeleton every framework in this survey instantiates. What's different about slime is that the abstraction is visible in the directory layout: <code>slime/ray/</code> for orchestration, <code>slime/backends/megatron_utils/</code> for training, <code>slime/backends/sglang_utils/</code> for rollout, <code>slime/rollout/</code> for the rollout-function library. The user-supplied path flags (<code>--rollout-function-path</code>, <code>--custom-generate-function-path</code>, and friends) make the extension points equally visible.</p>
+
+        <h3>OPD as a first-class feature — two teacher modes</h3>
+
+        <p>This is slime's most distinctive contribution to the open-source ecosystem, and the reason the V4 case study (next section) can reference a clean reference implementation. slime ships <strong>On-Policy Distillation</strong> as a built-in mode, with two teacher placements:</p>
+
+        <ul>
+          <li><strong><code>--opd-type sglang</code></strong>: the teacher runs as an <em>external SGLang server</em>. The teacher receives the student's sampled tokens, sets <code>max_new_tokens=0</code> (no generation), and returns <code>input_token_logprobs</code> — i.e. the teacher's score of the student's trajectory. Use this when the teacher has a different architecture from the student, or is too large to fit alongside the student in training memory.</li>
+          <li><strong><code>--opd-type megatron</code></strong>: the teacher is loaded directly into Megatron as a backup model tag (alongside <code>actor</code>, <code>ref</code>, <code>old_actor</code>). The teacher's logprobs are computed in the training forward pass. Use this when the teacher and student have the same architecture and you can afford the memory.</li>
+        </ul>
+
+        <p>The mathematically interesting choice is <strong>how OPD enters the loss</strong>. slime treats it as an additive KL penalty on the advantage, not a separate estimator:</p>
+
+        <blockquote class="pull">
+          advantage' = advantage − λ · ( log π<sub>student</sub>(a|s) − log π<sub>teacher</sub>(a|s) )
+          <cite>— slime's <code>apply_opd_kl_to_advantages()</code> in <code>backends/megatron_utils/loss.py</code></cite>
+        </blockquote>
+
+        <p>Two facts fall out. First, if the task reward is zero, the second term dominates and OPD becomes pure teacher imitation via reverse KL. Second, if the task reward is non-zero, OPD acts as a regularizer that pulls the student toward the teacher's distribution while still letting RL signal drive learning. This is what slime's README means by "OPD is orthogonal to advantage estimators" — you can layer it on top of GRPO, PPO, REINFORCE++, or any other advantage estimator by modifying the advantage rather than the loss-function shape.</p>
+
+        <p>Once you see this, DeepSeek V4's full-vocabulary multi-teacher OPD (the next case study) reads as <em>the same idea scaled up</em>: ten or more teachers instead of one, full-vocabulary KL instead of token-level KL, with engineering for trillion-parameter teacher scheduling. The objective is the same family; the engineering complexity is much larger.</p>
+
+        <h3>The custom-generate escape hatch</h3>
+
+        <p>slime's most important design choice is <strong>what it deliberately does not include</strong>. There is no built-in multi-turn agent loop, no hardcoded tool-use environment, no special-cased web-search rollout, no VLM observation encoder baked into the core. Instead, slime exposes extension points and gets out of the way:</p>
+
+        <ul>
+          <li><code>--rollout-function-path</code> — replace the entire rollout function</li>
+          <li><code>--custom-generate-function-path</code> — replace just the per-sample <code>generate()</code></li>
+          <li><code>--custom-reward-post-process-path</code> — custom reward normalization</li>
+          <li><code>--custom-convert-samples-to-train-data-path</code> — custom train-batch shaping</li>
+          <li><code>--buffer-filter-path</code> — custom dynamic-sampling filter</li>
+        </ul>
+
+        <p>The default <code>generate()</code> in <code>slime/rollout/sglang_rollout.py</code> handles single-turn generation with optional multimodal inputs. To do multi-turn agents, you write a <code>generate()</code> that loops turns. To do tool-use, the same. To do VLM observations, the same. The contract is small and stable: take a <code>sample</code>, return a populated <code>sample</code> with tokens, logprobs, and optional routed-experts.</p>
+
+        <p>This is slime's design philosophy: <em>the framework guarantees the data contract; the user owns the environment</em>. It's the opposite of building a universal agent framework that tries to anticipate every tool integration. Instead it gives you the small piece of plumbing that lets your own environment plug in. For research that touches new domains often (search, code execution, browser automation, robots), this is the better trade.</p>
+
+        <h3>ServerGroup — the SGLang serving abstraction</h3>
+
+        <p>slime introduces an abstraction Miles doesn't expose as cleanly: a <strong>ServerGroup</strong> is a set of homogeneous SGLang engines, and a <strong>RolloutServer</strong> can contain multiple ServerGroups. This matters for <em>prefill/decode disaggregation</em>, where prefill runs on one group of engines (with different SGLang flags optimized for compute-heavy prefill) and decode runs on another (optimized for memory-bound decode). Worker types are explicit: <code>"regular"</code>, <code>"prefill"</code>, <code>"decode"</code>, or <code>"placeholder"</code>.</p>
+
+        <p>If you've ever wondered how a research framework handles serving topology more complex than "one SGLang engine per rollout GPU," ServerGroup is a good reference. The same abstraction supports encoder-only servers (for reward models, embeddings, or anything that doesn't need autoregressive decode) by selecting a different SGLang entry point. By default, slime turns on DeepGEMM JIT precompile, fast warmup, memory-saver CUDA graph, and metrics scraping — all sensible defaults for training-side rollout where you want determinism and visibility.</p>
+
+        <h3>Routing replay as explicit stages</h3>
+
+        <p>R3 (routing replay, the invariant that lets MoE training stay numerically aligned with rollout) is in slime too, but the staging is explicit. An environment variable <code>ROUTING_REPLAY_STAGE</code> takes four values:</p>
+
+        <ul>
+          <li><code>fallthrough</code> — normal MoE routing, ignore replay records</li>
+          <li><code>record</code> — record routing decisions but use them too</li>
+          <li><code>replay_forward</code> — replace routing decisions with replay records in forward</li>
+          <li><code>replay_backward</code> — replace routing decisions in backward</li>
+        </ul>
+
+        <p>The training loop sets <code>replay_backward</code> during <code>actor.train_actor()</code> so that gradients flow through the experts the rollout actually used. This is the same fixed-point invariant Miles enforces — <em>routing(x, θ, rollout) ≡ routing(x, θ, training)</em> by replay — but slime exposes the state machine as a small environment-controlled enum. Reading the source, you can pinpoint where each stage takes effect.</p>
+
+        <h3>slime vs Miles — what each is good for</h3>
+
+        <p>A side-by-side comparison helps locate each framework in your mental map.</p>
+
+        <table>
+          <thead><tr><th>Dimension</th><th>slime</th><th>Miles</th></tr></thead>
+          <tbody>
+            <tr><td>Positioning</td><td>Clean upstream framework</td><td>Production fork with hardening</td></tr>
+            <tr><td>Controller style</td><td>Synchronous Ray ObjectRefs</td><td><code>asyncio</code></td></tr>
+            <tr><td>Training backend</td><td>Megatron-LM</td><td>Megatron + experimental FSDP</td></tr>
+            <tr><td>Weight-sync paths</td><td>tensor (colocated) + distributed broadcast</td><td>+ P2P + LoRA variants + quant variants</td></tr>
+            <tr><td>OPD</td><td>First-class with two teacher modes</td><td>Supported, foregrounded less</td></tr>
+            <tr><td>Routing replay</td><td>Env-var stage machine, 4 stages</td><td>Generalized replay manager system</td></tr>
+            <tr><td>Rollout extensibility</td><td>Strong — many <code>--custom-*-path</code> flags</td><td>Inherited from slime, with more knobs</td></tr>
+            <tr><td>Fault tolerance</td><td>Rollout health monitor + recovery</td><td>Heavier recovery, version checks, retries</td></tr>
+            <tr><td>SGLang integration</td><td>PD disagg, encoder-only, metrics</td><td>+ Miles router, low-precision integration</td></tr>
+            <tr><td>Best for</td><td>Reading and learning, GLM-scale RL</td><td>DeepSeek-V3-scale MoE production runs</td></tr>
+          </tbody>
+        </table>
+
+        <p>One sentence summary: <strong>slime is the cleanest open-source framework to read end-to-end; Miles is the heaviest production-ready system to deploy at trillion-parameter scale</strong>. Read slime first if you want to understand how an RL framework works. Read Miles after if you want to understand what it costs to make one survive.</p>
+
+        <h3>What slime actually solves — six interface contracts</h3>
+
+        <p>The honest summary of slime's contribution is not an algorithm and not a system optimization. It's six interface contracts, each defined narrowly enough to be reusable:</p>
+
+        <ol>
+          <li><strong>Sample contract</strong> — what fields a rollout sample must carry: tokens, response_lengths, rewards, loss_masks, rollout_log_probs, plus optional rollout_routed_experts (R3), teacher_log_probs (OPD), multimodal_train_inputs (VLM).</li>
+          <li><strong>Train-data conversion contract</strong> — how samples become a training batch, with per-DP-rank split that can token-balance (not sample-balance) when response lengths have long tails.</li>
+          <li><strong>Recompute contract</strong> — what the trainer recomputes (current logprobs, ref logprobs, optional teacher logprobs) versus what it trusts from rollout (rollout logprobs, routed experts).</li>
+          <li><strong>Weight-sync contract</strong> — pause generation, flush cache, sync, resume; weight version is monotonic; cache invalidation always follows sync.</li>
+          <li><strong>Custom-generate contract</strong> — user-supplied <code>generate(args, sample, sampling_params)</code> can replace the default and plug straight into the rollout function.</li>
+          <li><strong>OPD contract</strong> — teacher logprobs are a first-class sample field; the OPD KL penalty modifies advantage rather than replacing the loss-function shape.</li>
+        </ol>
+
+        <p>These six contracts are why slime is portable. Adding a new estimator, a new environment, a new teacher mode, a new multimodal input type — none of these requires changing the framework core. Each requires implementing a function that satisfies one of these six contracts. <em>The framework is the contracts; everything else is the user's.</em></p>
+
+        <h3>Recommended reading order for slime's source</h3>
+
+        <p>Following the same outside-in pattern as the Miles reading order. Each file builds on the last; jumping straight to the middle usually costs a day.</p>
+
+        <ol>
+          <li><code>README.md</code> — confirm the three-module architecture and skim <code>examples/</code> to see the supported recipes.</li>
+          <li><code>train.py</code> — the synchronous Ray controller version of the five-phase loop.</li>
+          <li><code>slime/ray/placement_group.py</code> — Ray bundle layout, colocate vs split, critic-reuses-actor-pool.</li>
+          <li><code>slime/ray/rollout.py</code> — <code>ServerGroup</code>, <code>RolloutServer</code>, <code>RolloutManager</code>, train-data conversion, group reward normalization.</li>
+          <li><code>slime/rollout/sglang_rollout.py</code> — default per-sample generate, dynamic filtering, partial rollout, multimodal prompt handling, custom-function dispatch.</li>
+          <li><code>slime/backends/sglang_utils/sglang_engine.py</code> — SGLang HTTP wrapper, PD disaggregation, memory and weight endpoints.</li>
+          <li><code>slime/backends/megatron_utils/actor.py</code> — actor / ref / teacher / old_actor backup tags, <code>train_actor()</code>, <code>fill_routing_replay()</code>.</li>
+          <li><code>slime/backends/megatron_utils/update_weight/update_weight_from_tensor.py</code> — colocated tensor path with FlattenedTensorBucket.</li>
+          <li><code>slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py</code> — distributed NCCL path with separate dense/expert (TP + EP) gathers.</li>
+          <li><code>slime/backends/megatron_utils/loss.py</code> — response-aligned logprobs, advantage estimators, <code>apply_opd_kl_to_advantages()</code>, TIS.</li>
+          <li><code>examples/on_policy_distillation/README.md</code> + <code>slime/rollout/on_policy_distillation.py</code> — the two-teacher-mode OPD reference, with the four key flags.</li>
+        </ol>
+
+        <p>By step 11 you have a working mental model of the cleanest open-source RL post-training framework. From there, reading Miles is incremental: you're learning what was <em>hardened</em>, not what is. And reading DeepSeek V4's report (next case study) becomes a comparison rather than a deep dive — you already know what OPD does, so V4 reads as "what changes when you do this with ten teachers at trillion-parameter scale."</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — slime</div>
+          <ul>
+            <li><a href="https://github.com/THUDM/slime" target="_blank">THUDM/slime</a> — the repo</li>
+            <li><a href="https://github.com/THUDM/slime/blob/main/train.py" target="_blank"><code>train.py</code></a> — the synchronous five-phase loop</li>
+            <li><a href="https://github.com/THUDM/slime/blob/main/slime/ray/rollout.py" target="_blank"><code>slime/ray/rollout.py</code></a> — <code>ServerGroup</code> / <code>RolloutManager</code> / train-data conversion</li>
+            <li><a href="https://github.com/THUDM/slime/tree/main/examples/on_policy_distillation" target="_blank"><code>examples/on_policy_distillation/</code></a> — Qwen3-8B student aligning to Qwen3-32B teacher, runnable</li>
+            <li><a href="https://github.com/THUDM/slime/blob/main/examples/on_policy_distillation/README.md" target="_blank">OPD README</a> — flags <code>--use-opd</code>, <code>--opd-type</code>, <code>--opd-kl-coef</code>, <code>--opd-teacher-load</code></li>
+            <li><a href="https://github.com/THUDM/slime/blob/main/slime/backends/megatron_utils/loss.py" target="_blank"><code>backends/megatron_utils/loss.py</code></a> — where <code>apply_opd_kl_to_advantages()</code> lives</li>
+          </ul>
+        </div>
+      </section>
+
       <section id="miles-pipeline">
         <h2>Engineering case study — Miles' DeepSeek-V3 RL pipeline</h2>
 
-        <p><a href="https://github.com/radixark/miles">Miles</a> is the most concrete case study of how the primitives above compose into a production pipeline. Built on slime, powered by Megatron-LM + SGLang, orchestrated by Ray. The repo's <code>scripts/run_deepseek.py</code> is a single Typer command that takes a DeepSeek-V3 model from HuggingFace and runs full GRPO training on AIME-2024 or GSM8K. Reading it teaches you what the actual engineering glue looks like.</p>
+        <p>If <a href="#slime-pipeline">slime</a> is the clean upstream framework, <a href="https://github.com/radixark/miles">Miles</a> is the production fork that hardened it for DeepSeek-V3-scale MoE training. Miles is built on slime, powered by Megatron-LM + SGLang, orchestrated by Ray. The repo's <code>scripts/run_deepseek.py</code> is a single Typer command that takes a DeepSeek-V3 model from HuggingFace and runs full GRPO training on AIME-2024 or GSM8K. Reading Miles is reading what slime needed to look like when it had to survive a week-long trillion-parameter run.</p>
 
         <figure>
           <img src="diagrams/08-miles-architecture.svg" alt="Miles three-module architecture (Training, Data Buffer, Rollout) plus the 5-stage DeepSeek-V3 pipeline: download, FP8→BF16, HF→Megatron, rsync, ray job submit.">
@@ -1142,6 +1300,108 @@ obs_ids = encode(full)[trim:]   # delta tokens only</code></pre>
 
         <p>What's mathematically interesting is the layering. The top-level loop is sequential and easy to reason about as a fixed-point iteration on the policy parameters. The middle layer (Ray, placement groups) is concurrent but explicitly scoped. The bottom layer (CUDA kernels, NCCL collectives, ZMQ messages) is asynchronous but bounded by clean contracts. Each layer adds a strictly smaller amount of nondeterminism than the one beneath it — a kind of <em>algebraic abstraction ladder</em> that lets a theorist reason about convergence without unfolding the systems mess.</p>
 
+        <h3>Miles is not a trainer — it is a runtime phase machine</h3>
+
+        <p>If you read the source carefully, the most useful reframe is this: the top-level loop is not algorithm-driven, it is <em>phase-driven</em>. There is no PPO/GRPO logic in <code>train.py</code> at all. There is only a sequence of phases — rollout, training, sync, eval — and the code's job is to hand the GPU between them cleanly. The actual math (advantages, KL, importance weights) lives inside the actor, far below the top-level loop. From a theorist's angle this matters because it tells you where to look for bugs: a wrong policy gradient is a bug in the actor; a wrong rollout-train mismatch is a bug in the phase machine.</p>
+
+        <p>The phases are precise:</p>
+
+        <ul>
+          <li><strong>Rollout phase:</strong> SGLang owns weights, KV cache, CUDA graphs. The trainer's optimizer is offloaded to CPU.</li>
+          <li><strong>Training phase:</strong> The trainer owns weights, gradients, activations, optimizer state. SGLang's KV cache and CUDA graphs are released.</li>
+          <li><strong>Sync phase:</strong> The trainer's new weights are pushed into SGLang. Generation is paused; the cache is flushed; the weight version is bumped.</li>
+          <li><strong>Eval / save phase:</strong> Periodic side effects that don't affect the policy gradient loop.</li>
+        </ul>
+
+        <p>Two object models run in parallel. The mathematical model is <code>θ_t → sample τ ~ π_θ → compute reward and advantage → θ_{t+1} → install into rollout</code>. The engineering model is <code>GPU ownership, KV cache ownership, weight version, Ray actor liveness, NCCL group state, offload/onload state</code>. Miles' value is keeping these two models aligned — when the math says "the policy just updated," the engineering says "the inference engine now serves the new weights, and any prior in-flight requests have been retracted." If those two statements ever drift apart, the gradient becomes noise and the loss curve still looks fine.</p>
+
+        <h3>Six engineering invariants Miles maintains across the loop</h3>
+
+        <p>These are the invariants you can verify in the source code. They are also the right checklist if you are reading any other framework in this survey and want to know what to look for. Each one is one line of plain English, then one line of why it matters.</p>
+
+        <ol>
+          <li><strong>Logical rank order maps stably to physical GPU order.</strong> Ray bundles, Megatron ranks, and SGLang engine ranks must agree on which physical GPU is "rank 5." If they disagree, you get silent NCCL hangs or weights written into the wrong worker — symptoms that are hours to diagnose. Miles handles this in <code>placement_group.py</code> by reading back actual node IP and GPU IDs from each Ray bundle and sorting deterministically.</li>
+          <li><strong>GPU ownership switches explicitly, never by accident.</strong> Colocated mode never lets training and rollout both touch GPU memory at the same time. The transitions go through <code>rollout_manager.offload_*</code>, <code>actor_model.onload</code>, and SGLang's <code>release_memory_occupation</code> / <code>resume_memory_occupation</code>. The invariant — at any moment, exactly one engine has the live GPU memory — is what makes colocation safe.</li>
+          <li><strong>Weight version is monotonically increasing.</strong> Every sync bumps <code>weight_version</code> and propagates it to every SGLang engine. The trainer can later assert that the engine's reported version equals what it just sent. If they ever differ, a weight update silently failed somewhere and you want to know now, not after 10000 training steps.</li>
+          <li><strong>Weight updates pause generation and flush the cache first.</strong> Before a sync, Miles calls <code>pause_generation</code> on every engine and then <code>flush_cache</code>. The point is to make sure no in-flight request continues decoding with old prefix-cache KVs that belong to the old policy. This is the rule SGLang's own scheduler also enforces; Miles just makes it visible at the top level.</li>
+          <li><strong>Loss-relevant logprobs are recomputed on the trainer, not trusted from inference.</strong> Miles keeps the rollout logprobs (it needs them for TIS and mismatch checks) but the actual policy-gradient term uses logprobs computed by the training engine on the same tokens. This is the BERT-era numerical-drift discipline made concrete: the inference engine generates; the trainer scores.</li>
+          <li><strong>MoE routing is replayed, not re-derived.</strong> When R3 is on, SGLang returns the expert choices it made during generation; the trainer reuses those choices during the forward pass, regardless of what FP8 numerics would have decided locally. The mathematical statement is that the gradient is taken with respect to the routed graph the rollout used — which is the only way the gradient is a meaningful signal about that rollout's actions.</li>
+        </ol>
+
+        <p>Two more invariants Miles enforces when partial rollout is on: <em>tokens generated under an older weight version are loss-masked to zero by default</em> (so only fresh tokens contribute to the gradient), and <em>off-policy ratio is monitored as a first-class metric via TIS, ESS, and a "rollout-train mismatch" probe</em> (so staleness is something you see, not something you discover via mysterious eval degradation three days in).</p>
+
+        <h3>How a sample flows from rollout to gradient</h3>
+
+        <p>The full data path is worth tracing once, because it shows where the abstractions are doing real work and where they're just plumbing. A prompt enters the system, gets sampled N=8 times by SGLang (this is GRPO's group), each completion is scored, the survivors become a training batch. Concretely:</p>
+
+        <ol>
+          <li>The <code>RolloutManager</code> takes a prompt and submits N parallel generation requests to SGLang. Each request returns <code>tokens, logprobs, finish_reason</code> — and if R3 is on, also <code>routed_experts</code> (a tensor of shape [response_len, num_layers, top_k] recording which experts processed each token at each MoE layer).</li>
+          <li>The reward function scores each completion. For GRPO, the rewards within the N-completion group are then group-normalized: subtract the group mean (and optionally divide by group std). The result is each sample's advantage relative to its sibling samples from the same prompt.</li>
+          <li>Optionally, a <em>dynamic sampling filter</em> drops groups whose rewards are all equal (DAPO-style "if every sample got reward 1.0 or every sample got 0.0, the gradient is zero — don't bother training on it"). Miles uses <code>check_reward_nonzero_std</code> as the default filter.</li>
+          <li>Surviving samples are packed into a training batch. Every sample carries a <strong>loss mask</strong> — assistant tokens are 1, observation/system tokens are 0. If partial rollout is on, old-version tokens are also 0. The loss mask is a first-class field; the trainer does not "infer" which tokens to score.</li>
+          <li>The batch is split across data-parallel ranks. If <code>balance_data</code> is on, it splits to equalize <em>tokens per rank</em>, not samples per rank — a small detail that matters a lot when response lengths have long tails.</li>
+          <li>Each trainer rank recomputes logprobs on its slice and computes the policy-gradient loss. The recomputed logprobs are the ones that flow into the loss; the rollout logprobs only show up in TIS and in mismatch monitoring.</li>
+        </ol>
+
+        <p>The reason to walk through this is that every field in the training batch has a job. <code>tokens</code> and <code>response_lengths</code> are the raw text. <code>rewards</code> and <code>advantages</code> drive the loss. <code>loss_masks</code> control which positions count. <code>rollout_log_probs</code> enable TIS. <code>rollout_routed_experts</code> enable R3. <code>weight_versions</code> let the trainer detect stale samples. <code>teacher_log_probs</code> are reserved for OPD. The batch is a small algebra of fields, each one corresponding to a distinct correctness concern.</p>
+
+        <h3>Two paths for weight sync — and why the choice matters</h3>
+
+        <p>Miles picks between two weight-sync paths at config time, and the choice has both performance and reliability implications.</p>
+
+        <p><strong>Colocated path (<code>UpdateWeightFromTensor</code>):</strong> when the trainer and the SGLang engine share the same physical GPUs, the trainer assembles the new weights into one flattened bucket per layer, serializes the tensor descriptors (pointer + stride + offset + CUDA IPC handle, ~1KB total) using <code>MultiprocessingSerializer</code>, gathers them to the lead rank via Gloo, and hands them to SGLang via Ray IPC. SGLang reconstructs Python tensor objects that point to the same physical GPU memory the trainer just wrote. <em>Zero actual tensor data crosses any wire.</em> The reason this works is that two processes on the same host can share CUDA memory through IPC handles — the cost is sub-millisecond per update, regardless of model size.</p>
+
+        <p><strong>Distributed path (<code>UpdateWeightFromDistributed</code>):</strong> when the trainer and rollout live on different physical GPUs (or across nodes), Miles creates a NCCL group whose participants are <code>{trainer rank 0} ∪ {all rollout engine ranks}</code>. The trainer sends metadata (parameter names, shapes, dtypes) over Ray, and the actual tensor data over NCCL broadcast from rank 0. This is the classical "split the control plane and the data plane" pattern: small metadata flows through a flexible RPC layer; large tensors flow through dedicated high-bandwidth collectives. Miles also serializes the broadcasts behind a Ray lock — concurrent broadcasts can deadlock NCCL, and the lock is cheap insurance.</p>
+
+        <p>Both paths share a third invariant: <em>flush the cache after the update</em>. Old prefix-cache entries reference the old policy; serving them under the new policy is a silent correctness bug. SGLang's mixin handles this with <code>flush_cache_after_weight_update</code> at the end of every transport.</p>
+
+        <h3>Staleness corrections — what Miles measures during training</h3>
+
+        <p>Even on a colocated setup, the rollout policy and the trainer policy are not the same. The trainer is <em>one step ahead</em> — it generated the sample under θ<sub>t</sub> but is computing the loss against θ<sub>t+1</sub> after the parameter update. For PPO this is fine; for fully-async RL it can drift. Miles tracks staleness with three explicit quantities:</p>
+
+        <ul>
+          <li><strong>TIS (truncated importance sampling).</strong> Compute <code>ratio = exp(log_prob_train - log_prob_rollout)</code> per token; clip it into <code>[lo, hi]</code>; multiply into the policy-gradient term. This re-weights stale samples so the gradient is unbiased again, modulo the variance the truncation adds.</li>
+          <li><strong>ESS (effective sample size).</strong> <code>ESS = (Σ w)² / Σ w²</code> over the importance weights. A small ESS means most of your samples are effectively being ignored — useful as a single number to monitor over training.</li>
+          <li><strong>Rollout-train mismatch metric.</strong> The mean and max of <code>|log_prob_train - log_prob_rollout|</code> per token. If this drifts upward, the rollout has gotten too stale; you want to know before the loss diverges.</li>
+        </ul>
+
+        <p>The principle is the same one that runs through this whole survey: <em>the system tells you it is lying about being on-policy, and quantifies how much</em>. That is the right design for a system whose inputs are partially stale by construction.</p>
+
+        <h3>What Miles actually solves — seven brittle problems made systematic</h3>
+
+        <p>The most useful summary of Miles is not "it implements GRPO." It is that Miles takes seven specific failure modes that wreck large-scale MoE RL training and turns each one into an engineering invariant with a corresponding code path:</p>
+
+        <ol>
+          <li><strong>Train and rollout sharing GPUs without OOM</strong> → colocate + per-pool offload + SGLang memory-saver.</li>
+          <li><strong>Pushing new weights into rollout fast</strong> → colocated tensor bucket + distributed NCCL broadcast + P2P paths.</li>
+          <li><strong>GRPO rollouts not duplicating work</strong> → group sampling + dynamic filter + SGLang prefix cache.</li>
+          <li><strong>Long-tail rollouts not stalling training</strong> → partial rollout + buffer recycling + loss masking of old tokens.</li>
+          <li><strong>Async / off-policy not silently corrupting the gradient</strong> → rollout logprobs + TIS + ESS + mismatch metric.</li>
+          <li><strong>MoE under low precision not destabilizing</strong> → R3 routed-experts replay + unified precision pipeline.</li>
+          <li><strong>Multi-day jobs being recoverable</strong> → fault tolerance + weight-version checks + restartable rollout engines.</li>
+        </ol>
+
+        <p>Each one is small in code volume but large in production consequence. The seven together are why Miles is a useful case study and not just another RL framework: it is one of the cleanest places in the open-source RL ecosystem to see what "production-grade" actually means, at the line-of-code level.</p>
+
+        <h3>Recommended reading order for Miles' source</h3>
+
+        <p>If you want to walk the source yourself, this order goes from outside to inside, from runtime phases to algorithm internals. Each file builds on the last; jumping straight to the middle usually wastes a day.</p>
+
+        <ol>
+          <li><code>train.py</code> — establish the five phases (rollout, train, sync, save, eval). Skim, don't memorize.</li>
+          <li><code>miles/ray/placement_group.py</code> — see how colocate / split-colocate is actually expressed in Ray bundles.</li>
+          <li><code>miles/ray/rollout.py</code> — the <code>RolloutManager</code>, including reward normalization, DP split, and what fields end up in training data.</li>
+          <li><code>miles/rollout/sglang_rollout.py</code> — the default per-sample generation function; this is where dynamic sampling and partial rollout actually live.</li>
+          <li><code>miles/backends/sglang_utils/sglang_engine.py</code> — the HTTP wrapper around SGLang and the twelve control endpoints (memory, weights, generation pause).</li>
+          <li><code>miles/backends/megatron_utils/actor.py</code> — Megatron actor init, the train_actor flow (recompute logprob, R3 replay, advantage, train, backup).</li>
+          <li><code>miles/backends/megatron_utils/update_weight/update_weight_from_tensor.py</code> — the colocated path's flattened-bucket trick.</li>
+          <li><code>miles/backends/megatron_utils/update_weight/update_weight_from_distributed/broadcast.py</code> — the distributed NCCL path with the deadlock-prevention lock.</li>
+          <li><code>miles/backends/training_utils/loss.py</code> — the algorithm seam: response-aligned logprobs, all advantage estimators, TIS, ESS.</li>
+          <li><code>scripts/run_deepseek.py</code> — finally the production recipe, where all of the above gets wired up for an actual DeepSeek-V3 run.</li>
+        </ol>
+
+        <p>By the time you reach <code>run_deepseek.py</code>, you are reading it not as a script but as a witness: every flag in the giant <code>train_args</code> string lights up a specific invariant or path you have already seen. That recognition is the whole point of the exercise.</p>
+
         <div class="study">
           <div class="study-title">Study resources — Miles DeepSeek-V3 pipeline</div>
           <ul>
@@ -1182,10 +1442,313 @@ obs_ids = encode(full)[trim:]   # delta tokens only</code></pre>
         <p>For a theorist this matters because the empirical claims in the field's papers (DeepSeek-R1, GLM-5.1, K2-Thinking, Doubao-1.5-pro) are produced under these specific infrastructure choices. If your work depends on understanding why those models behave as they do, the choices above are the assumption set you're implicitly invoking.</p>
       </section>
 
+      <section id="verl-pipeline">
+        <h2>Engineering case study — verl, the HybridFlow programming model</h2>
+
+        <p>The previous two case studies — slime and Miles — both treat the framework as "the Megatron + SGLang + Ray stack made cooperate." <a href="https://github.com/verl-project/verl">verl</a> is a different bet. It is the open-source implementation of the <a href="https://arxiv.org/abs/2409.19256">HybridFlow paper</a>, originally from ByteDance Seed, now community-maintained. Its design question is one level higher than slime's or Miles's: <em>given that RL post-training is a particular kind of dataflow program, what's the cleanest way to express it so that algorithms and backends can vary independently?</em> The answer verl proposes — a single-process controller composed with multi-process worker groups — is the most influential framework abstraction in the field today.</p>
+
+        <p>Reading verl alongside slime and Miles is the cleanest way to see <em>what is a framework, and what is a stack</em>. slime and Miles teach you the Megatron + SGLang + Ray loop. verl teaches you why you'd want to be able to write that loop without committing to those specific backends.</p>
+
+        <figure>
+          <img src="diagrams/09-verl-hybridflow.svg" alt="verl's HybridFlow programming model: a single controller running a PPO/GRPO loop on DataProto, three worker groups (actor_rollout_ref, critic, reward) each containing multiple workers with training and rollout engines, connected by dispatch (split) and collect (concat) arrows.">
+          <figcaption><span class="fig-label">Figure 9.</span> verl's HybridFlow programming model. The top is one Python process running the algorithm. The bottom is the parallel computation. Same PPO loop, different worker backends.</figcaption>
+        </figure>
+
+        <h3>Control flow vs computation flow — the central bet</h3>
+
+        <p>The <a href="https://arxiv.org/abs/2409.19256">HybridFlow paper</a> distinguishes two kinds of dataflow in an RL system. The <strong>control flow</strong> is the high-level algorithm: rollout, compute log probs, compute advantages, update actor, update critic, sync weights. The <strong>computation flow</strong> is the low-level work: neural-network forward and backward, optimizer step, sampling, KV cache management. Most RL frameworks (slime and Miles included) interleave both flows — the algorithm and the engine code live close together.</p>
+
+        <p>verl separates them. The control flow runs in <strong>one Python process</strong>, the single controller. The computation flow runs in <strong>Ray worker groups</strong>, each backed by FSDP / Megatron / vLLM / SGLang / HF as configured. Between them, a small protocol — <code>DataProto</code> — flows from controller to workers and back, accumulating fields each time it passes through.</p>
+
+        <p>The engineering payoff of this split is concrete: <em>changing the training backend doesn't change the algorithm code, and changing the algorithm doesn't change the backend code</em>. Swap FSDP for Megatron — same PPO loop. Swap GRPO for DAPO — same worker classes. The single piece of code that connects them, the <code>@register</code> decorator on each worker method, declares how DataProto should be split, executed, and collected.</p>
+
+        <h3>The PPO/GRPO loop as it actually looks</h3>
+
+        <p>HybridFlow's docs give the canonical pseudo-code. Here is what a verl PPO/GRPO iteration looks like at the controller level — note that the entire loop reads as if it ran in a single process:</p>
+
+<pre><code>for prompt in dataloader:
+    batch = DataProto.from_prompt(prompt)
+
+    gen    = actor_rollout_ref_wg.generate_sequences(batch)   # SGLang/vLLM/HF rollout
+    batch  = batch.union(gen)
+
+    old_lp = actor_rollout_ref_wg.compute_log_prob(batch)     # training-engine recompute
+    ref_lp = actor_rollout_ref_wg.compute_ref_log_prob(batch) # frozen reference policy
+    batch  = batch.union(old_lp).union(ref_lp)
+
+    values  = critic_wg.compute_values(batch)                 # value function
+    rewards = reward_wg.compute_scores(batch)                 # reward model or rule
+    batch   = batch.union(values).union(rewards)
+
+    batch   = compute_advantage(batch)                        # controller-side, no remote
+    batch   = apply_kl_penalty(batch)                         # controller-side reward shaping
+
+    actor_rollout_ref_wg.update_actor(batch)
+    critic_wg.update_critic(batch)
+    checkpoint_engine.update_weights(...)                     # trainer → rollout sync</code></pre>
+
+        <p>Three things to notice. First, every <code>wg.method(batch)</code> looks like a plain Python call. Under the hood, the <code>@register</code> decorator splits <code>batch</code> across the worker group's data-parallel ranks, makes a Ray remote call to each worker, collects the results, and concatenates them back into one <code>DataProto</code> — but the controller never sees any of that. Second, <code>compute_advantage</code> and <code>apply_kl_penalty</code> run on the controller itself, with no remote call: advantage estimation is cheap, and putting it on the controller keeps it close to the algorithm's mathematical statement. Third, the loop reads <em>like the algorithm in a paper</em>. You can show this to an RL theorist and they will recognize PPO immediately, even though it's running across hundreds of GPUs.</p>
+
+        <h3>DataProto — the data envelope</h3>
+
+        <p>Every batch that flows between the controller and the worker groups is a <code>DataProto</code>. It has three fields:</p>
+
+        <ul>
+          <li><strong><code>batch</code></strong> — a TensorDict of batch-aligned tensors: <code>input_ids</code>, <code>attention_mask</code>, <code>response_mask</code>, <code>old_log_probs</code>, <code>ref_log_probs</code>, <code>values</code>, <code>rewards</code>, <code>advantages</code>, etc.</li>
+          <li><strong><code>non_tensor_batch</code></strong> — a dict of NumPy arrays for object-like fields: <code>uid</code> (used by GRPO for group-baseline calculation), <code>data_source</code>, <code>reward_model</code>, <code>extra_info</code>, <code>request_id</code>.</li>
+          <li><strong><code>meta_info</code></strong> — a Python dict for batch-global state: temperature, group size, KL coefficient, etc.</li>
+        </ul>
+
+        <p>The key operation is <code>.union()</code>. It merges another DataProto's fields into the current one, asserting that any overlapping keys agree. This is what makes the controller code read as a sequence of attachments to the same batch:</p>
+
+<pre><code>batch = batch.union(gen)        # adds: tokens, response_lengths, rollout_log_probs
+batch = batch.union(old_lp)     # adds: old_log_probs
+batch = batch.union(ref_lp)     # adds: ref_log_probs
+batch = batch.union(values)     # adds: values
+batch = batch.union(rewards)    # adds: token_level_scores
+# ... compute_advantage on controller ...
+batch.batch["advantages"] = ...
+batch.batch["returns"] = ...</code></pre>
+
+        <p>Mathematically, this is exactly the picture of attaching random variables to the same probability space, one at a time, with each new variable computed from the previous ones. The batch grows; the sample identity stays fixed. For a theorist this is the friendliest possible data structure — the engineering object matches the algebraic object.</p>
+
+        <h3>WorkerGroup dispatch — one verb, many workers</h3>
+
+        <p>The piece that makes the controller pseudo-code work is the <code>@register</code> decorator on each remote worker method. It declares a <strong>dispatch mode</strong>: how DataProto should be split before remote execution, and how results should be collected after. The common modes:</p>
+
+        <table>
+          <thead><tr><th>Dispatch mode</th><th>Split</th><th>Collect</th><th>Used for</th></tr></thead>
+          <tbody>
+            <tr><td><code>DP_COMPUTE_PROTO</code></td><td>chunk batch along DP world size</td><td>concat back</td><td>per-sample work — log_prob, generate, train</td></tr>
+            <tr><td><code>ONE_TO_ALL</code></td><td>send full batch to every worker</td><td>take rank-0 result</td><td>per-worker config / setup</td></tr>
+            <tr><td><code>ALL_TO_ALL</code></td><td>broadcast as-is</td><td>broadcast-style result</td><td>weight-sync collectives</td></tr>
+          </tbody>
+        </table>
+
+        <p>This is the verl version of the <em>functor pattern</em> from the design-patterns section — one operation lifted to a category of worker topologies, with a contract about how data enters and exits. The controller writes <code>actor_rollout_ref_wg.compute_log_prob(batch)</code>; the framework knows what "compute_log_prob across 64 ranks" actually means.</p>
+
+        <h3>RayPPOTrainer — where the algorithm lives</h3>
+
+        <p>The trainer class in <code>verl/trainer/ppo/ray_trainer.py</code> holds the loop above. Two things in its constructor matter:</p>
+
+        <p>First, <code>self.hybrid_engine = config.actor_rollout_ref.hybrid_engine</code> and immediately <code>assert self.hybrid_engine, "Currently, only support hybrid engine"</code>. The framework is committed to the colocated-rollout pattern — actor training and actor rollout share GPUs within each worker, and weight sync between them is internal to the worker. This is the same commitment Miles and slime made, just expressed as an enforced invariant rather than a config branch.</p>
+
+        <p>Second, the <code>compute_advantage()</code> method is controller-side and supports multiple estimators. The GRPO path is especially interesting because of how it identifies groups:</p>
+
+<pre><code>advantages, returns = core_algos.compute_grpo_outcome_advantage(
+    token_level_rewards = data.batch["token_level_rewards"],
+    response_mask       = grpo_calculation_mask,
+    index               = data.non_tensor_batch["uid"],   # ← group identity
+    norm_adv_by_std_in_grpo = norm_adv_by_std_in_grpo,
+)</code></pre>
+
+        <p>The group identity for GRPO baseline normalization comes from <code>non_tensor_batch["uid"]</code>, an explicit field. <strong>If a prompt produces N completions, all N samples must share a uid.</strong> This is the data invariant that makes group normalization mathematically correct, and it's a first-class field in the DataProto schema rather than something the framework infers from sample ordering. Reading this is a small "click" moment — you see exactly how GRPO's mathematics translates to a data contract.</p>
+
+        <p>The KL penalty in <code>apply_kl_penalty()</code> is similar: it computes <code>kl = old_log_probs − ref_log_prob</code>, subtracts <code>β · kl</code> from the token-level scores to get <code>token_level_rewards</code>, and an adaptive KL controller updates β based on current KL. All of this runs on the controller. The training engine just sees a final <code>token_level_rewards</code> tensor with the KL shaping already applied.</p>
+
+        <h3>Two-level worker abstraction</h3>
+
+        <p>verl's worker code lives in <code>verl/workers/engine_workers.py</code>. There are two key classes:</p>
+
+        <p><strong><code>TrainingWorker</code></strong> is a backend-agnostic training engine wrapper. It creates the actual engine via <code>EngineRegistry.new(...)</code>, configured by <code>model_type</code>, <code>backend</code>, <code>model_config</code>, <code>optimizer_config</code>, and <code>checkpoint_config</code>. Same worker API, different backend underneath. The remote methods are minimal: <code>train_mini_batch</code>, <code>train_batch</code>, <code>infer_batch</code>, <code>save_checkpoint</code>, <code>load_checkpoint</code>, <code>to(device)</code>, <code>set_loss_fn</code>, <code>reset</code>.</p>
+
+        <p><strong><code>ActorRolloutRefWorker</code></strong> is the role-fused worker. Its <code>role</code> can be <code>actor</code>, <code>rollout</code>, <code>ref</code>, <code>actor_rollout</code>, or <code>actor_rollout_ref</code>. The default <code>actor_rollout_ref</code> mode means a single worker class holds: a reference model (frozen), an actor model (trained), and a rollout engine (SGLang or vLLM) — three roles per worker process. This is the <em>concrete instantiation of the hybrid engine</em>: training and rollout share GPUs by virtue of being instances of the same class. Its public methods include <code>compute_ref_log_prob</code>, <code>compute_log_prob</code>, <code>update_actor</code>, <code>update_weights</code>, <code>save_checkpoint</code>, <code>load_checkpoint</code>.</p>
+
+        <p>One small but instructive detail: <code>compute_log_prob</code> and <code>update_actor</code> are decorated with <code>_with_routing_replay_flag(enabled=True)</code>, but <code>compute_ref_log_prob</code> uses <code>enabled=False</code>. R3 routing replay flows through actor compute and update; the frozen reference policy does not participate in replay. Reading this is enough to learn the invariant: <em>the policy you're updating must replay the routing the rollout used; the reference policy is independent and replays nothing.</em></p>
+
+        <h3>SGLang ServerAdapter — and the FSDP/DTensor collective invariant</h3>
+
+        <p>verl's SGLang adapter lives in <code>verl/workers/rollout/sglang_rollout/sglang_rollout.py</code>. It handles rank mapping (including prefill/decode disaggregation), memory release/resume, and weight updates. Two details deserve attention.</p>
+
+        <p><strong>Sleep level 1 vs 2.</strong> The <code>release()</code> method supports two granularities. <code>sleep_level = 1</code> releases only the KV cache and keeps base weights alive (used when the next sync is a LoRA-adapter update — no need to refresh base weights). <code>sleep_level = 2</code> releases both KV cache and weights (used when the next sync is a full-model update). This is finer-grained than slime's binary release/resume, and it matters in production for LoRA-RL pipelines.</p>
+
+        <p><strong>The FSDP/DTensor collective invariant.</strong> The <code>update_weights()</code> method walks a generator of named tensors from the training engine. Crucially, the code notes that <em>every rank must walk the generator, even though only TP-rank-0 actually sends the HTTP update to SGLang</em>. The reason: each call to <code>DTensor.full_tensor()</code> inside the generator performs an all-gather across the FSDP group. If some ranks skip the walk, the collective hangs. This is the kind of invariant that the controller-level pseudo-code happily hides — the algorithm doesn't care how weights are materialized — but the worker code must enforce it strictly.</p>
+
+        <p>For an FP8 rollout, verl's adapter applies <code>SGLangFP8QuantizerHelper</code> to convert BF16 weights to FP8 in-flight before sending them to SGLang. After every successful update, <code>flush_cache()</code> invalidates the prefix cache (same consistency obligation as slime and Miles).</p>
+
+        <h3>CheckpointEngine — another functor</h3>
+
+        <p>verl exposes <em>two paths</em> for weight sync at a higher level than slime/Miles do. Inside <code>ActorRolloutRefWorker.update_weights()</code> there's a branch:</p>
+
+        <ul>
+          <li><strong><code>mode = "naive"</code></strong> — the synchronous colocated path. Pull per-tensor params from the actor engine; push them into the SGLang adapter; flush cache. This is what slime/Miles call the colocated tensor path.</li>
+          <li><strong><code>mode != "naive"</code></strong> — the checkpoint-engine path. Pull per-tensor params and hand them to a configured <code>CheckpointEngine</code> instance, which is responsible for transporting them. The engine is selected via <code>CheckpointEngineRegistry</code> and may be backed by NCCL broadcast, async streaming, disk, or RDMA.</li>
+        </ul>
+
+        <p>This is the same "one verb, many transports" pattern that the design-patterns section identified in SGLang's four <code>update_weights_from_*</code> methods — except here it's lifted one level higher, into the framework's own checkpoint-engine abstraction. The choice of transport becomes a config option, not a code branch in the algorithm.</p>
+
+        <h3>Six engineering invariants verl maintains</h3>
+
+        <ol>
+          <li><strong>Control flow and computation flow are different programs.</strong> Algorithm logic runs in one Python process; computation runs in Ray worker groups. Changing one should not require changing the other. This is the framework's central design statement, expressed structurally rather than as a comment.</li>
+          <li><strong>Every field on a batch is aligned to the same sample dimension.</strong> DataProto's <code>union()</code> asserts size compatibility; non_tensor_batch and meta_info are kept structurally separate from batch tensors. The mathematical sample identity is preserved across the entire pipeline.</li>
+          <li><strong>GRPO group identity travels in <code>non_tensor_batch["uid"]</code>.</strong> Group baseline normalization works only because the framework refuses to infer groups from sample ordering. The <code>uid</code> field is required, explicit, and immutable through the loop.</li>
+          <li><strong>Logprobs for the loss are recomputed by the training engine.</strong> The rollout engine produces sampled tokens; the actor worker recomputes <code>old_log_probs</code> through its training-engine <code>infer_batch</code>. This is the same invariant slime and Miles enforce, expressed here as a worker-method-name convention.</li>
+          <li><strong>Weight sync invalidates the prefix cache.</strong> SGLang ServerAdapter's <code>update_weights()</code> ends with <code>flush_cache()</code>. The cache cannot survive across weight versions.</li>
+          <li><strong>FSDP/DTensor walks are collective.</strong> Every rank walks the weight generator during sync, even though only one rank communicates with the inference engine. Skipping the walk on a single rank deadlocks the all-gather.</li>
+        </ol>
+
+        <h3>verl vs slime vs Miles — three points on the same axis</h3>
+
+        <table>
+          <thead><tr><th>Dimension</th><th>slime</th><th>Miles</th><th>verl</th></tr></thead>
+          <tbody>
+            <tr><td>Core bet</td><td>clean upstream skeleton</td><td>production hardening</td><td>framework abstraction</td></tr>
+            <tr><td>Controller style</td><td>synchronous Ray <code>ray.get</code></td><td><code>asyncio</code></td><td>single-process pseudo-code</td></tr>
+            <tr><td>Data envelope</td><td>Sample → train_data dict</td><td>same as slime + more fields</td><td>DataProto (TensorDict + non_tensor + meta)</td></tr>
+            <tr><td>Worker abstraction</td><td>RayTrainGroup over Megatron</td><td>same as slime, with extra production knobs</td><td>WorkerGroup + EngineRegistry, pluggable backends</td></tr>
+            <tr><td>Training backends</td><td>Megatron</td><td>Megatron, experimental FSDP</td><td>FSDP, FSDP2, Megatron, TorchTitan, VeOmni</td></tr>
+            <tr><td>Rollout backends</td><td>SGLang</td><td>SGLang</td><td>vLLM, SGLang, HF Transformers</td></tr>
+            <tr><td>Weight sync</td><td>tensor + distributed</td><td>+ P2P + LoRA + quant variants</td><td>naive + checkpoint engine (registry)</td></tr>
+            <tr><td>GRPO group identity</td><td>positional inside batch</td><td>positional inside batch</td><td>explicit <code>uid</code> field</td></tr>
+            <tr><td>Algorithm reach</td><td>GRPO, PPO, OPD</td><td>+ R3, FP8, INT4, more</td><td>PPO, GRPO, DAPO, PRIME, GSPO, RLOO, REINFORCE++, more recipes</td></tr>
+            <tr><td>Best read for</td><td>"how does an RL framework work?"</td><td>"what does production cost?"</td><td>"how do I design a framework that's portable across backends?"</td></tr>
+          </tbody>
+        </table>
+
+        <p>The summary sentence: <strong>slime teaches you the loop, Miles teaches you the production cost of the loop, verl teaches you how to abstract the loop so the backends can vary</strong>. Read them in this order if you want to understand the design space; read them in any order if you just want to ship one.</p>
+
+        <h3>What verl actually solves</h3>
+
+        <p>The honest summary of verl's contribution is not a new algorithm or a new system optimization. It's a programming model for RL post-training that decouples four things:</p>
+
+        <ol>
+          <li><strong>Algorithm from training backend.</strong> Same PPO/GRPO loop runs on FSDP or Megatron. The choice is a config flag, not a fork.</li>
+          <li><strong>Algorithm from rollout backend.</strong> Same loop runs on SGLang, vLLM, or HF. Worker classes pick which one at construction time.</li>
+          <li><strong>Algorithm from placement.</strong> Resource pools and placement groups are constructed in <code>TaskRunner</code>; the controller code doesn't see them.</li>
+          <li><strong>Algorithm from transport.</strong> Weight sync goes through CheckpointEngine; the algorithm doesn't know whether it's NCCL, RDMA, IPC, or disk.</li>
+        </ol>
+
+        <p>For a theorist this is the cleanest statement of "the framework <em>is</em> the contracts." You can write a new advantage estimator without learning Megatron. You can swap to vLLM without touching the algorithm. You can move from colocated to disaggregated rollout by changing one config and one checkpoint-engine backend. The decoupling is the contribution.</p>
+
+        <h3>Recommended reading order for verl's source</h3>
+
+        <p>This order goes from concept to implementation, with the HybridFlow design doc up front because verl is the kind of framework that becomes legible once you know its design philosophy.</p>
+
+        <ol>
+          <li><code>README.md</code> — confirm verl's identity: HybridFlow open-source, FSDP/FSDP2/Megatron + vLLM/SGLang, 3D-HybridEngine.</li>
+          <li><code>docs/hybrid_flow.rst</code> — <em>the single most important file in the repo to read first</em>. Control flow vs computation flow; single controller; WorkerGroup dispatch; the design motivation in the team's own words.</li>
+          <li><code>verl/trainer/main_ppo.py</code> — Ray init, <code>TaskRunner</code>, role-worker mapping, resource pools, dataset construction, trainer entry.</li>
+          <li><code>verl/protocol.py</code> — <code>DataProto</code>: batch / non_tensor_batch / meta_info, union/pop/select/repeat/pad, serialization.</li>
+          <li><code>verl/trainer/ppo/ray_trainer.py</code> — <code>RayPPOTrainer</code>: <code>compute_advantage</code> (with the GRPO uid invariant), <code>apply_kl_penalty</code>, worker construction.</li>
+          <li><code>verl/workers/engine_workers.py</code> — <code>TrainingWorker</code> and <code>ActorRolloutRefWorker</code>: register dispatch modes, three-role fusion, <code>update_weights</code> with naive vs checkpoint-engine modes.</li>
+          <li><code>verl/workers/rollout/sglang_rollout/sglang_rollout.py</code> — <code>ServerAdapter</code>: rank mapping, sleep levels, FSDP/DTensor collective walk, FP8/LoRA bucket paths.</li>
+          <li><code>examples/</code> and <code>verl-recipe/</code> — once the framework makes sense, the recipes (GRPO on Qwen3, DAPO, multi-turn tool calling, VLM RL, LoRA RL) are quick to read.</li>
+        </ol>
+
+        <p>By step 6 you can read any RL framework's <code>train.py</code> as variations on a theme. By step 7 you've seen how the framework abstraction touches the hottest piece of the system (weight sync). By step 8 you've translated all this into actually-runnable production setups.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — verl</div>
+          <ul>
+            <li><a href="https://github.com/verl-project/verl" target="_blank">verl-project/verl</a> — the repo</li>
+            <li><a href="https://arxiv.org/abs/2409.19256" target="_blank">HybridFlow paper</a> — the design rationale</li>
+            <li><a href="https://verl.readthedocs.io/en/latest/" target="_blank">verl.readthedocs.io</a> — official docs, including the HybridFlow design page</li>
+            <li><a href="https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/ray_trainer.py" target="_blank"><code>verl/trainer/ppo/ray_trainer.py</code></a> — RayPPOTrainer</li>
+            <li><a href="https://github.com/verl-project/verl/blob/main/verl/protocol.py" target="_blank"><code>verl/protocol.py</code></a> — DataProto</li>
+            <li><a href="https://github.com/verl-project/verl/blob/main/verl/workers/engine_workers.py" target="_blank"><code>verl/workers/engine_workers.py</code></a> — TrainingWorker, ActorRolloutRefWorker</li>
+            <li><a href="https://github.com/verl-project/verl-recipe" target="_blank">verl-recipe</a> — DAPO, PRIME, GSPO, DrGRPO, SPPO recipes</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="deepseek-v4">
+        <h2>Case study — DeepSeek V4's post-training infrastructure</h2>
+
+        <p>If Miles is the case study of "train one policy with RL," <a href="https://arxiv.org/abs/DeepSeek-V4">DeepSeek V4</a>'s post-training is the case study of the opposite bet: <em>train many domain experts with RL separately, then merge them into one student via multi-teacher On-Policy Distillation (OPD)</em>. The algorithmic choice — distillation instead of RL as the final-stage merging primitive — shapes a different set of infrastructure problems, and DeepSeek's V4 report (Sections 5.1.2 and 5.2) reads as a clinic on what those problems are and how their team solves them. The system extends the same primitives Miles uses (hybrid engine, FP-aware QAT, fault-tolerant rollout) but adds two genuinely new pieces: efficient multi-teacher scheduling for OPD at trillion-parameter scale, and a production-grade sandbox platform (DSec) for the agentic-AI rollout side. Below is the reading of Section 5 a theorist should take away.</p>
+
+        <h3>Multi-teacher OPD — the merging objective</h3>
+
+        <p>The V4 team trains specialist models in math, coding, reasoning, world-knowledge etc. as separate post-training runs, then distills all of them into one unified student. The objective is a weighted sum of reverse KL divergences against each teacher, computed on trajectories sampled from the <em>student</em>:</p>
+
+        <blockquote class="pull">
+          ℒ<sub>OPD</sub>(M<sub>S</sub>) = Σ<sub>i=1..L</sub> w<sub>i</sub> · D<sub>KL</sub>(M<sub>S</sub> ∥ M<sub>T<sub>i</sub></sub>)
+          <cite>— V4 §5.1.2. <em>L</em> teachers, w<sub>i</sub> weights, trajectories drawn from M<sub>S</sub> to preserve the on-policy property.</cite>
+        </blockquote>
+
+        <p>Two design choices deserve a theorist's attention. <strong>Reverse KL on student trajectories</strong> is what makes "on-policy distillation" on-policy: the student samples its own actions and the teachers score them, so the gradient is taken against the distribution the student actually inhabits. The alternative — forward KL with teacher trajectories — would give a Behavior Cloning-style loss that ignores the student's own failure modes. <strong>Selective alignment per task</strong> emerges from the formulation: w<sub>i</sub> · D<sub>KL</sub> downweights teachers whose distribution is far from the student's current trajectory, so the math expert dominates math contexts and the coding expert dominates coding contexts automatically. The student converges to a policy that <em>chooses</em> which expert to imitate per context — without an explicit gating network.</p>
+
+        <p>The infrastructure twist is in how to compute that KL term. <strong>Prior practice approximates D<sub>KL</sub> with a per-token estimate</strong>: at each position, treat log(M<sub>T</sub>(a)/M<sub>S</sub>(a)) for the sampled action as the per-token advantage and reuse the RL framework's PPO/GRPO loss machinery. Cheap, but high-variance — the per-token ratio swings wildly across positions and the gradient is noisy. V4 instead computes the <strong>full-vocabulary reverse KL</strong> at every position, summing across all |V| ≈ 100k+ tokens. The gradient is lower-variance and faithful to the teacher's full distribution, but the compute and memory cost is what the rest of Section 5.2 exists to make tractable.</p>
+
+        <h3>Efficient teacher scheduling — the hardest piece</h3>
+
+        <p>The challenge V4 had to solve: <em>more than ten teacher models, each potentially trillion-parameter scale, contributing to a single student training step</em>. The naive setup — materialize all teachers' full logits over the full vocabulary at every position — is prohibitive, even spooled to disk (think hundreds of GB of logits per mini-batch). V4's framework solves it through four composed engineering moves:</p>
+
+        <ul>
+          <li><strong>Offload all teacher weights to centralized distributed storage</strong>, load on demand with ZeRO-like parameter sharding. Teachers live in shared storage, not in GPU memory.</li>
+          <li><strong>Cache only the last-layer hidden states</strong> in a centralized buffer during the teacher forward pass — not the full logits. The logit dimension |V| collapses; the hidden dimension d is ~10× smaller.</li>
+          <li><strong>Reconstruct full logits on demand</strong> via the prediction head module at training time. Negligible recomputation, no logit-materialization memory burden.</li>
+          <li><strong>Order training samples by teacher index</strong> during data dispatching, so each teacher head is loaded exactly once per mini-batch and at most one head resides in device memory at any moment. Parameter loading and offloading proceeds asynchronously, off the critical path.</li>
+        </ul>
+
+        <p>And — closing the loop with this survey's TileLang section — V4 reports that "the exact KL divergences between teacher and student logits are computed using a specialized <strong>TileLang kernel</strong>, which accelerates the computation and curtails dynamic memory allocation." The hidden-state-cache + on-demand prediction-head trick is what makes the algorithm fit in memory; the TileLang kernel is what makes the KL computation fast. The whole subsection is a microcosm of how the survey's separate primitives compose: distributed storage offload, parameter sharding, asynchronous I/O, a custom DSL kernel — all stacked to make one mathematical objective economical.</p>
+
+        <h3>FP4 (MXFP4) QAT — lossless FP4→FP8 dequant</h3>
+
+        <p>V4 applies MXFP4 quantization-aware training (FP4 weights with block-shared exponents, the OCP standard) to two components: MoE expert weights and the QK path in the indexer of Compressed Sparse Attention. The trick worth flagging is what they call <em>lossless FP4→FP8 dequantization</em>:</p>
+
+        <blockquote class="pull">
+          FP8 (E4M3) has 2 more exponent bits than FP4 (E2M1). As long as the ratio between max and min scale factors of the FP4 sub-blocks (1×32 tiles) within each FP8 quantization block (128×128 tiles) doesn't exceed a threshold, the fine-grained scale information is fully absorbed by the FP8 dynamic range.
+        </blockquote>
+
+        <p>The mathematical statement: under a bounded-scale-ratio condition (empirically satisfied by their weights), the composition FP32 → FP4 → FP8 preserves the FP4 scale-block information exactly when re-expressed in FP8. This means the existing FP8 training framework is reused without modification — the QAT pipeline plugs in via Straight-Through Estimator on the FP8 backward, and the entire framework's FP8 numerics stack remains intact. For deployment, native FP4 quantized weights are used during rollout instead of simulated quantization, so model behavior during sampling is bit-consistent with online inference. Where the survey's quantization section discussed FP8 and INT4 separately, V4 demonstrates a clean composition: MXFP4 weights flowing through FP8 compute paths, with neither the training framework nor the inference framework needing to know about the FP4 layer underneath.</p>
+
+        <h3>Token-granular Write-Ahead Log — fault-tolerant rollout</h3>
+
+        <p>This is the most mathematically interesting piece of V4's infrastructure, and it ties to the survey's design patterns directly. The problem: in a cluster-wide preemptive scheduler, any rollout request can be interrupted at any token by hardware failure or by preemption for a higher-priority task. The naive recovery — restart preempted requests from scratch — is the kind of thing that looks fine but is mathematically wrong.</p>
+
+        <blockquote class="pull">
+          Regenerating unfinished requests from scratch introduces length bias. <em>Shorter responses are more likely to survive interruption</em>, so regenerating from scratch makes the model more prone to producing shorter sequences whenever an interruption occurs. The bias is a survivorship artifact of the recovery policy, not the policy gradient.
+          <cite>— DeepSeek V4 §5.2.3</cite>
+        </blockquote>
+
+        <p>For a probabilist this is the kind of subtle bias they should hear once and recognize forever. The fix is a token-granular Write-Ahead Log (WAL): every new token is immediately appended to a persistent log; preemption pauses the inference engine and persists the in-flight KV cache; resumption replays the WAL + cached KV to continue decoding. Even on fatal hardware failure, the WAL's tokens are enough to re-run prefill and reconstruct the KV cache from a clean start without restarting generation. The mathematical claim is that the distribution of output sequences is the same whether or not preemption occurred — the WAL preserves on-policy statistics under arbitrary interruption.</p>
+
+        <p>An equivalent solution V4 considers and rejects: a batch-invariant, deterministic inference stack with seeded PRNGs would also let interrupted runs be replayed exactly. Mathematically equivalent; engineering-wise prohibitive (full re-decoding cost instead of WAL-replay cost). The WAL is the right answer at this scale, and it generalizes to any rollout system that has to be preemption-safe.</p>
+
+        <p>This is a sixth design pattern, complementing the five from the next section: <strong>persistent log + replay = correctness under preemption</strong>. I'll formalize it there.</p>
+
+        <h3>Million-token RL — metadata vs heavy data separation</h3>
+
+        <p>V4 supports million-token context windows. The corresponding rollout infrastructure has to handle trajectories where a single sample's per-token fields (logprobs, masks, multimodal payloads) easily exceed gigabytes. The team's solution is to decompose rollout data into two streams: <strong>lightweight metadata</strong> (lengths, sample IDs, reward scalars) loaded eagerly for global shuffling and packing layout decisions; and <strong>heavy per-token fields</strong> loaded lazily via a shared-memory data loader (intra-node deduplication) and released immediately upon consumption at mini-batch granularity. The number of on-device mini-batches is determined dynamically based on workload to trade compute throughput against I/O overlap.</p>
+
+        <p>For a theorist this is "buffer-then-fold" (pattern 5 in the next section) at the data-pipeline layer rather than the tensor layer — same structural argument, different granularity.</p>
+
+        <h3>DeepSeek Elastic Compute (DSec) — agentic-AI sandbox platform</h3>
+
+        <p>The agentic-RL frontier (SWE-bench, web research, tool-use trained policies) needs the rollout engine to call <em>code execution</em>, not just to generate tokens. V4 builds this as a separate platform: <strong>DSec</strong>, a Rust-based production sandbox system that manages "hundreds of thousands of concurrent sandbox instances" per cluster. Four execution substrates behind one unified Python SDK:</p>
+
+        <ul>
+          <li><strong>Function Call</strong> — stateless invocations dispatched to a pre-warmed container pool, no cold start</li>
+          <li><strong>Container</strong> — Docker-compatible, EROFS on-demand image loading</li>
+          <li><strong>microVM</strong> — Firecracker, for security-sensitive high-density</li>
+          <li><strong>fullVM</strong> — QEMU, for arbitrary guest OSes</li>
+        </ul>
+
+        <p>Built on the 3FS distributed filesystem and a custom RPC protocol. Crucially, sandbox lifecycles coordinate with GPU training schedules — preemption and checkpoint-based resumption are first-class. Each sandbox maintains a globally-ordered trajectory log that serves three purposes: <em>fast-forward replay</em> (when training is preempted, cached results for completed commands are replayed on resumption to skip non-idempotent re-execution); <em>fine-grained provenance</em> (every state change is traceable to its command); <em>deterministic replay</em> (any historical session reproduces from its log).</p>
+
+        <p>The unifying observation: V4 has now applied the WAL-replay pattern twice — once at token granularity for LLM rollout (Section 5.2.3), once at command granularity for sandbox state (Section 5.2.5). The same correctness argument carries over: persistent ordered logs let you preempt at any boundary and resume without changing the output distribution. The pattern generalizes; the granularity changes with the workload.</p>
+
+        <h3>What's interesting about V4 as a case study</h3>
+
+        <p>The honest summary: <em>V4's contribution is not a new RL algorithm but a new merging algorithm</em>. The team trains specialists with RL (covered in Section 5.1.1 with GRPO), then uses OPD to consolidate them. The infrastructure innovations — multi-teacher scheduling, WAL fault-tolerance, DSec sandboxes — exist because OPD-as-merger creates problems that pure RL doesn't. For a theorist reading V4 alongside Miles, the right framing is that both papers solve the same skeleton (rollout cycle, three pillars, hybrid engine) but assemble different upper layers on top.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — DeepSeek V4 + OPD</div>
+          <ul>
+            <li>DeepSeek V4 technical report — Section 5.1.2 (OPD objective) and Section 5.2 (post-training infrastructure)</li>
+            <li><a href="https://arxiv.org/abs/2306.08543" target="_blank">Gu et al. 2024 — MiniLLM</a>: the original on-policy distillation formulation</li>
+            <li><a href="https://thinkingmachines.ai/blog/on-policy-distillation/" target="_blank">Lu &amp; Lab 2025 — Thinking Machines OPD blog</a>: a sharper case for OPD over RLHF</li>
+            <li><a href="https://github.com/THUDM/slime/tree/main/examples/on_policy_distillation" target="_blank">slime · examples/on_policy_distillation</a> — the open-source reference with two teacher modes (sglang external, megatron in-process)</li>
+            <li><a href="https://github.com/THUDM/slime/blob/main/examples/on_policy_distillation/README.md" target="_blank">slime OPD README</a> — flags: <code>--use-opd</code>, <code>--opd-type</code>, <code>--opd-kl-coef</code>, <code>--opd-teacher-load</code></li>
+          </ul>
+        </div>
+      </section>
+
       <section id="patterns">
         <h2>Engineering design patterns — the algebraic view</h2>
 
-        <p>Five patterns recur across every framework in the survey. Once you see them named, the rest of the page reads as variations on a small set of themes. I lay them out here as a synthesis of what the previous sections have already shown.</p>
+        <p>Six patterns recur across every framework in the survey. Once you see them named, the rest of the page reads as variations on a small set of themes. I lay them out here as a synthesis of what the previous sections have already shown. The sixth pattern is the one V4 just demonstrated above — I add it explicitly at the end.</p>
 
         <h3>1. Functor — one verb, many topologies</h3>
 
@@ -1219,11 +1782,19 @@ obs_ids = encode(full)[trim:]   # delta tokens only</code></pre>
 
         <p>The pattern recurs in AReaL's <code>_PendingWeightUpdateBucket</code> (queue NCCL broadcasts in memory-bounded buckets, fire them at the end), in verl's <code>DataProto.union</code> (merge fields lazily, materialize the full batch once at dispatch time), and in slime's bucket-based weight sync (avoid OOM by streaming updates in slices). The unifying claim: do not perform an O(n) operation inside an O(n) loop unless you must.</p>
 
+        <h3>6. Persistent log + replay — correctness under preemption</h3>
+
+        <p>The pattern V4 demonstrates with the token-granular Write-Ahead Log. The setup: a long-running stateful computation (a rollout, an agent session, a database transaction) can be interrupted at any moment. The naive recovery — restart from the most recent persistent checkpoint — has subtle correctness pitfalls. Restarting an in-flight LLM generation, as we saw, introduces length bias: shorter responses are over-represented in the survivor population, distorting the empirical distribution of trajectories the policy gradient sees.</p>
+
+        <p>The pattern's claim: <em>maintain an append-only log of every operation; on resumption, replay the log to reconstruct the pre-interruption state</em>. The result is that the post-interruption execution is indistinguishable from a no-interruption execution at the observable boundary (the sampled trajectory distribution in V4's case; the database state in a transactional setting). Token-granular WAL is the LLM-rollout instance; command-granular trajectory logs are DSec's agentic-sandbox instance; the same correctness argument applies in both.</p>
+
+        <p>Mathematically, the pattern is a fixed-point claim: the function from input prompt to output trajectory is the same with or without preemption, when preemption is bracketed by WAL persistence + replay. This is a stronger guarantee than "results are <em>approximately</em> the same" — it's that they're <em>distributionally identical</em>. For a probabilist, the recognition is that recovery policies are part of the data-generating process, and the wrong recovery policy is a hidden experimental variable.</p>
+
         <h3>The synthesis</h3>
 
-        <p>Once you have these five patterns, reading a new RL framework becomes pattern-matching. The first time you see RLinf's M2Flow scheduler, you ask: "what's the functor here, and what's the consistency obligation downstream?" The first time you see cosmos-rl's async reward microservice, you ask: "what's the mutual exclusion contract, and what's the buffer-then-fold strategy?" The first time you read a new framework's <code>train.py</code>, the five patterns are the lens.</p>
+        <p>Once you have these six patterns, reading a new RL framework becomes pattern-matching. The first time you see RLinf's M2Flow scheduler, you ask: "what's the functor here, and what's the consistency obligation downstream?" The first time you see cosmos-rl's async reward microservice, you ask: "what's the mutual exclusion contract, and what's the buffer-then-fold strategy?" The first time you see a fault-tolerant rollout pipeline, you ask: "what's logged, what's replayed, and what's the distributional-equivalence claim?" The first time you read a new framework's <code>train.py</code>, the six patterns are the lens.</p>
 
-        <p>This is why the survey insists on names. Naming the patterns turns "what's going on in this code" into "which of the five patterns is this." The latter is a search; the former is reading.</p>
+        <p>This is why the survey insists on names. Naming the patterns turns "what's going on in this code" into "which of the six patterns is this." The latter is a search; the former is reading.</p>
       </section>
 
       <section id="code">
@@ -1514,6 +2085,58 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
         <p>None of this is to claim that papers should be ignored unless they answer all nine questions. It is to say that the empirical comparisons you make in your head while reading the field's papers should always include "and what is implicitly assumed about questions 1 through 6." The discipline of working through this checklist is what the survey's vocabulary is for.</p>
       </section>
 
+      <section id="reading-plan">
+        <h2>A 19-repo reading plan — how to do this yourself</h2>
+
+        <p>This survey distilled 19 source repos into a few thousand words. If you want to do the same exercise yourself — read the actual code, not just my summary — here is the order I would recommend, and the template I would use for each repo. The two together turn what looks like an overwhelming corpus into a manageable sequence of small case studies.</p>
+
+        <h3>Read in five groups, not in their listed order</h3>
+
+        <p>The natural impulse is to start with the most familiar repo on the list. That is the wrong move. The list groups by topic — image diffusion, RL framework, inference engine, kernel DSL — and reading them in topic order means you spend a week on image generation before you have any of the RL skeleton in your head. The better order is the one this survey is built on:</p>
+
+        <ol>
+          <li><strong>The RL skeleton itself.</strong> Start with <strong>slime</strong>, <strong>Miles</strong>, <strong>verl</strong>, <strong>SGLang</strong>, and <strong>Megatron-LM</strong> together. These five repos cover the full <em>generate → score → filter → train → sync</em> path. Three of them have full case studies above as a head start: <a href="#slime-pipeline">slime</a> is the clean upstream framework, <a href="#miles-pipeline">Miles</a> is its production-hardened fork, <a href="#verl-pipeline">verl</a> is the alternative framework abstraction (HybridFlow). SGLang gives you the rollout-and-weight-sync substrate; Megatron-LM gives you the training backbone and, surprisingly, its own native RL path in <code>megatron/rl/</code>. Read the case studies first, then dive into the source of one of these five. By the end of group 1 you can read any RL framework's <code>train.py</code> in fifteen minutes.</li>
+          <li><strong>Comparison across RL framework designs.</strong> Then read <strong>AReaL</strong>, <strong>OpenRLHF</strong>, <strong>SkyRL</strong>, and <strong>RLinf</strong>. Now you're not learning the skeleton — you're learning the variations. AReaL shows fully-async; OpenRLHF shows the classical synchronous Ray + DeepSpeed + vLLM design; SkyRL specializes in long-horizon agents; RLinf adds the M2Flow scheduler for embodied and agentic workloads. The point of group 2 is to see where the same skeleton can bend.</li>
+          <li><strong>Inference and compiler substrate.</strong> Next read <strong>vLLM</strong>, <strong>TensorRT-LLM</strong>, <strong>TensorRT</strong>, <strong>Triton</strong>, <strong>TileLang</strong>. These are not RL frameworks. They are the layer beneath. The goal is to understand <em>why</em> prefix caches, paged attention, CUDA graphs, kernel DSLs, quantization, and MoE communication kernels determine rollout economics. After group 3, you will read RL papers differently — you'll see that "we used SGLang" or "we used vLLM" is a substantive experimental claim, not a deployment detail.</li>
+          <li><strong>Rollout targets beyond chat.</strong> Then <strong>FLUX</strong>, <strong>FLUX.2</strong>, <strong>Wan2.2</strong>. These are not RL frameworks either — they are the <em>targets</em> RL frameworks might want to fine-tune. FLUX.2's reference-token KV-cache trick and Wan2.2's video-diffusion MoE both are useful systems case studies in their own right. The point is to understand what changes when the target is not an autoregressive LLM.</li>
+          <li><strong>Failure modes and meta-reading.</strong> Finish with the <strong>Cambrian TPU blog</strong> and <strong>Chenyang Zhao's Awesome-ML-SYS-Tutorial</strong>. Cambrian tells you why almost none of the GPU-RL stack ports to TPUs. The tutorial tells you which papers' results to distrust until you have verified the infrastructure. These two are the reality check at the end of a long reading binge.</li>
+        </ol>
+
+        <p>Five groups, nineteen repos. If you spend a real week on group 1 and then a few days on each of groups 2 through 5, you finish with a working mental model of the field's plumbing. Without group 1, the others read like trivia. With group 1, they read like commentary on a structure you already understand.</p>
+
+        <h3>A ten-question template for each repo</h3>
+
+        <p>I have used the same template for every case study in this survey. It is short enough to apply in an evening, structured enough to make the reading comparable across repos. The questions are deliberately ordered from outside to inside, so you build context before you dive into specifics.</p>
+
+        <table>
+          <thead><tr><th>#</th><th>Question</th><th>Where to look</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td><strong>What is this repo, really?</strong> Is it a target model, a framework, a backbone, an inference engine, or a kernel substrate?</td><td>README + top-level package layout</td></tr>
+            <tr><td>2</td><td><strong>Directory map</strong> — what lives where? README, docs, examples, scripts, tests, src.</td><td>One-shot <code>ls -R</code> with note-taking</td></tr>
+            <tr><td>3</td><td><strong>Entry scripts</strong> — what's the training entry, the inference entry, the benchmark entry, the deployment entry?</td><td><code>scripts/</code> and the README's "Quick Start"</td></tr>
+            <tr><td>4</td><td><strong>Core objects</strong> — name the trainer, rollout manager, scheduler, engine, worker, cache, model runner.</td><td>The <code>__init__.py</code> exports of the top-level package</td></tr>
+            <tr><td>5</td><td><strong>One sample's path</strong> — trace a single prompt/request from input through rollout, reward, loss, update, sync.</td><td>The main loop file; trace the variable names</td></tr>
+            <tr><td>6</td><td><strong>Engineering invariants</strong> — memory ownership, weight freshness, cache invalidation, logprob recompute, precision consistency.</td><td>The asserts and concurrency contracts</td></tr>
+            <tr><td>7</td><td><strong>Parallelism and resources</strong> — TP/PP/DP/EP/CP, FSDP, DeepSpeed, Ray placement, NCCL/RDMA, offload.</td><td>The config files; the placement-group code</td></tr>
+            <tr><td>8</td><td><strong>Known failure modes</strong> — OOM, staleness, routing divergence, NCCL hangs, cache staleness, dynamic shapes, precision drift.</td><td>Issues, CHANGELOG, comments tagged "TODO" or "WARN"</td></tr>
+            <tr><td>9</td><td><strong>Mapping to this survey's primitives</strong> — which of the six engineering primitives does it implement, and which does it skip?</td><td>Cross-reference with the design patterns section above</td></tr>
+            <tr><td>10</td><td><strong>The ten files most worth reading</strong> — in walking order, outside to inside.</td><td>Your own notes from steps 3-6</td></tr>
+          </tbody>
+        </table>
+
+        <p>This template is what the Miles case study in this survey looks like under the hood. The deep dive into Miles is just questions 1-10 answered for one repo. Once you have the answers for one repo, the answers for the next repo are easier to find — you know what to look for.</p>
+
+        <blockquote class="pull">
+          The point of a template is not that it teaches you the answer. The point is that it makes the unknown answers visible. Two pages of "I don't know yet, but I know where to look" beats ten pages of disorganized notes from skimming.
+        </blockquote>
+
+        <h3>Why this matters more than any single answer</h3>
+
+        <p>The honest reason to learn this corpus is not that you will read all nineteen repos. The reason is that <em>you will have to read one of them</em>, sooner than you expect, because something in your own work depends on it. When that happens, knowing the five-group structure and the ten-question template is what turns "I have to read a giant unfamiliar codebase" into "I have a routine." A theorist who has practiced this routine is hard to surprise.</p>
+
+        <p>The corpus is a vocabulary, not a curriculum. The five groups are the rough order in which the vocabulary becomes useful. The ten questions are how you make any single new repo legible. Together they are the most portable thing in this survey — they outlast any specific framework or paper, because the structure of the field changes more slowly than its surface.</p>
+      </section>
+
       <section id="open">
         <h2>Open questions at the systems–theory boundary</h2>
 
@@ -1649,7 +2272,10 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
       <li><a href="#megatron">Megatron-LM</a></li>
       <li><a href="#quantization">Quantization</a></li>
       <li><a href="#multi-turn">Multi-turn agentic RL</a></li>
+      <li><a href="#slime-pipeline">slime · upstream framework</a></li>
       <li><a href="#miles-pipeline">Miles · DeepSeek-V3</a></li>
+      <li><a href="#verl-pipeline">verl · HybridFlow</a></li>
+      <li><a href="#deepseek-v4">DeepSeek V4 · OPD</a></li>
       <li><a href="#recent">Recent advances</a></li>
       <li><a href="#patterns">Design patterns</a></li>
       <li><a href="#code">Reading real code</a></li>
@@ -1658,6 +2284,7 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
       <li><a href="#scaling">Scaling chain</a></li>
       <li><a href="#pitfalls">Pitfalls</a></li>
       <li><a href="#checklist">Researcher's checklist</a></li>
+      <li><a href="#reading-plan">19-repo reading plan</a></li>
       <li><a href="#open">Open questions</a></li>
       <li><a href="#reading">Reading list</a></li>
     </ul>

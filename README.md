@@ -28,7 +28,10 @@ The article is structured as a single long-form blog post. Section headings:
 - **The training backbone: Megatron-LM** — 5D parallelism (TP × PP × DP × EP × CP)
 - **Quantization and the numerical-alignment problem** — FP8, INT4, MXFP4; the MoE routing divergence
 - **Multi-turn agentic RL — unifying VLM and LLM from first principles** — the rollout loop, `BaseInteractionEnv`, the dummy-messages + delta tokens trick (bounded context growth), multimodal tensor merge (O(n²) → O(n))
-- **Engineering case study — Miles' DeepSeek-V3 RL pipeline** — the 3-module decoupling and the 5-stage pipeline (`run_deepseek.py` walkthrough)
+- **Engineering case study — slime, the clean upstream framework** — same 5-phase loop as Miles, synchronous Ray controller, three-module architecture, OPD as additive KL penalty, ServerGroup for prefill/decode disaggregation, six interface contracts
+- **Engineering case study — Miles' DeepSeek-V3 RL pipeline** — the 3-module decoupling, the 5-stage pipeline, six engineering invariants, two weight-sync paths, staleness corrections, seven brittle problems made systematic
+- **Engineering case study — verl, the HybridFlow programming model** — control flow vs computation flow, DataProto envelope, WorkerGroup dispatch, RayPPOTrainer with explicit GRPO uid invariant, sleep_level 1 vs 2, CheckpointEngine as transport functor
+- **Engineering case study — DeepSeek V4's post-training infrastructure** — multi-teacher full-vocab OPD, FP4 (MXFP4) QAT with lossless FP4→FP8 dequant, token-granular WAL with length-bias correctness, DSec agentic sandbox
 - **Recent advances from the SGLang RL team** — INT4 QAT (Kimi K2-Thinking style), unified VLM/LLM multi-turn, Rollout Router Replay, full-flow FP8, speculative decoding in RL
 - **Reading real code** — verl's `fit()` loop and AReaL's async pattern
 - **The framework landscape** — 9 frameworks on 5 axes
@@ -39,9 +42,9 @@ The article is structured as a single long-form blog post. Section headings:
 
 ---
 
-## Eight SVG diagrams
+## Nine SVG diagrams
 
-The survey ships eight SVG diagrams that visualize the design principles. They live in [`diagrams/`](diagrams/).
+The survey ships nine SVG diagrams that visualize the design principles. They live in [`diagrams/`](diagrams/).
 
 | # | File | Section | What it visualizes |
 |---|------|---------|--------------------|
@@ -53,6 +56,7 @@ The survey ships eight SVG diagrams that visualize the design principles. They l
 | 6 | [`06-scaling-chain.svg`](diagrams/06-scaling-chain.svg) | The scaling chain | What breaks at 8 → 10K GPUs |
 | 7 | [`07-multi-turn-rollout.svg`](diagrams/07-multi-turn-rollout.svg) | Multi-turn agentic RL | The turn loop · loss-mask 1/0 split · sample ↔ weight sync |
 | 8 | [`08-miles-architecture.svg`](diagrams/08-miles-architecture.svg) | Miles · DeepSeek-V3 | Three-module decoupling + 5-stage pipeline |
+| 9 | [`09-verl-hybridflow.svg`](diagrams/09-verl-hybridflow.svg) | verl · HybridFlow | Single controller + three worker groups, dispatch / collect, DataProto flow |
 
 ---
 
