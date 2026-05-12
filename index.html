@@ -558,6 +558,7 @@
   <div class="nav-heading">Case studies</div>
   <ul>
     <li><a href="#multi-turn" class="nav-link">Multi-turn agentic RL</a></li>
+    <li><a href="#slime-pipeline" class="nav-link">slime · upstream framework</a></li>
     <li><a href="#miles-pipeline" class="nav-link">Miles · DeepSeek-V3</a></li>
     <li><a href="#deepseek-v4" class="nav-link">DeepSeek V4 · OPD-heavy</a></li>
     <li><a href="#recent" class="nav-link">Recent advances</a></li>
@@ -585,11 +586,11 @@
       <header>
         <div class="eyebrow">An engineering survey · for the mathematically inclined</div>
         <h1>RL Infrastructure for the Mathematically Inclined</h1>
-        <p class="subtitle">A field survey of reinforcement-learning post-training systems — six engineering primitives, three kernel-level DSLs, the training backbone, the quantization problem, three production case studies (Miles · DeepSeek V4 · slime OPD), six recurring design patterns, a researcher's checklist, and open questions at the systems–theory boundary. Written for mathematicians and RL theorists who want to read the source code of <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a>, <a href="https://github.com/triton-lang/triton">Triton</a> and recognize what's mathematically interesting about the engineering choices.</p>
+        <p class="subtitle">A field survey of reinforcement-learning post-training systems — six engineering primitives, three kernel-level DSLs, the training backbone, the quantization problem, four production case studies (slime · Miles · DeepSeek V4 · multi-turn agentic), six recurring design patterns, a researcher's checklist, a 19-repo reading plan, and open questions at the systems–theory boundary. Written for mathematicians and RL theorists who want to read the source code of <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a>, <a href="https://github.com/triton-lang/triton">Triton</a> and recognize what's mathematically interesting about the engineering choices.</p>
         <div class="byline">
-          <span>~75 min read</span>
+          <span>~85 min read</span>
           <span>·</span>
-          <span>20 repos surveyed · 8 diagrams · 12+ code excerpts</span>
+          <span>20 repos surveyed · 8 diagrams · 14+ code excerpts</span>
           <span>·</span>
           <span>6 design patterns · 9-question checklist · 19-repo reading plan</span>
         </div>
@@ -1097,10 +1098,164 @@ obs_ids = encode(full)[trim:]   # delta tokens only</code></pre>
         </aside>
       </section>
 
+      <section id="slime-pipeline">
+        <h2>Engineering case study — slime, the clean upstream framework</h2>
+
+        <p>Before Miles became Miles, there was <a href="https://github.com/THUDM/slime">slime</a> — the SGLang-native post-training framework that Miles forked. slime is the RL framework behind <strong>GLM-5.1, GLM-5, GLM-4.7, GLM-4.6, and GLM-4.5</strong>. Where Miles bets on MoE production hardening (low precision, R3 routing replay, fault tolerance, weight-version checks), slime bets on something different: <strong>clean interface boundaries</strong>. The smallest framework that gets Megatron, SGLang, and Ray to cooperate, with extension points for everything else.</p>
+
+        <p>Reading slime alongside Miles is the cleanest way to learn what's essential in an RL framework and what's production glue. Miles teaches you what large-scale stability costs; slime teaches you what the framework actually has to do. If you only read one case study to understand the post-training skeleton, read this one. If you only deploy one framework at trillion-parameter scale, deploy Miles.</p>
+
+        <h3>Same five phases, different controller style</h3>
+
+        <p>slime's <code>train.py</code> runs the same five-phase loop as Miles — rollout → train → save → sync → eval — but the controller idiom is different. Miles uses <code>asyncio</code> with <code>await</code> on every cross-actor call. slime uses Ray <code>ObjectRef</code>s with synchronous <code>ray.get</code>. The trade is straightforward:</p>
+
+        <table>
+          <thead><tr><th>Style</th><th>Reads like</th><th>Pro</th><th>Con</th></tr></thead>
+          <tbody>
+            <tr><td>Miles · asyncio</td><td>concurrent Python</td><td>natural overlap of independent tasks</td><td>steeper if you've never read async code</td></tr>
+            <tr><td>slime · ray.get</td><td>a script, one phase at a time</td><td>reads top-to-bottom, debuggable</td><td>harder to overlap critic and actor training</td></tr>
+          </tbody>
+        </table>
+
+        <p>Both work. The synchronous controller is easier to read end-to-end — which is part of why slime is a better starting point for a theorist. The async controller is easier to extend with overlapping computation — which is part of why Miles forked when it needed more concurrency knobs.</p>
+
+        <p>The one place slime <em>does</em> use refs to overlap work is critic-actor coupling. When a critic is present, slime calls <code>critic.async_train()</code> first (returning Ray refs), then passes those refs as <code>external_data=value_refs</code> into <code>actor.async_train()</code>. The actor only needs values when it computes the policy loss, so this overlap is essentially free — the critic computes while the actor sets up.</p>
+
+        <h3>The three-module architecture, made visible</h3>
+
+        <p>slime's README states the architecture in three boxes: <em>training (Megatron) → data buffer → rollout (SGLang + router)</em>. The training module reads from the buffer; the rollout module writes to it; the buffer manages prompts, samples, and custom data generation.</p>
+
+        <p>This is the same skeleton every framework in this survey instantiates. What's different about slime is that the abstraction is visible in the directory layout: <code>slime/ray/</code> for orchestration, <code>slime/backends/megatron_utils/</code> for training, <code>slime/backends/sglang_utils/</code> for rollout, <code>slime/rollout/</code> for the rollout-function library. The user-supplied path flags (<code>--rollout-function-path</code>, <code>--custom-generate-function-path</code>, and friends) make the extension points equally visible.</p>
+
+        <h3>OPD as a first-class feature — two teacher modes</h3>
+
+        <p>This is slime's most distinctive contribution to the open-source ecosystem, and the reason the V4 case study (next section) can reference a clean reference implementation. slime ships <strong>On-Policy Distillation</strong> as a built-in mode, with two teacher placements:</p>
+
+        <ul>
+          <li><strong><code>--opd-type sglang</code></strong>: the teacher runs as an <em>external SGLang server</em>. The teacher receives the student's sampled tokens, sets <code>max_new_tokens=0</code> (no generation), and returns <code>input_token_logprobs</code> — i.e. the teacher's score of the student's trajectory. Use this when the teacher has a different architecture from the student, or is too large to fit alongside the student in training memory.</li>
+          <li><strong><code>--opd-type megatron</code></strong>: the teacher is loaded directly into Megatron as a backup model tag (alongside <code>actor</code>, <code>ref</code>, <code>old_actor</code>). The teacher's logprobs are computed in the training forward pass. Use this when the teacher and student have the same architecture and you can afford the memory.</li>
+        </ul>
+
+        <p>The mathematically interesting choice is <strong>how OPD enters the loss</strong>. slime treats it as an additive KL penalty on the advantage, not a separate estimator:</p>
+
+        <blockquote class="pull">
+          advantage' = advantage − λ · ( log π<sub>student</sub>(a|s) − log π<sub>teacher</sub>(a|s) )
+          <cite>— slime's <code>apply_opd_kl_to_advantages()</code> in <code>backends/megatron_utils/loss.py</code></cite>
+        </blockquote>
+
+        <p>Two facts fall out. First, if the task reward is zero, the second term dominates and OPD becomes pure teacher imitation via reverse KL. Second, if the task reward is non-zero, OPD acts as a regularizer that pulls the student toward the teacher's distribution while still letting RL signal drive learning. This is what slime's README means by "OPD is orthogonal to advantage estimators" — you can layer it on top of GRPO, PPO, REINFORCE++, or any other advantage estimator by modifying the advantage rather than the loss-function shape.</p>
+
+        <p>Once you see this, DeepSeek V4's full-vocabulary multi-teacher OPD (the next case study) reads as <em>the same idea scaled up</em>: ten or more teachers instead of one, full-vocabulary KL instead of token-level KL, with engineering for trillion-parameter teacher scheduling. The objective is the same family; the engineering complexity is much larger.</p>
+
+        <h3>The custom-generate escape hatch</h3>
+
+        <p>slime's most important design choice is <strong>what it deliberately does not include</strong>. There is no built-in multi-turn agent loop, no hardcoded tool-use environment, no special-cased web-search rollout, no VLM observation encoder baked into the core. Instead, slime exposes extension points and gets out of the way:</p>
+
+        <ul>
+          <li><code>--rollout-function-path</code> — replace the entire rollout function</li>
+          <li><code>--custom-generate-function-path</code> — replace just the per-sample <code>generate()</code></li>
+          <li><code>--custom-reward-post-process-path</code> — custom reward normalization</li>
+          <li><code>--custom-convert-samples-to-train-data-path</code> — custom train-batch shaping</li>
+          <li><code>--buffer-filter-path</code> — custom dynamic-sampling filter</li>
+        </ul>
+
+        <p>The default <code>generate()</code> in <code>slime/rollout/sglang_rollout.py</code> handles single-turn generation with optional multimodal inputs. To do multi-turn agents, you write a <code>generate()</code> that loops turns. To do tool-use, the same. To do VLM observations, the same. The contract is small and stable: take a <code>sample</code>, return a populated <code>sample</code> with tokens, logprobs, and optional routed-experts.</p>
+
+        <p>This is slime's design philosophy: <em>the framework guarantees the data contract; the user owns the environment</em>. It's the opposite of building a universal agent framework that tries to anticipate every tool integration. Instead it gives you the small piece of plumbing that lets your own environment plug in. For research that touches new domains often (search, code execution, browser automation, robots), this is the better trade.</p>
+
+        <h3>ServerGroup — the SGLang serving abstraction</h3>
+
+        <p>slime introduces an abstraction Miles doesn't expose as cleanly: a <strong>ServerGroup</strong> is a set of homogeneous SGLang engines, and a <strong>RolloutServer</strong> can contain multiple ServerGroups. This matters for <em>prefill/decode disaggregation</em>, where prefill runs on one group of engines (with different SGLang flags optimized for compute-heavy prefill) and decode runs on another (optimized for memory-bound decode). Worker types are explicit: <code>"regular"</code>, <code>"prefill"</code>, <code>"decode"</code>, or <code>"placeholder"</code>.</p>
+
+        <p>If you've ever wondered how a research framework handles serving topology more complex than "one SGLang engine per rollout GPU," ServerGroup is a good reference. The same abstraction supports encoder-only servers (for reward models, embeddings, or anything that doesn't need autoregressive decode) by selecting a different SGLang entry point. By default, slime turns on DeepGEMM JIT precompile, fast warmup, memory-saver CUDA graph, and metrics scraping — all sensible defaults for training-side rollout where you want determinism and visibility.</p>
+
+        <h3>Routing replay as explicit stages</h3>
+
+        <p>R3 (routing replay, the invariant that lets MoE training stay numerically aligned with rollout) is in slime too, but the staging is explicit. An environment variable <code>ROUTING_REPLAY_STAGE</code> takes four values:</p>
+
+        <ul>
+          <li><code>fallthrough</code> — normal MoE routing, ignore replay records</li>
+          <li><code>record</code> — record routing decisions but use them too</li>
+          <li><code>replay_forward</code> — replace routing decisions with replay records in forward</li>
+          <li><code>replay_backward</code> — replace routing decisions in backward</li>
+        </ul>
+
+        <p>The training loop sets <code>replay_backward</code> during <code>actor.train_actor()</code> so that gradients flow through the experts the rollout actually used. This is the same fixed-point invariant Miles enforces — <em>routing(x, θ, rollout) ≡ routing(x, θ, training)</em> by replay — but slime exposes the state machine as a small environment-controlled enum. Reading the source, you can pinpoint where each stage takes effect.</p>
+
+        <h3>slime vs Miles — what each is good for</h3>
+
+        <p>A side-by-side comparison helps locate each framework in your mental map.</p>
+
+        <table>
+          <thead><tr><th>Dimension</th><th>slime</th><th>Miles</th></tr></thead>
+          <tbody>
+            <tr><td>Positioning</td><td>Clean upstream framework</td><td>Production fork with hardening</td></tr>
+            <tr><td>Controller style</td><td>Synchronous Ray ObjectRefs</td><td><code>asyncio</code></td></tr>
+            <tr><td>Training backend</td><td>Megatron-LM</td><td>Megatron + experimental FSDP</td></tr>
+            <tr><td>Weight-sync paths</td><td>tensor (colocated) + distributed broadcast</td><td>+ P2P + LoRA variants + quant variants</td></tr>
+            <tr><td>OPD</td><td>First-class with two teacher modes</td><td>Supported, foregrounded less</td></tr>
+            <tr><td>Routing replay</td><td>Env-var stage machine, 4 stages</td><td>Generalized replay manager system</td></tr>
+            <tr><td>Rollout extensibility</td><td>Strong — many <code>--custom-*-path</code> flags</td><td>Inherited from slime, with more knobs</td></tr>
+            <tr><td>Fault tolerance</td><td>Rollout health monitor + recovery</td><td>Heavier recovery, version checks, retries</td></tr>
+            <tr><td>SGLang integration</td><td>PD disagg, encoder-only, metrics</td><td>+ Miles router, low-precision integration</td></tr>
+            <tr><td>Best for</td><td>Reading and learning, GLM-scale RL</td><td>DeepSeek-V3-scale MoE production runs</td></tr>
+          </tbody>
+        </table>
+
+        <p>One sentence summary: <strong>slime is the cleanest open-source framework to read end-to-end; Miles is the heaviest production-ready system to deploy at trillion-parameter scale</strong>. Read slime first if you want to understand how an RL framework works. Read Miles after if you want to understand what it costs to make one survive.</p>
+
+        <h3>What slime actually solves — six interface contracts</h3>
+
+        <p>The honest summary of slime's contribution is not an algorithm and not a system optimization. It's six interface contracts, each defined narrowly enough to be reusable:</p>
+
+        <ol>
+          <li><strong>Sample contract</strong> — what fields a rollout sample must carry: tokens, response_lengths, rewards, loss_masks, rollout_log_probs, plus optional rollout_routed_experts (R3), teacher_log_probs (OPD), multimodal_train_inputs (VLM).</li>
+          <li><strong>Train-data conversion contract</strong> — how samples become a training batch, with per-DP-rank split that can token-balance (not sample-balance) when response lengths have long tails.</li>
+          <li><strong>Recompute contract</strong> — what the trainer recomputes (current logprobs, ref logprobs, optional teacher logprobs) versus what it trusts from rollout (rollout logprobs, routed experts).</li>
+          <li><strong>Weight-sync contract</strong> — pause generation, flush cache, sync, resume; weight version is monotonic; cache invalidation always follows sync.</li>
+          <li><strong>Custom-generate contract</strong> — user-supplied <code>generate(args, sample, sampling_params)</code> can replace the default and plug straight into the rollout function.</li>
+          <li><strong>OPD contract</strong> — teacher logprobs are a first-class sample field; the OPD KL penalty modifies advantage rather than replacing the loss-function shape.</li>
+        </ol>
+
+        <p>These six contracts are why slime is portable. Adding a new estimator, a new environment, a new teacher mode, a new multimodal input type — none of these requires changing the framework core. Each requires implementing a function that satisfies one of these six contracts. <em>The framework is the contracts; everything else is the user's.</em></p>
+
+        <h3>Recommended reading order for slime's source</h3>
+
+        <p>Following the same outside-in pattern as the Miles reading order. Each file builds on the last; jumping straight to the middle usually costs a day.</p>
+
+        <ol>
+          <li><code>README.md</code> — confirm the three-module architecture and skim <code>examples/</code> to see the supported recipes.</li>
+          <li><code>train.py</code> — the synchronous Ray controller version of the five-phase loop.</li>
+          <li><code>slime/ray/placement_group.py</code> — Ray bundle layout, colocate vs split, critic-reuses-actor-pool.</li>
+          <li><code>slime/ray/rollout.py</code> — <code>ServerGroup</code>, <code>RolloutServer</code>, <code>RolloutManager</code>, train-data conversion, group reward normalization.</li>
+          <li><code>slime/rollout/sglang_rollout.py</code> — default per-sample generate, dynamic filtering, partial rollout, multimodal prompt handling, custom-function dispatch.</li>
+          <li><code>slime/backends/sglang_utils/sglang_engine.py</code> — SGLang HTTP wrapper, PD disaggregation, memory and weight endpoints.</li>
+          <li><code>slime/backends/megatron_utils/actor.py</code> — actor / ref / teacher / old_actor backup tags, <code>train_actor()</code>, <code>fill_routing_replay()</code>.</li>
+          <li><code>slime/backends/megatron_utils/update_weight/update_weight_from_tensor.py</code> — colocated tensor path with FlattenedTensorBucket.</li>
+          <li><code>slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py</code> — distributed NCCL path with separate dense/expert (TP + EP) gathers.</li>
+          <li><code>slime/backends/megatron_utils/loss.py</code> — response-aligned logprobs, advantage estimators, <code>apply_opd_kl_to_advantages()</code>, TIS.</li>
+          <li><code>examples/on_policy_distillation/README.md</code> + <code>slime/rollout/on_policy_distillation.py</code> — the two-teacher-mode OPD reference, with the four key flags.</li>
+        </ol>
+
+        <p>By step 11 you have a working mental model of the cleanest open-source RL post-training framework. From there, reading Miles is incremental: you're learning what was <em>hardened</em>, not what is. And reading DeepSeek V4's report (next case study) becomes a comparison rather than a deep dive — you already know what OPD does, so V4 reads as "what changes when you do this with ten teachers at trillion-parameter scale."</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — slime</div>
+          <ul>
+            <li><a href="https://github.com/THUDM/slime" target="_blank">THUDM/slime</a> — the repo</li>
+            <li><a href="https://github.com/THUDM/slime/blob/main/train.py" target="_blank"><code>train.py</code></a> — the synchronous five-phase loop</li>
+            <li><a href="https://github.com/THUDM/slime/blob/main/slime/ray/rollout.py" target="_blank"><code>slime/ray/rollout.py</code></a> — <code>ServerGroup</code> / <code>RolloutManager</code> / train-data conversion</li>
+            <li><a href="https://github.com/THUDM/slime/tree/main/examples/on_policy_distillation" target="_blank"><code>examples/on_policy_distillation/</code></a> — Qwen3-8B student aligning to Qwen3-32B teacher, runnable</li>
+            <li><a href="https://github.com/THUDM/slime/blob/main/examples/on_policy_distillation/README.md" target="_blank">OPD README</a> — flags <code>--use-opd</code>, <code>--opd-type</code>, <code>--opd-kl-coef</code>, <code>--opd-teacher-load</code></li>
+            <li><a href="https://github.com/THUDM/slime/blob/main/slime/backends/megatron_utils/loss.py" target="_blank"><code>backends/megatron_utils/loss.py</code></a> — where <code>apply_opd_kl_to_advantages()</code> lives</li>
+          </ul>
+        </div>
+      </section>
+
       <section id="miles-pipeline">
         <h2>Engineering case study — Miles' DeepSeek-V3 RL pipeline</h2>
 
-        <p><a href="https://github.com/radixark/miles">Miles</a> is the most concrete case study of how the primitives above compose into a production pipeline. Built on slime, powered by Megatron-LM + SGLang, orchestrated by Ray. The repo's <code>scripts/run_deepseek.py</code> is a single Typer command that takes a DeepSeek-V3 model from HuggingFace and runs full GRPO training on AIME-2024 or GSM8K. Reading it teaches you what the actual engineering glue looks like.</p>
+        <p>If <a href="#slime-pipeline">slime</a> is the clean upstream framework, <a href="https://github.com/radixark/miles">Miles</a> is the production fork that hardened it for DeepSeek-V3-scale MoE training. Miles is built on slime, powered by Megatron-LM + SGLang, orchestrated by Ray. The repo's <code>scripts/run_deepseek.py</code> is a single Typer command that takes a DeepSeek-V3 model from HuggingFace and runs full GRPO training on AIME-2024 or GSM8K. Reading Miles is reading what slime needed to look like when it had to survive a week-long trillion-parameter run.</p>
 
         <figure>
           <img src="diagrams/08-miles-architecture.svg" alt="Miles three-module architecture (Training, Data Buffer, Rollout) plus the 5-stage DeepSeek-V3 pipeline: download, FP8→BF16, HF→Megatron, rsync, ray job submit.">
@@ -1906,6 +2061,7 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
       <li><a href="#megatron">Megatron-LM</a></li>
       <li><a href="#quantization">Quantization</a></li>
       <li><a href="#multi-turn">Multi-turn agentic RL</a></li>
+      <li><a href="#slime-pipeline">slime · upstream framework</a></li>
       <li><a href="#miles-pipeline">Miles · DeepSeek-V3</a></li>
       <li><a href="#deepseek-v4">DeepSeek V4 · OPD</a></li>
       <li><a href="#recent">Recent advances</a></li>
