@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>RL Infra — A Course | 7 Acts, 24 Lessons</title>
-<meta name="description" content="A pedagogical course on reinforcement-learning post-training infrastructure. 24 lessons across 7 acts. SVG diagrams + annotated code + study resources.">
+<title>RL Infrastructure for the Mathematically Inclined — A Field Survey</title>
+<meta name="description" content="A survey of reinforcement-learning post-training infrastructure for mathematicians and RL theorists. Six engineering primitives, three kernel-level DSLs, Megatron-LM, quantization, and 9 production frameworks compared.">
 <style>
   :root {
     --purple: #7253ed;
@@ -25,17 +25,18 @@
     --c-areal: #0891b2;
 
     --text: #27262b;
-    --text-body: #5c5962;
+    --text-body: #4a4852;
     --text-muted: #959396;
     --bg: #ffffff;
-    --bg-soft: #f5f6fa;
+    --bg-soft: #f7f7fa;
     --bg-soft-2: #ecebed;
     --border: #e6e1e8;
-    --header-bg: #252b2e;
+    --header-bg: #1c1d23;
 
-    --sidebar-w: 288px;
-    --header-h: 60px;
+    --sidebar-w: 280px;
+    --header-h: 56px;
 
+    --font-serif: "Charter", "Georgia", "Cambria", "Times New Roman", serif;
     --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     --font-mono: "SFMono-Regular", Menlo, Consolas, monospace;
   }
@@ -45,8 +46,8 @@
     font-family: var(--font-sans);
     color: var(--text-body);
     background: var(--bg);
-    font-size: 15px;
-    line-height: 1.65;
+    font-size: 16px;
+    line-height: 1.72;
     -webkit-font-smoothing: antialiased;
   }
 
@@ -58,58 +59,59 @@
     display: flex; align-items: center;
     padding: 0 24px;
     z-index: 50;
-    border-bottom: 1px solid #1a1f22;
+    border-bottom: 1px solid #0e0f13;
   }
   .site-header .brand {
-    font-weight: 600; font-size: 15px; color: #fff;
+    font-weight: 500; font-size: 14px; color: #e9e6f0;
     text-decoration: none;
     display: flex; align-items: center; gap: 10px;
   }
   .site-header .brand .logo {
-    width: 24px; height: 24px;
+    width: 22px; height: 22px;
     border-radius: 5px;
     background: linear-gradient(135deg, var(--purple), var(--c-skyrl) 50%, var(--c-cosmos));
   }
+  .site-header .brand em { color: #8e8b96; font-style: normal; font-weight: 400; margin-left: 4px; }
   .site-header .aux-nav {
     margin-left: auto;
     display: flex; gap: 14px;
     font-size: 12px;
   }
-  .site-header .aux-nav a { color: #b9b6c2; text-decoration: none; }
+  .site-header .aux-nav a { color: #9d99a5; text-decoration: none; }
   .site-header .aux-nav a:hover { color: #fff; }
 
   .search-bar {
     margin-left: 28px;
-    flex: 0 1 260px;
+    flex: 0 1 240px;
     position: relative;
   }
   .search-bar input {
     width: 100%;
-    background: rgba(255,255,255,.08);
-    border: 1px solid rgba(255,255,255,.1);
+    background: rgba(255,255,255,.06);
+    border: 1px solid rgba(255,255,255,.08);
     color: #fff;
     border-radius: 4px;
-    padding: 6px 12px 6px 36px;
-    font-size: 13px;
+    padding: 5px 12px 5px 32px;
+    font-size: 12px;
     font-family: var(--font-sans);
     outline: none;
   }
-  .search-bar input::placeholder { color: #8b8893; }
-  .search-bar input:focus { border-color: var(--purple); background: rgba(255,255,255,.12); }
+  .search-bar input::placeholder { color: #6c6975; }
+  .search-bar input:focus { border-color: var(--purple); background: rgba(255,255,255,.1); }
   .search-bar::before {
-    content: ''; position: absolute; left: 12px; top: 50%;
-    transform: translateY(-50%); width: 14px; height: 14px;
-    background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%23b9b6c2'><path d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z'/></svg>") no-repeat center;
+    content: ''; position: absolute; left: 10px; top: 50%;
+    transform: translateY(-50%); width: 13px; height: 13px;
+    background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%236c6975'><path d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z'/></svg>") no-repeat center;
   }
 
   .site-nav {
     position: fixed;
     top: var(--header-h); left: 0; bottom: 0;
     width: var(--sidebar-w);
-    background: var(--bg-soft);
+    background: #fafafc;
     border-right: 1px solid var(--border);
     overflow-y: auto;
-    padding: 24px 0 32px;
+    padding: 28px 0 32px;
   }
   .site-nav .nav-heading {
     font-size: 10px;
@@ -117,17 +119,7 @@
     text-transform: uppercase;
     letter-spacing: 0.1em;
     color: var(--text-muted);
-    padding: 8px 28px 4px;
-    margin-top: 14px;
-  }
-  .site-nav .nav-heading-act {
-    background: var(--purple-soft);
-    color: var(--purple);
-    margin: 14px 12px 4px;
-    padding: 6px 16px;
-    border-radius: 4px;
-    font-size: 11px;
-    border-left: 3px solid var(--purple);
+    padding: 14px 28px 4px;
   }
   .site-nav ul { list-style: none; }
   .site-nav a {
@@ -141,19 +133,13 @@
     line-height: 1.45;
   }
   .site-nav a:hover {
-    background: linear-gradient(-90deg, rgba(234,236,244,1) 0%, rgba(234,236,244,.6) 80%, transparent 100%);
+    background: rgba(114,83,237,0.05);
     color: var(--purple-dark);
   }
   .site-nav a.active {
     color: var(--purple-dark);
     font-weight: 600;
     border-left-color: var(--purple);
-  }
-  .site-nav a .lesson-n {
-    color: var(--text-muted);
-    font-size: 11px;
-    margin-right: 6px;
-    font-variant-numeric: tabular-nums;
   }
 
   .main-wrap {
@@ -164,14 +150,14 @@
   }
   main {
     flex: 1;
-    max-width: 880px;
-    padding: 40px 56px 96px;
+    max-width: 760px;
+    padding: 56px 64px 96px;
     min-width: 0;
   }
   .toc-rail {
     width: 220px;
     flex-shrink: 0;
-    padding: 40px 24px;
+    padding: 56px 24px;
     border-left: 1px solid var(--border);
     position: sticky;
     top: var(--header-h);
@@ -196,45 +182,139 @@
   }
   .toc-rail a:hover { color: var(--purple); }
 
-  h1, h2, h3, h4 {
-    color: var(--text);
-    font-weight: 500;
-    line-height: 1.25;
-    margin: 0 0 0.5em;
+  article {
+    font-family: var(--font-serif);
+    font-size: 17px;
+    line-height: 1.75;
+    color: var(--text-body);
   }
-  h1 { font-size: 38px; font-weight: 300; margin-bottom: 12px; }
-  h2 { font-size: 26px; font-weight: 500; margin-top: 16px; }
-  h3 { font-size: 18px; margin-top: 28px; font-weight: 600; }
-  h4 { font-size: 14px; margin-top: 18px; color: var(--text); font-weight: 600; }
-  p { margin-bottom: 14px; }
 
-  a { color: var(--purple); text-decoration: none; }
-  a:hover { text-decoration: underline; }
+  article > header {
+    margin-bottom: 48px;
+    padding-bottom: 28px;
+    border-bottom: 1px solid var(--border);
+  }
+  article > header .eyebrow {
+    font-family: var(--font-sans);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--purple);
+    margin-bottom: 14px;
+  }
+  article > header h1 {
+    font-family: var(--font-serif);
+    font-size: 38px;
+    font-weight: 500;
+    line-height: 1.2;
+    color: var(--text);
+    margin-bottom: 16px;
+    letter-spacing: -0.01em;
+  }
+  article > header .subtitle {
+    font-family: var(--font-serif);
+    font-size: 20px;
+    line-height: 1.45;
+    color: var(--text-muted);
+    font-weight: 400;
+    margin-bottom: 18px;
+  }
+  article > header .byline {
+    font-family: var(--font-sans);
+    font-size: 13px;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    flex-wrap: wrap;
+  }
 
-  code {
+  article h2 {
+    font-family: var(--font-serif);
+    font-size: 28px;
+    font-weight: 500;
+    color: var(--text);
+    margin: 56px 0 16px;
+    line-height: 1.25;
+    letter-spacing: -0.005em;
+  }
+  article h3 {
+    font-family: var(--font-serif);
+    font-size: 22px;
+    font-weight: 500;
+    color: var(--text);
+    margin: 36px 0 12px;
+    line-height: 1.3;
+  }
+  article h4 {
+    font-family: var(--font-sans);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 24px 0 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  article p {
+    margin-bottom: 18px;
+  }
+  article p + p { text-indent: 0; }
+
+  article ul, article ol {
+    margin: 0 0 18px 26px;
+    padding: 0;
+  }
+  article li { margin-bottom: 6px; }
+
+  article a {
+    color: var(--purple);
+    text-decoration: none;
+    border-bottom: 1px solid rgba(114,83,237,0.25);
+    transition: border-color .15s;
+  }
+  article a:hover {
+    border-bottom-color: var(--purple);
+    text-decoration: none;
+  }
+
+  article code {
     font-family: var(--font-mono);
-    font-size: 0.85em;
+    font-size: 0.86em;
     background: var(--bg-soft);
     color: var(--purple-dark);
     padding: 2px 6px;
     border-radius: 3px;
+    border-bottom: none;
   }
+  article a code { color: inherit; }
+
   pre {
-    background: var(--bg-soft);
+    background: #fafafc;
     border: 1px solid var(--border);
     border-radius: 4px;
-    padding: 14px 16px;
+    padding: 14px 18px;
     font-family: var(--font-mono);
     font-size: 13px;
     line-height: 1.55;
     overflow-x: auto;
-    margin-bottom: 16px;
+    margin: 0 0 22px;
   }
-  pre code { background: none; padding: 0; color: var(--text); }
+  pre code {
+    background: none;
+    padding: 0;
+    color: var(--text);
+    font-size: 13px;
+    border: none;
+  }
+  article pre code { font-size: 13px; }
 
   table {
-    width: 100%; border-collapse: collapse;
-    margin: 16px 0 22px; font-size: 13px;
+    width: 100%;
+    border-collapse: collapse;
+    margin: 18px 0 24px;
+    font-family: var(--font-sans);
+    font-size: 13px;
   }
   th {
     background: var(--bg-soft);
@@ -248,37 +328,46 @@
     padding: 10px 14px;
     border-bottom: 1px solid var(--border);
     vertical-align: top;
+    line-height: 1.55;
   }
   tr:hover td { background: rgba(245,242,255,.4); }
 
-  .hero {
-    margin-bottom: 40px;
-    padding: 32px 0 24px;
-    border-bottom: 1px solid var(--border);
+  /* Pull quotes (sidebar/inline emphasis) */
+  blockquote.pull {
+    margin: 28px 0;
+    padding: 18px 24px;
+    border-left: 3px solid var(--purple);
+    background: var(--purple-soft);
+    font-family: var(--font-serif);
+    font-size: 18px;
+    line-height: 1.55;
+    color: var(--text);
+    font-style: italic;
   }
-  .hero .lead {
-    font-size: 17px; color: var(--text-body);
-    max-width: 720px; line-height: 1.6;
-  }
-  .meta-row {
-    display: flex; flex-wrap: wrap;
-    gap: 8px; margin-top: 18px;
+  blockquote.pull cite {
+    display: block;
+    margin-top: 10px;
+    font-family: var(--font-sans);
+    font-size: 12px;
+    color: var(--text-muted);
+    font-style: normal;
   }
 
   .label {
     display: inline-block;
-    padding: 3px 10px;
+    padding: 2px 9px;
     border-radius: 12px;
+    font-family: var(--font-sans);
     font-size: 11px;
     font-weight: 600;
     line-height: 1.4;
     background: var(--bg-soft-2);
     color: var(--text);
+    border-bottom: none;
   }
   .label-purple { background: var(--c-miles); color: #fff; }
   .label-blue   { background: var(--blue); color: #fff; }
   .label-green  { background: var(--c-slime); color: #fff; }
-  .label-amber  { background: #d4a800; color: #27262b; }
   .label-orange { background: var(--c-sglang); color: #fff; }
   .label-sky    { background: var(--c-skyrl); color: #fff; }
   .label-nv     { background: var(--c-cosmos); color: #fff; }
@@ -292,110 +381,47 @@
     color: var(--text-body);
   }
 
-  .act-intro {
-    margin: 56px 0 28px;
-    padding: 24px 28px;
-    background: linear-gradient(135deg, var(--purple-soft) 0%, #ffffff 60%);
-    border-left: 4px solid var(--purple);
-    border-radius: 0 6px 6px 0;
+  /* Figures with SVG diagrams */
+  figure {
+    margin: 28px 0 32px;
   }
-  .act-label {
-    display: inline-block;
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.16em;
-    color: var(--purple);
-    margin-bottom: 6px;
-  }
-  .act-intro h2 {
-    font-size: 26px;
-    color: var(--text);
-    margin: 0 0 10px;
-    font-weight: 500;
-  }
-  .act-intro p {
-    font-size: 14px;
-    color: var(--text-body);
-    margin: 0;
-    line-height: 1.6;
-    max-width: 660px;
-  }
-
-  .lesson {
-    margin: 36px 0;
-    scroll-margin-top: 80px;
-  }
-  .lesson-header {
-    margin-bottom: 14px;
-  }
-  .lesson-number {
-    display: inline-block;
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--purple);
-    background: var(--purple-soft);
-    padding: 3px 10px;
-    border-radius: 12px;
-    letter-spacing: 0.06em;
-  }
-  .lesson-header h2 {
-    font-size: 24px;
-    font-weight: 500;
-    margin: 8px 0 4px;
-    color: var(--text);
-  }
-  .lesson-q {
-    font-size: 15px;
-    color: var(--text-muted);
-    font-style: italic;
-    margin-bottom: 12px;
-  }
-  .lesson-transition {
-    margin-top: 22px;
-    padding: 10px 14px;
-    background: var(--bg-soft);
-    border-left: 3px solid var(--purple);
-    border-radius: 0 3px 3px 0;
-    font-size: 13px;
-    color: var(--text-body);
-  }
-  .lesson-transition em { color: var(--purple); font-style: normal; font-weight: 600; }
-  .lesson-transition a { color: var(--purple); font-weight: 600; }
-
-  .diagram-wrap {
-    margin: 22px 0 26px;
-    padding: 16px;
-    background: #fff;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-  }
-  .diagram-wrap img, .diagram-wrap svg {
+  figure img, figure svg {
     width: 100%;
     height: auto;
     display: block;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+    padding: 12px;
   }
-  .diagram-caption {
+  figcaption {
     margin-top: 10px;
+    font-family: var(--font-sans);
     font-size: 12px;
     color: var(--text-muted);
     text-align: center;
-    font-style: italic;
+    line-height: 1.5;
+  }
+  figcaption .fig-label {
+    font-weight: 600;
+    color: var(--text);
   }
 
-  .callout {
-    border-left: 4px solid var(--purple);
-    background: var(--purple-soft);
-    padding: 14px 18px;
-    margin: 18px 0 22px;
+  /* Aside / callout */
+  aside.note {
+    margin: 24px 0;
+    padding: 16px 20px;
+    background: #fafafc;
+    border-left: 3px solid var(--blue);
     border-radius: 0 4px 4px 0;
+    font-family: var(--font-sans);
     font-size: 14px;
+    line-height: 1.6;
   }
-  .callout.note { border-color: var(--blue); background: #f0f7ff; }
-  .callout.tip  { border-color: var(--green); background: #f0fdf9; }
-  .callout.warn { border-color: var(--red); background: #fff5f5; }
-  .callout strong { color: var(--text); }
+  aside.note.warn { border-left-color: var(--red); background: #fff8f8; }
+  aside.note strong { color: var(--text); }
 
+  /* Source badge above code */
   .source-badge {
     display: inline-flex;
     align-items: center;
@@ -410,6 +436,7 @@
     margin-bottom: -1px;
     text-decoration: none;
     transition: all .15s;
+    border-bottom: 1px solid var(--border);
   }
   .source-badge:hover {
     background: var(--bg-soft);
@@ -419,7 +446,7 @@
   }
   .source-badge::before {
     content: "";
-    width: 14px; height: 14px;
+    width: 13px; height: 13px;
     background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%235c5962'><path d='M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z'/></svg>") no-repeat center;
     flex-shrink: 0;
   }
@@ -427,13 +454,15 @@
   .source-badge .file-meta { color: var(--text-muted); font-size: 11px; margin-left: 6px; }
   pre.with-source { border-top-left-radius: 0; margin-top: 0; }
 
+  /* Study/Further reading lists */
   .study {
-    background: #fff;
+    background: #fdfdff;
     border: 1px solid var(--border);
     border-left: 3px solid var(--blue);
     border-radius: 4px;
-    padding: 14px 18px;
-    margin: 18px 0 22px;
+    padding: 16px 20px;
+    margin: 22px 0 24px;
+    font-family: var(--font-sans);
     font-size: 13px;
   }
   .study-title {
@@ -456,443 +485,186 @@
     color: var(--blue);
     font-weight: 700;
   }
-  .study li a { color: var(--purple); text-decoration: none; }
+  .study li a { color: var(--purple); text-decoration: none; border-bottom: none; }
   .study li a:hover { text-decoration: underline; }
   .study li code { font-size: 11px; background: var(--bg-soft); color: var(--text); }
 
-  .reflect {
-    margin: 18px 0 22px;
-    padding: 12px 16px;
-    background: #fff;
-    border: 1px dashed var(--purple);
-    border-radius: 4px;
-    font-size: 13px;
-  }
-  .reflect-title {
-    font-weight: 600;
-    color: var(--purple-dark);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin-bottom: 6px;
-  }
-
+  /* Footer */
   footer {
-    margin-top: 60px;
-    padding-top: 24px;
+    margin-top: 64px;
+    padding-top: 28px;
     border-top: 1px solid var(--border);
     color: var(--text-muted);
+    font-family: var(--font-sans);
     font-size: 12px;
+    line-height: 1.7;
   }
-  footer a { color: var(--purple); }
-  .edit-this-page {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    margin-top: 12px;
-    padding: 6px 12px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    font-size: 12px;
-    color: var(--text-body);
-    text-decoration: none;
-  }
-  .edit-this-page:hover { border-color: var(--purple); color: var(--purple-dark); }
+  footer a { color: var(--purple); border-bottom: 1px solid rgba(114,83,237,0.25); }
 
+  /* Responsive */
   @media (max-width: 1180px) { .toc-rail { display: none; } }
   @media (max-width: 820px) {
     .site-nav { display: none; }
     .main-wrap { margin-left: 0; }
-    main { padding: 32px 20px; }
+    main { padding: 32px 22px; }
     .search-bar { display: none; }
-    h1 { font-size: 28px; }
-    .lesson-header h2 { font-size: 20px; }
+    article > header h1 { font-size: 30px; }
+    article > header .subtitle { font-size: 17px; }
+    article h2 { font-size: 24px; }
   }
 </style>
 </head>
 <body>
 
 <header class="site-header">
-  <a href="#welcome" class="brand"><span class="logo"></span> RL Infra · A Course</a>
+  <a href="#top" class="brand"><span class="logo"></span> RL Infra Survey <em>· a blog</em></a>
   <div class="search-bar">
-    <input type="search" id="searchBox" placeholder="Search lessons..." />
+    <input type="search" id="searchBox" placeholder="Search this survey..." />
   </div>
   <nav class="aux-nav">
     <a href="https://github.com/chenggong-zhang/RL_infra" target="_blank">Source</a>
-    <a href="https://github.com/just-the-docs/just-the-docs" target="_blank">Template</a>
   </nav>
 </header>
 
 <aside class="site-nav">
-  <div class="nav-heading">Start here</div>
+  <div class="nav-heading">Survey</div>
   <ul>
-    <li><a href="#welcome" class="nav-link active">Welcome</a></li>
-    <li><a href="#roadmap" class="nav-link">Course roadmap</a></li>
+    <li><a href="#top" class="nav-link active">Opening</a></li>
+    <li><a href="#why" class="nav-link">Why this matters to a theorist</a></li>
+    <li><a href="#skeleton" class="nav-link">The skeleton</a></li>
+    <li><a href="#tension" class="nav-link">The central tension</a></li>
   </ul>
 
-  <div class="nav-heading nav-heading-act">Act I — The Question</div>
+  <div class="nav-heading">Engineering primitives</div>
   <ul>
-    <li><a href="#lesson-1" class="nav-link"><span class="lesson-n">L1</span>What does RL infra solve?</a></li>
-    <li><a href="#lesson-2" class="nav-link"><span class="lesson-n">L2</span>Two halves that fight</a></li>
-    <li><a href="#lesson-3" class="nav-link"><span class="lesson-n">L3</span>Why this is harder than it looks</a></li>
+    <li><a href="#hybrid-engine" class="nav-link">Hybrid engine (训推一体)</a></li>
+    <li><a href="#memory" class="nav-link">Memory choreography</a></li>
+    <li><a href="#weight-sync" class="nav-link">Zero-copy weight sync</a></li>
+    <li><a href="#four-paths" class="nav-link">Four update paths</a></li>
+    <li><a href="#radix-grpo" class="nav-link">RadixAttention × GRPO</a></li>
+    <li><a href="#async" class="nav-link">Async &amp; staleness</a></li>
   </ul>
 
-  <div class="nav-heading nav-heading-act">Act II — The Universal Pattern</div>
+  <div class="nav-heading">The layer beneath</div>
   <ul>
-    <li><a href="#lesson-4" class="nav-link"><span class="lesson-n">L4</span>The rollout cycle</a></li>
-    <li><a href="#lesson-5" class="nav-link"><span class="lesson-n">L5</span>The three pillars</a></li>
-    <li><a href="#lesson-6" class="nav-link"><span class="lesson-n">L6</span>One step end-to-end</a></li>
+    <li><a href="#kernels" class="nav-link">CUDA, Triton, TileLang</a></li>
+    <li><a href="#megatron" class="nav-link">Megatron-LM</a></li>
+    <li><a href="#quantization" class="nav-link">Quantization</a></li>
   </ul>
 
-  <div class="nav-heading nav-heading-act">Act III — Engineered Solutions</div>
+  <div class="nav-heading">Putting it together</div>
   <ul>
-    <li><a href="#lesson-7" class="nav-link"><span class="lesson-n">L7</span>The hybrid engine (训推一体)</a></li>
-    <li><a href="#lesson-8" class="nav-link"><span class="lesson-n">L8</span>Memory choreography</a></li>
-    <li><a href="#lesson-9" class="nav-link"><span class="lesson-n">L9</span>The weight-sync handoff</a></li>
-    <li><a href="#lesson-10" class="nav-link"><span class="lesson-n">L10</span>Four update_weights paths</a></li>
-    <li><a href="#lesson-11" class="nav-link"><span class="lesson-n">L11</span>RadixAttention × GRPO</a></li>
-    <li><a href="#lesson-12" class="nav-link"><span class="lesson-n">L12</span>Async &amp; staleness</a></li>
-  </ul>
-
-  <div class="nav-heading nav-heading-act">Act IV — Reading Real Code</div>
-  <ul>
-    <li><a href="#lesson-13" class="nav-link"><span class="lesson-n">L13</span>verl's fit() loop</a></li>
-    <li><a href="#lesson-14" class="nav-link"><span class="lesson-n">L14</span>DataProto + dispatch</a></li>
-    <li><a href="#lesson-15" class="nav-link"><span class="lesson-n">L15</span>AReaL vs OpenRLHF</a></li>
-  </ul>
-
-  <div class="nav-heading nav-heading-act">Act V — Framework Landscape</div>
-  <ul>
-    <li><a href="#lesson-16" class="nav-link"><span class="lesson-n">L16</span>The 5 axes of choice</a></li>
-    <li><a href="#lesson-17" class="nav-link"><span class="lesson-n">L17</span>9 frameworks compared</a></li>
-    <li><a href="#lesson-18" class="nav-link"><span class="lesson-n">L18</span>Family clusters</a></li>
-    <li><a href="#lesson-19" class="nav-link"><span class="lesson-n">L19</span>Tour of the 9</a></li>
-  </ul>
-
-  <div class="nav-heading nav-heading-act">Act VI — Beyond Chat</div>
-  <ul>
-    <li><a href="#lesson-20" class="nav-link"><span class="lesson-n">L20</span>Multi-turn agents</a></li>
-    <li><a href="#lesson-21" class="nav-link"><span class="lesson-n">L21</span>Embodied, VLA, world models</a></li>
-    <li><a href="#lesson-22" class="nav-link"><span class="lesson-n">L22</span>The TPU detour</a></li>
-  </ul>
-
-  <div class="nav-heading nav-heading-act">Act VII — Synthesis</div>
-  <ul>
-    <li><a href="#lesson-23" class="nav-link"><span class="lesson-n">L23</span>The scaling chain</a></li>
-    <li><a href="#lesson-24" class="nav-link"><span class="lesson-n">L24</span>Pitfalls (踩坑录)</a></li>
-  </ul>
-
-  <div class="nav-heading">Capstone</div>
-  <ul>
-    <li><a href="#choose" class="nav-link">Choose your framework</a></li>
-    <li><a href="#path" class="nav-link">5-week reading plan</a></li>
-    <li><a href="#canonical" class="nav-link">Canonical literature</a></li>
+    <li><a href="#code" class="nav-link">Reading real code</a></li>
+    <li><a href="#landscape" class="nav-link">Framework landscape</a></li>
+    <li><a href="#beyond" class="nav-link">Beyond chat</a></li>
+    <li><a href="#scaling" class="nav-link">Scaling chain</a></li>
+    <li><a href="#pitfalls" class="nav-link">Pitfalls (踩坑录)</a></li>
+    <li><a href="#reading" class="nav-link">Reading list</a></li>
   </ul>
 </aside>
 
 <div class="main-wrap">
   <main>
+    <article id="top">
 
-    <section class="hero" id="welcome">
-      <h1>RL Infra · A Course</h1>
-      <p class="lead">A pedagogical walk through reinforcement-learning post-training infrastructure. <strong>7 acts, 24 lessons</strong>, six SVG diagrams, eight annotated code excerpts pulled live from <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/inclusionAI/AReaL">AReaL</a>, and <a href="https://github.com/OpenRLHF/OpenRLHF">OpenRLHF</a>. Each lesson asks a question, answers it, and points you to the next.</p>
-      <div class="meta-row">
-        <span class="label label-purple">24 lessons</span>
-        <span class="label label-outline">9 frameworks</span>
-        <span class="label label-outline">15 repos read</span>
-        <span class="label label-outline">6 SVG diagrams</span>
-        <span class="label label-outline">8 code excerpts</span>
-      </div>
-    </section>
+      <header>
+        <div class="eyebrow">An engineering survey · for the mathematically inclined</div>
+        <h1>RL Infrastructure for the Mathematically Inclined</h1>
+        <p class="subtitle">A field survey of reinforcement-learning post-training systems — six engineering primitives, three kernel-level DSLs, the training backbone, the quantization problem, and the nine production frameworks you'd actually use. Aimed at mathematicians and RL theorists who want to read the source code of <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a>, <a href="https://github.com/triton-lang/triton">Triton</a> and recognize what's mathematically interesting about the engineering choices.</p>
+        <div class="byline">
+          <span>~30 min read</span>
+          <span>·</span>
+          <span>19 repos surveyed</span>
+          <span>·</span>
+          <span>6 diagrams · 8 code excerpts</span>
+        </div>
+      </header>
 
-    <section id="roadmap">
-      <h2>Course roadmap</h2>
-      <p>The course is structured as a story in 7 acts. Each act builds on the previous; you can also skip into any lesson directly via the sidebar. The hardest material is in Act III; if you only have an hour, read Acts I–II and the first lesson of Act III.</p>
+      <section id="why">
+        <h2>Why this matters to a theorist</h2>
 
-      <table>
-        <thead>
-          <tr><th>Act</th><th>What you'll learn</th><th>Lessons</th></tr>
-        </thead>
-        <tbody>
-          <tr><td><strong>I. The Question</strong></td><td>Why RL post-training infra exists; the central tension</td><td>L1-3</td></tr>
-          <tr><td><strong>II. The Universal Pattern</strong></td><td>The rollout cycle and the three pillars every framework instantiates</td><td>L4-6</td></tr>
-          <tr><td><strong>III. Engineered Solutions</strong></td><td>The six primitives that solve the central tension</td><td>L7-12</td></tr>
-          <tr><td><strong>IV. Reading Real Code</strong></td><td>Walk through the actual <code>fit()</code> loops</td><td>L13-15</td></tr>
-          <tr><td><strong>V. Framework Landscape</strong></td><td>How the 9 frameworks differ on 5 axes</td><td>L16-19</td></tr>
-          <tr><td><strong>VI. Beyond Chat</strong></td><td>Multi-turn agents, embodied AI, world models</td><td>L20-22</td></tr>
-          <tr><td><strong>VII. Synthesis</strong></td><td>Scaling chain + lessons paid in pain</td><td>L23-24</td></tr>
-        </tbody>
-      </table>
+        <p>If you're a mathematician thinking about reinforcement learning, you might assume infrastructure is "the boring part that runs your algorithm." This survey argues otherwise. The engineering choices in modern RL post-training systems encode mathematical decisions — which approximations are bounded, which biases are corrected, which invariants hold by construction. You can't read DeepSeek-R1's training story without knowing how <a href="https://github.com/radixark/miles">Miles'</a> routing-replay makes it numerically possible; you can't compare on-policy and off-policy results without understanding how <a href="https://github.com/inclusionAI/AReaL">AReaL</a>'s asynchronous broadcasts shift the bias term in your gradient estimator.</p>
 
-      <div class="callout">
-        <strong>How to use this course.</strong> Read Acts I-II carefully — they set up the mental model the rest of the course leans on. Act III is the heart of the engineering. Acts IV-VI translate the mental model into specific frameworks. Act VII is the synthesis. Each lesson has a "Next →" link at the bottom so you don't have to navigate yourself.
-      </div>
-    </section>
+        <p>The engineering is, in many cases, the assumption set that your theorem is implicitly invoking. A claim about GRPO's variance reduction holds only as long as the prefix cache, the importance-sampling correction, and the memory-handoff contract all behave as advertised. When they don't, the loss curve still looks fine and the eval curve mysteriously degrades — the field has paid years of debugging in this exact pattern.</p>
 
-    <div class="act-intro" id="act-i">
-      <span class="act-label">Act I</span>
-      <h2>The Question</h2>
-      <p>Before we build anything, let's get clear on what RL post-training infrastructure even <em>is</em>. The hardest part of this field is that the problem statement looks simple ("train an LLM with RL") but the systems requirements are nothing like training or inference alone. These three lessons set up the central tension that the rest of the course resolves.</p>
-    </div>
+        <p>This survey covers what is mathematically interesting about the engineering. I won't try to teach you the algorithms; the field has good papers and reading lists for that. I'll try instead to give you the structural picture: the five-stage cycle every framework instantiates, the three pillars they all stitch together, the six primitives that resolve the central tension, and the three kernel-level DSLs that make any of it run at a competitive speed. Where the engineering encodes a mathematical fact — an invariant, a composition rule, a bias correction — I'll flag it.</p>
 
-    <section class="lesson" id="lesson-1">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 1</span>
-        <h2>What does RL infrastructure actually solve?</h2>
-        <p class="lesson-q">A large language model is already trained. Why do we need a whole new kind of infrastructure to apply RL to it?</p>
-      </div>
+        <blockquote class="pull">
+          A large number of RL conclusions derived from papers are based on RL infrastructure that may be extremely flawed.
+          <cite>— paraphrasing Chenyang Zhao, whose <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial">Awesome-ML-SYS-Tutorial</a> is the most-cited source in this survey</cite>
+        </blockquote>
 
-      <p>Pretraining an LLM is a static dataset + a training loop. Inference is a model + a request stream. Both are well-understood; you'd reach for Megatron-LM and vLLM respectively. But <strong>RL post-training is both at once</strong>: the model must generate fresh data (rollouts), those rollouts must be scored, and the policy must be updated from those scores — repeatedly, for millions of steps.</p>
+        <p>The mathematician's instinct here is the right one: if you can't verify the infrastructure, treat the results as conjecture. The good news is that the infrastructure is open source, and the patterns are surprisingly elegant once you have a vocabulary. The aim of this survey is to give you the vocabulary.</p>
+      </section>
 
-      <p>The problem this creates: the same model that's being trained must also serve inference for rollouts, on the same hardware, alternating in time. Whatever clever optimizations you applied to training (high tensor parallelism, optimizer offload) work <em>against</em> inference (where you want data parallelism for throughput). Whatever you applied to inference (KV cache, prefix sharing, CUDA graphs) costs memory the trainer wants back.</p>
+      <section id="skeleton">
+        <h2>The skeleton: a five-stage cycle on three pillars</h2>
 
-      <p>So RL post-training infrastructure is the discipline of <strong>making one cluster simultaneously good at training and inference</strong>, with the constraint that the policy keeps changing and the inference engine has to keep up. Every primitive in this course is a way of resolving this constraint cheaply enough to be economical at scale.</p>
+        <p>Every framework you'll encounter — <a href="https://github.com/radixark/miles">Miles</a>, <a href="https://github.com/THUDM/slime">SLIME</a>, <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/NovaSky-AI/SkyRL">SkyRL</a>, <a href="https://github.com/RLinf/RLinf">RLinf</a>, <a href="https://github.com/nvidia-cosmos/cosmos-rl">cosmos-rl</a>, <a href="https://github.com/inclusionAI/AReaL">AReaL</a>, <a href="https://github.com/OpenRLHF/OpenRLHF">OpenRLHF</a>, even <a href="https://github.com/sgl-project/sglang">SGLang</a>'s own RL adopters — instantiates the same skeleton. One step of RL training is a five-stage loop: the model <em>generates</em> completions, those are <em>scored</em> by a reward function, low-quality ones are <em>filtered</em>, the survivors <em>train</em> the policy, and the new policy is <em>synced</em> back to the inference engine. Repeat.</p>
 
-      <div class="callout">
-        <strong>The shortest possible definition.</strong> RL infra = the engineering that lets a single GPU cluster alternate between "training mode" and "rollout mode" thousands of times per training run, while keeping the inference engine's weights perfectly in sync with the trainer's gradient updates.
-      </div>
+        <figure>
+          <img src="diagrams/01-rollout-cycle.svg" alt="The universal rollout cycle: Generate → Score → Filter → Train → Sync weights → repeat.">
+          <figcaption><span class="fig-label">Figure 1.</span> The cycle every framework instantiates. The latency of one full loop dominates RL economics — each engineering primitive in this survey makes one stage cheaper.</figcaption>
+        </figure>
 
-      <div class="lesson-transition">
-        <em>Next:</em> The two halves don't just need to coexist — they have <em>opposing</em> resource preferences. <a href="#lesson-2">Lesson 2 — Two halves that fight</a>.
-      </div>
-    </section>
+        <p>Around this cycle live three components: a <strong>training engine</strong> that computes gradients and holds the optimizer; an <strong>inference engine</strong> that runs the policy to generate rollouts; and an <strong>orchestrator</strong> that coordinates them across GPUs and nodes. A framework is, to a first approximation, a particular choice for each of these three slots — plus a data layer (reward hub, filter hub, data buffer) and an algorithm layer (GRPO, PPO, DAPO, OPD) that sit underneath.</p>
 
-    <section class="lesson" id="lesson-2">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 2</span>
-        <h2>Two halves that fight</h2>
-        <p class="lesson-q">If training and inference both need GPUs, why can't we just give half to each?</p>
-      </div>
+        <figure>
+          <img src="diagrams/02-three-pillars.svg" alt="Three pillars: training engine (Megatron, FSDP, DeepSpeed), inference engine (SGLang, vLLM, TRT-LLM), orchestrator (Ray, custom NCCL, torchrun).">
+          <figcaption><span class="fig-label">Figure 2.</span> Picking a row from each column gives you a framework. (Megatron + SGLang + Ray) describes Miles, SLIME, verl, and RLinf.</figcaption>
+        </figure>
 
-      <p>Imagine you have 64 GPUs. You give 32 to training and 32 to inference. During rollout, the 32 training GPUs sit idle waiting for new data. During the training step, the 32 inference GPUs sit idle waiting for new weights. The on-policy constraint of RL forces these two phases to <em>alternate</em>, not run concurrently — which means <strong>half your fleet is always idle</strong>.</p>
+        <p>The genius of the modern stack is that these three pillars are pluggable, with stable interfaces between them. The framework code looks single-threaded but runs SPMD across hundreds of GPUs. The driver writes <code>engine.update_weights_from_distributed(...)</code> and never sees the NCCL topology underneath. This decoupling is what makes a framework a framework and not a one-off training script.</p>
+      </section>
 
-      <p>Worse, training and inference want different parallelism strategies:</p>
+      <section id="tension">
+        <h2>The central tension: two halves that fight</h2>
 
-      <table>
-        <thead><tr><th>Concern</th><th>Training prefers</th><th>Rollout prefers</th></tr></thead>
-        <tbody>
-          <tr><td>Parallelism</td><td>High TP / PP — split the model</td><td>High DP — split the batch</td></tr>
-          <tr><td>Memory</td><td>Optimizer states + gradients + activations</td><td>Weights + KV cache + CUDA graphs</td></tr>
-          <tr><td>Throughput unit</td><td>Tokens/step (compute-bound)</td><td>Trajectories/sec (memory-bound)</td></tr>
-          <tr><td>Goal</td><td>Update one global policy</td><td>Generate N independent samples</td></tr>
-        </tbody>
-      </table>
+        <p>Pretraining an LLM is a static dataset plus a training loop. Inference is a model plus a request stream. Both are well-understood; the right tools are Megatron-LM and vLLM (or SGLang) respectively. RL post-training is both at once, and the two halves want opposite things from the same hardware.</p>
 
-      <p>If you force identical parallelization on both, one side bottlenecks. If you give them different parallelization, you need expensive parameter resharding every time you switch phases. <strong>Every elegant primitive that follows is a way out of this trap.</strong></p>
+        <table>
+          <thead>
+            <tr><th>Concern</th><th>Training prefers</th><th>Rollout prefers</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Parallelism</td><td>High TP / PP — split the model</td><td>High DP — split the batch</td></tr>
+            <tr><td>Memory</td><td>Optimizer states + gradients + activations</td><td>Weights + KV cache + CUDA graphs</td></tr>
+            <tr><td>Throughput unit</td><td>Tokens/step (compute-bound)</td><td>Trajectories/sec (memory-bound)</td></tr>
+            <tr><td>Goal</td><td>Update one global policy</td><td>Generate N independent samples</td></tr>
+          </tbody>
+        </table>
 
-      <div class="lesson-transition">
-        <em>Next:</em> So the alternative is to colocate them — but that has its own difficulties. <a href="#lesson-3">Lesson 3 — Why this is harder than it looks</a>.
-      </div>
-    </section>
+        <p>If you give half your fleet to training and half to inference and let them run in parallel, the on-policy constraint forces them to alternate anyway — half the fleet is always idle. If you force identical parallelism on both, one side bottlenecks. If you give them different parallelism, every phase transition requires resharding the model. Every engineering primitive that follows is a way out of this trap.</p>
 
-    <section class="lesson" id="lesson-3">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 3</span>
-        <h2>Why this is harder than it looks</h2>
-        <p class="lesson-q">Even if you colocate training and rollout on the same GPUs, three pain points remain. What are they?</p>
-      </div>
+        <p>This is, mathematically, a resource-conflict problem with a Pareto frontier. The pragmatic solution — colocate both halves on the same GPUs and serialize them in time — turns the conflict into a sequencing problem. That sequencing problem is what the next six sections solve.</p>
+      </section>
 
-      <p>Colocation solves the idle-fleet problem (training and inference now take turns owning the GPU), but it creates three new ones:</p>
+      <section id="primitives" style="margin-top:64px;">
+        <h2>Six engineering primitives worth knowing</h2>
+        <p style="font-style:italic;color:var(--text-muted);">Each subsection covers one primitive. For each: the invariant it preserves, the implementation, and what's mathematically interesting about it.</p>
+      </section>
 
-      <p><strong>1. Memory choreography.</strong> When inference owns the GPU, it has weights + KV cache + CUDA graphs loaded. When training owns it, it needs optimizer + gradients + activations. They don't fit at once. You need a clean, race-free way to swap memory ownership. <em>(Lesson 8 will show you the two functions that do this.)</em></p>
+      <section id="hybrid-engine">
+        <h3>① The hybrid engine — 训推一体</h3>
 
-      <p><strong>2. Weight synchronization.</strong> After every training step, the trainer has new policy weights; the inference engine still has the old ones. You need a way to push the new weights into the inference engine — fast, lossless, and without restarting it. Naive "copy params from trainer to inference" approaches cost tens of milliseconds per parameter; for a 70B model that's minutes per training step. <em>(Lessons 9–10 show the zero-copy trick.)</em></p>
+        <p>The answer to the opposing-preferences problem is a pattern called <strong>训推一体</strong> ("integrated train-inference"), formalized in <a href="https://arxiv.org/abs/2409.19256">verl's HybridFlow paper</a>. Put both halves on the same GPUs; run them serially; swap memory between phases.</p>
 
-      <p><strong>3. The numerical-precision trap.</strong> If the inference engine uses FP8 and the trainer uses BF16, the same input can produce slightly different logits, especially when MoE expert routing is involved. The training data becomes "lies about the current policy." The model trains on phantom signal. <em>(Lesson 7 introduces the colocate pattern that exposes this issue; Lesson 12 connects it to AReaL/Miles staleness corrections.)</em></p>
+        <p>Mathematically, this is mutual exclusion: at any moment the GPU is in exactly one of two states (training-mode or inference-mode), and a controlled transition between them happens once per cycle. The cost is the transition itself. The benefit is that every GPU is doing useful work at all times — peak utilization moves from 45-55% (disaggregated) to 85-90% (colocated). Every modern framework — Miles, SLIME, verl, SkyRL, RLinf, cosmos-rl — uses some form of this pattern. The disagreement is on <em>how</em> to make the transition cheap.</p>
 
-      <p>These three problems — memory, weight sync, numerical alignment — are why RL infra is a discipline of its own. The rest of the course is the engineered answers.</p>
+        <p>Up to about 64 GPUs, full colocation (all roles share one resource pool) wins. Above that, <em>split colocation</em> (actor+ref on one pool, critic+reward on another) wins, because the parallelism preferences of the four roles start to diverge. Pure disaggregation only becomes economic above ~1024 GPUs, when rollout volume can amortize a separate inference cluster.</p>
+      </section>
 
-      <div class="reflect">
-        <div class="reflect-title">Check yourself</div>
-        Before moving on, articulate in your own words: <em>why does giving half the GPUs to training and half to inference waste compute even though both sides are 100% utilized when they're running?</em>
-      </div>
+      <section id="memory">
+        <h3>② Memory choreography</h3>
 
-      <div class="lesson-transition">
-        <em>Next:</em> Now we know the question. Let's see the answer's universal shape — the rollout cycle. <a href="#lesson-4">Lesson 4 — The rollout cycle</a>.
-      </div>
-    </section>
+        <p>The hybrid engine works because two functions encode the entire concurrency contract: <code>release_memory_occupation</code> and <code>resume_memory_occupation</code>. They pause the inference engine, hand the GPU to the trainer, then restore it. The implementation is granular — three independent memory pools (KV cache, weights, CUDA graphs) can be released independently.</p>
 
-    <div class="act-intro" id="act-ii">
-      <span class="act-label">Act II</span>
-      <h2>The Universal Pattern</h2>
-      <p>Every framework — Miles, SLIME, verl, SkyRL, RLinf, cosmos-rl, AReaL, OpenRLHF, even SGLang's RL adopters — instantiates the same skeleton: a five-stage cycle around three pillars. Once you see this shape, you can read any of their <code>train.py</code> files in 15 minutes. These three lessons are the most important in the course.</p>
-    </div>
+        <figure>
+          <img src="diagrams/03-hybrid-engine-timeline.svg" alt="Timeline of memory ownership swapping between inference and training across T=0 to T=5, with release_memory_occupation and resume_memory_occupation marking the transitions.">
+          <figcaption><span class="fig-label">Figure 3.</span> One GPU, two roles. Two function calls encode the contract — no locks, no races, no torn reads.</figcaption>
+        </figure>
 
-    <section class="lesson" id="lesson-4">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 4</span>
-        <h2>The rollout cycle</h2>
-        <p class="lesson-q">What is "one step" of RL training, drawn as a flowchart?</p>
-      </div>
-
-      <p>One step of RL post-training is a five-stage loop. The model generates completions, those are scored by a reward function, low-quality ones are filtered out, the survivors update the policy, and the new policy is pushed back to the inference engine. Then it starts over.</p>
-
-      <div class="diagram-wrap">
-        <img src="diagrams/01-rollout-cycle.svg" alt="The universal rollout cycle: Generate → Score → Filter → Train → Sync weights → repeat.">
-        <div class="diagram-caption">Figure 1 — The cycle every RL framework instantiates. Latency of one full loop dominates RL economics.</div>
-      </div>
-
-      <p>Every primitive in this course exists to make one stage of this cycle cheaper. RadixAttention makes stage ① faster. Reward microservices make ② non-blocking. The four <code>update_weights_from_*</code> paths make ⑤ zero-copy. Once you can locate this loop in any repo's <code>train.py</code>, you understand 80% of the framework.</p>
-
-      <div class="callout">
-        <strong>Mental model.</strong> A framework is "the set of choices it makes about how to implement each of these five stages, plus how to swap memory between them." Differences between Miles and SLIME, between verl and OpenRLHF, all map back to choices in this cycle.
-      </div>
-
-      <div class="lesson-transition">
-        <em>Next:</em> The cycle runs on three pillars. <a href="#lesson-5">Lesson 5 — The three pillars</a>.
-      </div>
-    </section>
-
-    <section class="lesson" id="lesson-5">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 5</span>
-        <h2>The three pillars</h2>
-        <p class="lesson-q">What are the three components every RL framework stitches together?</p>
-      </div>
-
-      <p>Every framework is built around three components: a <strong>training engine</strong> that computes gradients and holds the optimizer; an <strong>inference engine</strong> that runs the policy to generate rollouts; and an <strong>orchestrator</strong> that coordinates them across GPUs and nodes. Around them sits a shared <em>data layer</em> (reward hub, filter hub, data buffer) and an <em>algorithm layer</em> (GRPO, PPO, DAPO, OPD).</p>
-
-      <div class="diagram-wrap">
-        <img src="diagrams/02-three-pillars.svg" alt="Three pillars: training engine (Megatron, FSDP, DeepSpeed), inference engine (SGLang, vLLM, TRT-LLM), orchestrator (Ray, custom NCCL, torchrun).">
-        <div class="diagram-caption">Figure 2 — Picking a row from each column gives you a framework. (Megatron + SGLang + Ray) = Miles, SLIME, verl, RLinf.</div>
-      </div>
-
-      <p>The genius of the modern RL stack is that these three pillars are <strong>pluggable</strong>. You can swap Megatron for FSDP, SGLang for vLLM, Ray for custom NCCL — and the framework still works because each pillar exposes a stable interface. We'll see those interfaces concretely in Lessons 9-11.</p>
-
-      <div class="reflect">
-        <div class="reflect-title">Check yourself</div>
-        Sketch the three-pillar diagram from memory. Then answer: where does the <em>reward function</em> live — in one of the three pillars, or in the shared data layer? Why?
-      </div>
-
-      <div class="lesson-transition">
-        <em>Next:</em> Walk through one full step, end-to-end, naming every module the data passes through. <a href="#lesson-6">Lesson 6 — One step end-to-end</a>.
-      </div>
-    </section>
-
-    <section class="lesson" id="lesson-6">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 6</span>
-        <h2>One step end-to-end</h2>
-        <p class="lesson-q">If you traced one RL step through the code of a real framework, what calls would you see?</p>
-      </div>
-
-      <p>Here's one PPO/GRPO iteration in a verl-style hybrid engine, written as a call graph. Five phases (A-E), 18 numbered steps. Read this carefully — it is the concrete instantiation of Figures 1 and 2.</p>
-
-<pre><code>┌─ Phase A: ROLLOUT (inference engine owns GPU) ────────────────────┐
-│                                                                    │
-│  1. Trainer hands batch of N prompts to SGLang Engine             │
-│     • call: engine.async_generate(prompts, return_logprob=True)   │
-│                                                                    │
-│  2. SGLang Scheduler prefills, hitting RadixCache                  │
-│     • lock_ref += 1 on matched prefix nodes                        │
-│     • shared system+few-shot prefix → 1× prefill, not N×           │
-│                                                                    │
-│  3. Scheduler decodes; PagedAttention manages KV pool              │
-│     • output: tokens + logprobs                                    │
-│                                                                    │
-│  4. Post-schedule: tree_cache.cache_finished_req()                 │
-│     • lock_ref -= 1 on prefix nodes (now evictable)                │
-└────────────────────────────────────────────────────────────────────┘
-┌─ Phase B: REWARD + CRITIC (still inference-side topology) ────────┐
-│                                                                    │
-│  5. Reward model scores completions                                │
-│     • IMPORTANT: uses *training engine* forward(), not SGLang     │
-│     • why? inference kernels fuse differently per batch size →    │
-│       numerical drift on logprobs (the "BERT-era bug")            │
-│                                                                    │
-│  6. Critic computes values (same kernel rule as reward)            │
-│     • output: {token_ids, logprobs_old, rewards, values, masks}    │
-└────────────────────────────────────────────────────────────────────┘
-┌─ Phase C: HANDOFF (the critical moment) ──────────────────────────┐
-│                                                                    │
-│  7. engine.release_memory_occupation()                             │
-│     • KV cache freed, CUDA graphs released, weights pinned         │
-│     • SGLang now occupies ~5GB instead of ~80GB                    │
-│                                                                    │
-│  8. Trainer materializes optimizer + grads + activations on GPU    │
-└────────────────────────────────────────────────────────────────────┘
-┌─ Phase D: TRAIN (training engine owns GPU) ───────────────────────┐
-│                                                                    │
-│  9. PPO/GRPO loss + GAE on the experience buffer                   │
-│ 10. Backward; NCCL AllReduce on gradients                          │
-│ 11. Optimizer.step() — new policy θ_{t+1}                          │
-└────────────────────────────────────────────────────────────────────┘
-┌─ Phase E: WEIGHT SYNC (the zero-copy trick) ──────────────────────┐
-│                                                                    │
-│ 12. FSDP/Megatron reconstructs full tensors per rank               │
-│ 13. MultiprocessingSerializer.serialize(tensor) → handle tuple     │
-│     • handle = (ptr, stride, offset, CUDA IPC descriptor)          │
-│     • size: &lt;1KB. No tensor data crosses any wire.               │
-│ 14. dist.gather_object() collects handles to TP rank 0             │
-│ 15. ZMQ ships handle tuples to SGLang's TpModelManager             │
-│ 16. SGLang _unwrap_tensor() reconstructs Python tensor pointing    │
-│     to the SAME GPU memory FSDP wrote to (via CUDA IPC)            │
-│ 17. ModelRunner.load_weights() swaps pointers                      │
-│ 18. engine.resume_memory_occupation()                              │
-└────────────────────────────────────────────────────────────────────┘
-                            ↓
-                    goto Phase A (next step)</code></pre>
-
-      <div class="callout">
-        <strong>The crucial insight (step 13).</strong> Handle tuples are &lt;1KB pointer metadata, not tensor data. SGLang reconstructs a Python tensor that <em>points to the same GPU memory FSDP wrote to</em>, via CUDA IPC handles. No GPU↔CPU↔GPU roundtrip. Compared to naive copying (&gt;50ms per param update on a 70B model), this is sub-millisecond. <em>This is the single trick that makes colocated weight sync economical.</em>
-      </div>
-
-      <div class="reflect">
-        <div class="reflect-title">Check yourself</div>
-        For each numbered step, identify which of the three pillars (training / inference / orchestration) owns it. Steps 7, 12, and 18 are deliberately ambiguous — explain why.
-      </div>
-
-      <div class="lesson-transition">
-        <em>Next:</em> Now we know the shape. Act III is the engineering that makes each step cheap. We start with the colocate-and-swap pattern. <a href="#lesson-7">Lesson 7 — The hybrid engine</a>.
-      </div>
-    </section>
-
-    <div class="act-intro" id="act-iii">
-      <span class="act-label">Act III</span>
-      <h2>The Engineered Solutions</h2>
-      <p>Six lessons, six primitives. Each one resolves one piece of the central tension we set up in Acts I-II. By the end of this act you will know <em>every</em> non-trivial design choice in modern RL post-training infrastructure. These are the lessons that took the field years to figure out.</p>
-    </div>
-
-    <section class="lesson" id="lesson-7">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 7</span>
-        <h2>The hybrid engine — 训推一体</h2>
-        <p class="lesson-q">Colocate training and inference on the same GPUs and serialize them in time. Why does this win over disaggregation?</p>
-      </div>
-
-      <p>The answer to "two halves that fight" (Lesson 2) is a pattern called <strong>训推一体</strong> ("integrated train-inference"), first formalized in verl's <a href="https://arxiv.org/abs/2409.19256">HybridFlow paper</a>. The idea is simple: put both halves on the same GPUs and run them <em>serially</em>, swapping memory between phases.</p>
-
-      <table>
-        <thead><tr><th></th><th>Choice</th><th>Cost of the alternative</th></tr></thead>
-        <tbody>
-          <tr><td><strong>Why colocate</strong></td><td>Hybrid engine puts train + rollout on the <em>same</em> GPUs, runs them serially</td><td>Disaggregate: rollout GPUs idle during training, training GPUs idle during rollout. With on-policy constraint forcing serialization, half your fleet is always idle.</td></tr>
-          <tr><td><strong>Engineering benefit</strong></td><td>85-90% GPU utilization (vs 45-55% disaggregate)</td><td>Disaggregate also doubles inter-cluster bandwidth for weight sync.</td></tr>
-          <tr><td><strong>Scaling property</strong></td><td>Works up to ~64 GPUs as <em>full</em> colocate; above that, <em>split colocate</em> (actor+ref on one pool, critic+reward on another) wins</td><td>Pure disaggregate becomes feasible only above ~1024 GPUs when rollout volume can amortize separate inference clusters.</td></tr>
-        </tbody>
-      </table>
-
-      <p>Every modern framework — Miles, SLIME, verl, SkyRL, RLinf, cosmos-rl — uses some form of this pattern. The disagreement is on <em>how</em> to swap memory, which is Lesson 8.</p>
-
-      <div class="lesson-transition">
-        <em>Next:</em> The two functions that swap memory and make it work. <a href="#lesson-8">Lesson 8 — Memory choreography</a>.
-      </div>
-    </section>
-
-    <section class="lesson" id="lesson-8">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 8</span>
-        <h2>Memory choreography</h2>
-        <p class="lesson-q">If inference and training share the GPU, how do you safely hand memory between them without races?</p>
-      </div>
-
-      <p>The hybrid engine works because two functions — <code>release_memory_occupation</code> and <code>resume_memory_occupation</code> — encode the entire concurrency contract. Here is the timeline of one cycle:</p>
-
-      <div class="diagram-wrap">
-        <img src="diagrams/03-hybrid-engine-timeline.svg" alt="Timeline of memory ownership swapping between inference and training across T=0 to T=5, with release_memory_occupation and resume_memory_occupation marking the transitions.">
-        <div class="diagram-caption">Figure 3 — One GPU, two roles. The "owner" lane shows who's running; the "memory" lane shows what's loaded.</div>
-      </div>
-
-      <p>And here is the real implementation, from SGLang's mixin:</p>
+        <p>Here's the actual implementation in SGLang. The mathematical interest is in the <code>assert is_fully_idle()</code> at the top: the function literally cannot run if any request is in flight. The concurrency contract is checked structurally, not by convention. Each <code>if tag in tags</code> branch is a separate pool with its own pause semantics — granularity is the point.</p>
 
 <a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/scheduler_update_weights_mixin.py" target="_blank"><span class="file-path">python/sglang/srt/managers/scheduler_update_weights_mixin.py</span><span class="file-meta">· tag-based memory pause</span></a>
 <pre class="with-source"><code>def release_memory_occupation(self, recv_req):
@@ -918,60 +690,38 @@
         self.memory_saver_adapter.pause(GPU_MEMORY_TYPE_CUDA_GRAPH)
 
     torch.get_device_module().synchronize()
-    return ReleaseMemoryOccupationReqOutput()
-</code></pre>
+    return ReleaseMemoryOccupationReqOutput()</code></pre>
+      </section>
 
-      <div class="callout">
-        <strong>What makes this elegant.</strong> The <code>assert is_fully_idle()</code> at the top is the concurrency contract — the function literally cannot run if any request is in flight. The three independent <code>if tag in tags</code> blocks mean colocated training can free <em>just KV cache</em> (keep weights warm for fast resume) or <em>just weights</em> (the trainer needs the memory). Granularity is the whole point.
-      </div>
+      <section id="weight-sync">
+        <h3>③ Zero-copy weight synchronization</h3>
 
-      <div class="lesson-transition">
-        <em>Next:</em> Memory is now safely swappable. But after the trainer updates weights, how do we get them <em>back</em> into the inference engine? <a href="#lesson-9">Lesson 9 — The weight-sync handoff</a>.
-      </div>
-    </section>
+        <p>After each training step the trainer has a new policy θ<sub>t+1</sub>; the inference engine still has θ<sub>t</sub>. Naively, you serialize the new weights, send them, deserialize. On a 70B model that's tens of milliseconds per parameter, with thousands of parameters per layer — minutes per training step, untenable.</p>
 
-    <section class="lesson" id="lesson-9">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 9</span>
-        <h2>The weight-sync handoff</h2>
-        <p class="lesson-q">The trainer just produced θ<sub>t+1</sub>. How does it move into the inference engine without restarting it — and without copying 70GB of tensors?</p>
-      </div>
+        <p>The trick is to never move the tensor data. The trainer process has the new weights in GPU memory; the inference process is either on the same host or shares a NCCL group with the trainer. The trainer sends only a <strong>handle tuple</strong> — pointer, stride, offset, CUDA IPC descriptor — under a kilobyte. The inference process reconstructs a Python tensor object that points to the same physical GPU memory.</p>
 
-      <p>Naive weight sync: serialize the new parameters to a buffer, send the buffer to the inference process, deserialize, replace. On a 70B model this is 50+ ms <em>per parameter</em>, with thousands of parameters per layer. Result: minutes per training step. Untenable.</p>
+        <p>What's mathematically interesting here is that the abstraction is functorial: a Python <code>Tensor</code> is a thin wrapper around an underlying memory descriptor, and reconstructing the wrapper is independent of moving the bytes. The trainer and inference engine end up with two different objects denoting the same memory. The synchronization cost goes from O(parameters × byte_throughput) to O(parameters × pointer_size). Sub-millisecond instead of minutes.</p>
 
-      <p>The trick is to never move the tensor data at all. The trainer process has the new weights in GPU memory. The inference process is on the same host (or shares a NCCL group). Instead of copying bytes, the trainer sends a <strong>handle tuple</strong> — a few hundred bytes of pointer metadata, stride, offset, and CUDA IPC descriptor. The inference process reconstructs a Python tensor that <em>points to the same physical GPU memory</em>.</p>
+        <aside class="note warn">
+          <strong>Pitfall.</strong> verl's implementation requires <code>monkey_patch_torch_reductions()</code> to register the CUDA IPC handle deserializer. Missing this causes intermittent segfaults on the SGLang side, not deterministic ones — exactly the kind of bug a mathematician would call a "leaky abstraction." The handle tuple appears to be opaque, but its semantics depend on a global registration step. Read the integration code line by line.
+        </aside>
+      </section>
 
-      <p>Compared to a 50ms-per-param copy, handle-tuple sync is sub-millisecond. This single trick is what makes colocated weight sync economical. Step 13 in Lesson 6 is the line that does it.</p>
+      <section id="four-paths">
+        <h3>④ Four <code>update_weights_from_*</code> paths, one verb</h3>
 
-      <div class="callout warn">
-        <strong>The pitfall.</strong> verl's implementation requires <code>monkey_patch_torch_reductions()</code> to register CUDA IPC handle deserializers. Missing this call causes silent segfaults on the SGLang side, but only intermittently. This is the kind of bug that costs a week.
-      </div>
+        <p>The trainer might hold the new weights in any of four physical configurations: same process as the inference engine, on a shared disk, on remote NCCL ranks, or in a sibling CUDA-IPC process. SGLang exposes four implementations behind one verb. The framework above writes <code>engine.update_weights_from_*(...)</code>; the topology underneath dictates which method.</p>
 
-      <div class="lesson-transition">
-        <em>Next:</em> Handle tuples work for same-process trainers. What about checkpointing to disk, NCCL across nodes, or CUDA IPC across processes? <a href="#lesson-10">Lesson 10 — Four <code>update_weights</code> paths</a>.
-      </div>
-    </section>
+        <figure>
+          <img src="diagrams/04-weight-update-paths.svg" alt="The four update_weights paths: from_tensor (same process, via ZMQ), from_disk (checkpoint on shared FS), from_distributed (NCCL broadcast across ranks), from_ipc (CUDA IPC same host, different processes).">
+          <figcaption><span class="fig-label">Figure 4.</span> One verb, four transports. Each maps to a real deployment topology.</figcaption>
+        </figure>
 
-    <section class="lesson" id="lesson-10">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 10</span>
-        <h2>Four <code>update_weights_from_*</code> paths, one verb</h2>
-        <p class="lesson-q">Different deployment topologies need different transports. How does SGLang present one interface that handles all of them?</p>
-      </div>
-
-      <p>SGLang exposes four implementations behind one verb. The framework above writes <code>engine.update_weights_from_*(...)</code> — SGLang internally handles tensor reconstruction, dtype preservation under quantization, and the lock that prevents concurrent generation.</p>
-
-      <div class="diagram-wrap">
-        <img src="diagrams/04-weight-update-paths.svg" alt="The four update_weights paths: from_tensor (same process, via ZMQ), from_disk (checkpoint on shared FS), from_distributed (NCCL broadcast across ranks), from_ipc (CUDA IPC same host, different processes).">
-        <div class="diagram-caption">Figure 4 — One verb, four transports. Each maps to a real deployment topology.</div>
-      </div>
-
-      <p>And here is the actual mixin code — notice that all four methods share the same shape and the same <code>flush_cache_after_weight_update</code> call (the RadixCache <em>must</em> be invalidated because old prefix entries reference the old policy):</p>
+        <p>The pattern is functor-like: the same operation lifted to different categories of topology. What matters mathematically is that all four methods share <code>flush_cache_after_weight_update</code>. The RadixCache (next subsection) must be invalidated because old prefix entries reference the old policy — keeping them would mean the inference engine is serving generations based on a model that no longer exists. Cache invalidation is the inherent consistency obligation; the four transports differ in how they get the bytes to the inference engine, but they all owe the same invariant downstream.</p>
 
 <a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/scheduler_update_weights_mixin.py" target="_blank"><span class="file-path">python/sglang/srt/managers/scheduler_update_weights_mixin.py</span><span class="file-meta">· four transports, one verb</span></a>
 <pre class="with-source"><code>class SchedulerUpdateWeightsMixin:
     def update_weights_from_disk(self, recv_req):
-        """In-place update of the weights from disk."""
         success, message = self.tp_worker.update_weights_from_disk(recv_req)
         if success and self.draft_worker is not None:
             success, message = self.draft_worker.update_weights_from_disk(recv_req)
@@ -980,14 +730,12 @@
         return UpdateWeightFromDiskReqOutput(success, message, 0)
 
     def update_weights_from_distributed(self, recv_req):
-        """Update the online model parameter."""
         success, message = self.tp_worker.update_weights_from_distributed(recv_req)
         if success:
             self.flush_cache_after_weight_update(recv_req)
         return UpdateWeightsFromDistributedReqOutput(success, message)
 
     def update_weights_from_tensor(self, recv_req):
-        """Update the online model parameter from tensors."""
         worker = self.draft_worker or self.tp_worker
         success, message = worker.update_weights_from_tensor(recv_req)
         if success:
@@ -996,120 +744,235 @@
         return UpdateWeightsFromTensorReqOutput(success, message)
 
     def update_weights_from_ipc(self, recv_req):
-        """Update the online model parameter from IPC for checkpoint-engine integration."""
         success, message = self.tp_worker.update_weights_from_ipc(recv_req)
         if success and self.draft_worker is not None:
             success, message = self.draft_worker.update_weights_from_ipc(recv_req)
         if success:
             self.flush_cache_after_weight_update(recv_req)
         torch.distributed.barrier(group=self.tp_cpu_group)
-        return UpdateWeightsFromIPCReqOutput(success, message)
-</code></pre>
+        return UpdateWeightsFromIPCReqOutput(success, message)</code></pre>
 
-      <div class="callout">
-        <strong>An underrated constraint.</strong> NCCL process groups fix participants at creation. Adding a new inference node mid-training means destroying and recreating the group. RDMA's point-to-point model treats each connection independently. This single fact explains why colocated frameworks (Miles, SLIME) lean on NCCL via <code>init_weights_update_group</code>, while disaggregated systems (cosmos-rl, SkyRL's remote inference) prefer RDMA or disk for weight sync. <strong>Elasticity is incompatible with NCCL.</strong>
-      </div>
+        <p>An underrated systems constraint that this verb hides: NCCL process groups are static. Their participant set is fixed at creation; adding a new inference node mid-training means destroying and recreating the group. RDMA's point-to-point model treats each connection independently — a new peer establishes a fresh Queue Pair without disturbing existing links. This single fact explains why colocated frameworks lean on NCCL (via <code>init_weights_update_group</code>) while disaggregated systems prefer RDMA or shared disk. <strong>Elasticity is incompatible with NCCL.</strong></p>
+      </section>
 
-      <div class="lesson-transition">
-        <em>Next:</em> Weight sync is solved. What about generation itself — is there an algorithm-system co-design that makes rollouts faster? <a href="#lesson-11">Lesson 11 — RadixAttention × GRPO</a>.
-      </div>
-    </section>
+      <section id="radix-grpo">
+        <h3>⑤ RadixAttention × GRPO — algebraic composition</h3>
 
-    <section class="lesson" id="lesson-11">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 11</span>
-        <h2>RadixAttention × GRPO — multiplicative composition</h2>
-        <p class="lesson-q">GRPO generates N completions per prompt. They share an identical prefix. Can the inference engine exploit that?</p>
-      </div>
+        <p>This is the example I would lead with if I were trying to convince a mathematician that engineering can be beautiful. <a href="https://arxiv.org/abs/2402.03300">GRPO</a> generates N completions per prompt and normalizes rewards within the group as a baseline; the algorithmic motivation is variance reduction. The system-level consequence is that all N completions share the prompt prefix.</p>
 
-      <p>GRPO (Group Relative Policy Optimization) is the dominant RL algorithm in 2025-2026. It generates a group of N completions per prompt and normalizes rewards within the group as a baseline. The system-level consequence is that <strong>all N completions share the prompt prefix</strong> — and RadixAttention turns that into a near-free win.</p>
+        <p>RadixAttention exploits this. The shared prefix is a single node in a radix tree; each completion branches off as a child. Reference counting (<code>inc_lock_ref</code> / <code>dec_lock_ref</code>) means a node with <code>lock_ref &gt; 0</code> cannot be evicted. Use-after-free is structurally unrepresentable.</p>
 
-      <div class="diagram-wrap">
-        <img src="diagrams/05-radix-tree-grpo.svg" alt="Without prefix cache: 4 separate prefills of the prompt P. With RadixAttention: one shared prefix node with lock_ref=4, four tail completions branching from it.">
-        <div class="diagram-caption">Figure 5 — Without prefix cache: 4× prefill cost, 4× KV memory. With RadixAttention: 1× prefill, 1× shared KV, near-free decode.</div>
-      </div>
-
-      <p>The radix tree organizes shared prefixes as ancestor nodes; each completion branches off as a child. Reference counting (<code>inc_lock_ref</code> / <code>dec_lock_ref</code>) means a prefix can't be evicted while any completion still uses it. A node with <code>lock_ref &gt; 0</code> simply cannot be evicted — <strong>use-after-free is unrepresentable</strong>.</p>
+        <figure>
+          <img src="diagrams/05-radix-tree-grpo.svg" alt="Without prefix cache: 4 separate prefills of the prompt P. With RadixAttention: one shared prefix node with lock_ref=4, four tail completions branching from it.">
+          <figcaption><span class="fig-label">Figure 5.</span> Without prefix cache: 4× prefill cost, 4× KV memory. With RadixAttention: 1× prefill, 1× shared KV, near-free decode tails.</figcaption>
+        </figure>
 
 <a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/mem_cache/radix_cache.py" target="_blank"><span class="file-path">python/sglang/srt/mem_cache/radix_cache.py</span><span class="file-meta">· the six methods of the prefix tree</span></a>
 <pre class="with-source"><code>class RadixCache(BasePrefixCache, KVCacheEventMixin):
-    def match_prefix(self, params: MatchPrefixParams) -> MatchResult:
-        """Walk the tree, return the longest matching prefix's KV slots."""
-
-    def insert(self, params: InsertParams) -> InsertResult:
-        """Add a new completion's tail tokens as descendant nodes."""
-
-    def inc_lock_ref(self, node: TreeNode) -> IncLockRefResult:
-        """Pin a node — its KV slots cannot be evicted while lock_ref > 0."""
-
-    def dec_lock_ref(self, ...) -> DecLockRefResult:
-        """Release pin — node becomes evictable when no requests reference it."""
-
-    def evict(self, params: EvictParams) -> EvictResult:
-        """LRU/LFU/SLRU eviction of evictable nodes only — pinned nodes survive."""
-
+    def match_prefix(self, params: MatchPrefixParams) -> MatchResult: ...
+    def insert(self, params: InsertParams) -> InsertResult: ...
+    def inc_lock_ref(self, node: TreeNode) -> IncLockRefResult: ...
+    def dec_lock_ref(self, ...) -> DecLockRefResult: ...
+    def evict(self, params: EvictParams) -> EvictResult: ...
     @property
-    def evictable_size(self):
-        """How much memory can we reclaim if we evict everything unpinned?"""
-</code></pre>
+    def evictable_size(self): ...</code></pre>
 
-      <div class="callout">
-        <strong>Why this is elegant.</strong> Neither was designed for the other. GRPO chose group sampling for variance reduction. RadixAttention chose a tree for cache reuse. Their composition <em>multiplies</em> savings — and reference counting means cache lifetime is automatic.
-      </div>
+        <blockquote class="pull">
+          Neither was designed for the other. GRPO chose group sampling for variance reduction. RadixAttention chose a tree for cache reuse. Their composition multiplies savings — and reference counting means cache lifetime is automatic.
+        </blockquote>
 
-      <div class="lesson-transition">
-        <em>Next:</em> One last source of latency: waiting for the longest rollout to finish before training starts. <a href="#lesson-12">Lesson 12 — Async &amp; staleness</a>.
-      </div>
-    </section>
+        <p>This kind of accidental-but-elegant composition recurs throughout the field. A mathematician will recognize the structure: the algorithm exposes a sharing pattern (here, a common prefix); the data structure exposes a sharing mechanism (here, a radix tree); their composition is the categorical product. The right notation makes the saving obvious — the wrong notation makes the saving impossible to express.</p>
+      </section>
 
-    <section class="lesson" id="lesson-12">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 12</span>
-        <h2>Async training and staleness corrections</h2>
-        <p class="lesson-q">If 10% of rollouts take 20 seconds and 90% finish in 2 seconds, do we wait for the slow ones?</p>
-      </div>
+      <section id="async">
+        <h3>⑥ Async training and the staleness tradeoff</h3>
 
-      <p>Strict on-policy RL says: wait for every trajectory to finish under policy θ<sub>t</sub> before running the gradient step. In practice this is fatal. If 10% of prompts are long-context (2K tokens decode) and 90% are short (512 tokens), the short ones finish in ~2s but the long ones take ~20s. <strong>90% of GPUs idle for 18s every iteration</strong>. Over 1000 iterations that's 5 GPU-hours per GPU wasted.</p>
+        <p>Strict on-policy RL says: wait for every trajectory to finish under policy θ<sub>t</sub> before running the gradient step. In practice this is fatal at scale. If 10% of prompts produce long-context trajectories (2K tokens of decode) and 90% are short (512 tokens), the short ones finish in ~2s but the long ones take ~20s. 90% of GPUs idle for 18s every iteration. Over 1000 iterations: ~5 GPU-hours per GPU wasted.</p>
 
-      <p><strong>Partial rollout</strong>: train on the 128 trajectories that finished, let the rest continue under (now-stale) θ<sub>t</sub>. Throughput 2-4× higher; off-policy ratio rises but it can be controlled in two ways:</p>
+        <p>The pragmatic solution is <strong>partial rollout</strong>: train on the 128 trajectories that finished, let the rest continue under (now stale) θ<sub>t</sub>. Throughput rises 2–4×; the off-policy ratio rises with it. There are two paths to bounding the resulting bias.</p>
 
-      <ul style="padding-left: 22px; margin-bottom: 14px;">
-        <li><strong>Mathematically</strong> — Miles applies <strong>TIS (Truncated Importance Sampling)</strong> and <strong>MIS (Masked Importance Sampling)</strong> corrections that re-weight stale samples to recover an unbiased estimator.</li>
-        <li><strong>Operationally</strong> — Kimi K1.5's approach: context-length checkpointing, dynamic batch reordering, and prefix-maximizing strategies bound the staleness without explicit IS weights.</li>
-      </ul>
+        <p><strong>Mathematical correction.</strong> Miles applies Truncated Importance Sampling (TIS) and Masked Importance Sampling (MIS): the gradient update of a sample generated under θ<sub>t-k</sub> is reweighted by the importance ratio π<sub>θ<sub>t</sub></sub>(a|s) / π<sub>θ<sub>t-k</sub></sub>(a|s), with truncation or masking to control variance. The estimator becomes unbiased again at the cost of variance the truncation introduces — a classical Radon-Nikodym story.</p>
 
-      <p>The architectural extreme is <strong>AReaL's fully-async design</strong>: NCCL broadcasts are launched with <code>async_op=True</code> and bucketed by memory budget. The trainer never blocks on weight sync — it queues bucket after bucket and continues. Compared to OpenRLHF's synchronous <code>broadcast_to_vllm()</code> (which blocks until all engines acknowledge), AReaL claims 2.77× speedup.</p>
+        <p><strong>Operational correction.</strong> Kimi K1.5 bounds staleness instead: context-length checkpointing, dynamic batch reordering, prefix-maximizing scheduling. The off-policy ratio never grows large enough to require explicit correction, but the bound is enforced operationally rather than mathematically.</p>
 
-      <div class="callout">
-        <strong>The principle.</strong> The system <em>tells you it's lying about being on-policy</em>. The IS weights are explicit; the staleness is a parameter, not a bug. This is "rational compromise between engineering efficiency and algorithmic rigor" — but the compromise is visible in the code, not hidden behind it.
-      </div>
+        <p>The architectural extreme is AReaL's fully-async design: NCCL broadcasts are launched with <code>async_op=True</code>, bucketed by memory budget. The trainer never blocks on weight sync. The off-policy bias is whatever falls out of how long inference takes to catch up — call it "implicit staleness." AReaL bets that with the right bucketing, the implicit staleness stays small enough to skip explicit corrections. They claim 2.77× speedup over synchronous baselines.</p>
 
-      <div class="reflect">
-        <div class="reflect-title">Check yourself</div>
-        Walk through what you just learned in Lessons 7–12. Can you sketch — without looking — the timeline of one training step from rollout to weight sync, naming the primitive at each phase?
-      </div>
+        <aside class="note">
+          <strong>For RL theorists.</strong> The mathematically clean version of all this is to write the loss as an off-policy estimator from the start and let the implementation's staleness manifest as a known parameter. The mathematically dirty version — which is what every framework ships — is to write the loss as if on-policy and treat staleness as an empirical hyperparameter you tune to taste. Miles' TIS/MIS sits between the two; you might find it the most honest design.
+        </aside>
+      </section>
 
-      <div class="lesson-transition">
-        <em>Next:</em> Time to read real code. Act IV walks through the actual <code>fit()</code> loops. <a href="#lesson-13">Lesson 13 — verl's <code>fit()</code> loop</a>.
-      </div>
-    </section>
+      <section id="kernels">
+        <h2>The layer beneath: CUDA, Triton, and TileLang</h2>
 
-    <div class="act-intro" id="act-iv">
-      <span class="act-label">Act IV</span>
-      <h2>Reading Real Code</h2>
-      <p>You've seen the universal pattern (Act II) and the engineered primitives (Act III). Now we ground all of it in actual source code from production frameworks. After these three lessons, you should be able to open any RL framework's <code>train.py</code> and read it like a familiar friend.</p>
-    </div>
+        <p>So far the survey has stayed at the framework level. But the throughput of all the primitives above depends on the speed of the underlying kernels — attention, GEMM, normalization, softmax. A 2× speedup on an attention kernel is a 2× speedup on rollout, which is 2× on the whole RL loop. Below PyTorch, there is a hierarchy of languages for writing GPU kernels. Theorists tend to underestimate how much of the field's progress lives at this layer.</p>
 
-    <section class="lesson" id="lesson-13">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 13</span>
-        <h2>verl's <code>fit()</code> loop — the canonical PPO orchestration</h2>
-        <p class="lesson-q">What does the heart of a real RL framework look like in code?</p>
-      </div>
+        <h3>CUDA Python — the bottom of the stack</h3>
 
-      <p>verl's <code>ray_trainer.py</code> is the cleanest mapping of "RL algorithm → orchestration code" in the open-source ecosystem. Every phase of PPO is a <code>marked_timer</code> block; every cross-module call is a Ray dispatch; every batch update is a <code>DataProto.union(...)</code>. The driver code is &lt;30 lines for an entire step.</p>
+        <p><a href="https://github.com/nvidia/cuda-python">NVIDIA/cuda-python</a> is the metapackage that exposes CUDA from Python. It has multiple subpackages: <code>cuda.bindings</code> (low-level bindings to the CUDA driver, runtime, NVRTC, NVVM), <code>cuda.core</code> (Pythonic access to CUDA Runtime and JIT compilation), <code>numba.cuda</code> (a SIMT DSL that compiles a restricted subset of Python to CUDA kernels), and newer DSLs <code>cuda.tile</code> (NumPy-like syntax for the CUDA Tile programming model) and <code>cuda.coop</code> (block-wide and warp-wide primitives). If you need to write a kernel from scratch in Python with full control, this is the layer.</p>
 
-<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/ray_trainer.py#L1274" target="_blank"><span class="file-path">verl/trainer/ppo/ray_trainer.py</span><span class="file-meta">· main training step · L1370+</span></a>
+        <p>The reason this exists, beyond pedagogy, is that PyTorch's abstractions occasionally aren't enough. When you need NVSHMEM for one-sided RDMA, or NVML for fine-grained device queries, or a custom reduction over a non-standard layout, you reach for <code>cuda.bindings</code>. For RL infra specifically, NCCL group management and CUDA IPC (Section ③) live here.</p>
+
+        <h3>Triton — the Python DSL that became universal</h3>
+
+        <p><a href="https://github.com/triton-lang/triton">Triton</a> is the Python DSL for writing GPU kernels that became the de facto standard the moment FlashAttention shipped in it. The pitch from the original <a href="http://www.eecs.harvard.edu/~htk/publication/2019-mapl-tillet-kung-cox.pdf">MAPL 2019 paper</a> is simple: write code that's higher-productivity than CUDA but more flexible than fixed-shape DSLs, with autotuning across block sizes. The compiler handles memory coalescing, shared-memory allocation, and tensor-core dispatch.</p>
+
+<a class="source-badge" href="https://github.com/triton-lang/triton/blob/main/python/tutorials/01-vector-add.py" target="_blank"><span class="file-path">python/tutorials/01-vector-add.py</span><span class="file-meta">· the canonical hello-world</span></a>
+<pre class="with-source"><code>@triton.jit
+def add_kernel(x_ptr,        # *Pointer* to first input vector.
+               y_ptr,        # *Pointer* to second input vector.
+               output_ptr,   # *Pointer* to output vector.
+               n_elements,
+               BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets &lt; n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    y = tl.load(y_ptr + offsets, mask=mask)
+    tl.add(x_ptr + offsets, y, mask=mask)</code></pre>
+
+        <p>What's worth noticing: the indexing is at the <em>block</em> level, not the <em>thread</em> level. <code>tl.arange(0, BLOCK_SIZE)</code> denotes a whole block of indices; <code>mask</code> handles out-of-bounds without manual loops. This is the "tiled" model — write block-wise math, the compiler vectorizes within the block. vLLM's PagedAttention, SGLang's attention kernels, the FlashAttention family, and most of the actually-fast layers in production frameworks are Triton kernels.</p>
+
+        <h3>TileLang — the new DSL with theorem-prover integration</h3>
+
+        <p><a href="https://github.com/tile-ai/tilelang">TileLang</a> (open-sourced Jan 2025) is a newer Python DSL on top of TVM. Its pitch is similar to Triton's — productivity above CUDA, flexibility above fixed DSLs — but the design choices differ. TileLang exposes more explicit memory tier control (shared, fragment, register) and integrates the <a href="https://github.com/Z3Prover/z3">Z3 theorem prover</a> into TVM's arith analyzer for SMT-based symbolic reasoning and automatic correctness verification. Backends include NVIDIA via CUTLASS CuTe DSL, AMD MI300X (with async copy), Apple Metal, Huawei AscendC, and WebGPU.</p>
+
+<a class="source-badge" href="https://github.com/tile-ai/tilelang/blob/main/examples/deepseek_mla/example_mla_decode.py" target="_blank"><span class="file-path">examples/deepseek_mla/example_mla_decode.py</span><span class="file-meta">· FlashMLA in ~80 lines</span></a>
+<pre class="with-source"><code>@tilelang.jit(out_idx=[4], pass_configs={...})
+def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, ...):
+    @T.prim_func
+    def main_split(Q, Q_pe, KV, K_pe, Output):
+        with T.Kernel(batch, heads // min(block_H, kv_group_num), num_split, threads=256) as (bid, hid, bz):
+            Q_shared = T.alloc_shared([block_H, dim], dtype)
+            S_shared = T.alloc_shared([block_H, block_N], dtype)
+            KV_shared = T.alloc_shared([block_N, dim], dtype)
+            acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
+            acc_o = T.alloc_fragment([block_H, dim], accum_dtype)
+            scores_max = T.alloc_fragment([block_H], accum_dtype)
+            logsum = T.alloc_fragment([block_H], accum_dtype)
+            # ... ~50 lines of tiled FlashAttention math ...</code></pre>
+
+        <p>The TileLang authors claim performance parity with hand-written FlashMLA on H100 in 80 lines of Python. The Z3 integration is the unusual choice — it lets the compiler prove arithmetic invariants symbolically (e.g., that an index expression stays in bounds for all parameter values, that a tiling is a valid partition). For a mathematician, this is the most interesting compiler design move in the GPU DSL space.</p>
+
+        <h3>Which one to learn?</h3>
+
+        <p>If you only learn one, learn Triton — it's where the field's research code lives. If you care about correctness verification or AMD/Apple/Huawei portability, look at TileLang. Reach for raw <code>cuda.bindings</code> only when you need a CUDA capability the DSLs don't expose (NVSHMEM, certain NCCL primitives, CUDA IPC manipulation). The framework-level RL code (Section ③) lives entirely in pure PyTorch + cuda-python bindings; the inference engines underneath (SGLang, vLLM) are where Triton kernels do the heavy lifting.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — kernel DSLs</div>
+          <ul>
+            <li><a href="https://triton-lang.org/" target="_blank">triton-lang.org</a> — tutorials (vector add, fused softmax, matmul, FlashAttention)</li>
+            <li><a href="https://github.com/srush/Triton-Puzzles" target="_blank">srush/Triton-Puzzles</a> — Sasha Rush's puzzles, runnable without a GPU</li>
+            <li><a href="https://github.com/tile-ai/tilelang-puzzles" target="_blank">tile-ai/tilelang-puzzles</a> — 10 progressively harder puzzles for TileLang</li>
+            <li><a href="https://github.com/tile-ai/tilelang/tree/main/examples/deepseek_mla" target="_blank">tilelang/examples/deepseek_mla</a> — MLA decode reference implementation</li>
+            <li><a href="https://nvidia.github.io/cuda-python/cuda-core/latest/" target="_blank">cuda.core docs</a> · <a href="https://docs.nvidia.com/cuda/cutile-python/" target="_blank">cuda.tile docs</a></li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="megatron">
+        <h2>The training backbone: Megatron-LM</h2>
+
+        <p><a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a> is the training engine sitting under almost every RL framework in this survey. The repository contains two parts: <strong>Megatron Core</strong> (a composable library of GPU-optimized building blocks — kernels, parallelism strategies, mixed-precision support) and <strong>Megatron-LM</strong> proper (reference training scripts using the core). Performance numbers from NVIDIA's benchmarks: 462B-parameter models trained on 6144 H100 GPUs, reaching 47% Model FLOP Utilization. For comparison, naïve PyTorch DDP on a 70B model typically achieves 30-35% MFU.</p>
+
+        <h3>Five-dimensional parallelism</h3>
+
+        <p>The reason Megatron exists, and the reason every serious LLM training run uses it, is its parallelism. Modern Megatron supports five orthogonal dimensions:</p>
+
+        <ul>
+          <li><strong>TP</strong> (Tensor Parallel) — split each layer's weight matrices across GPUs. Within-machine, NVLink-bound. Default for the highest-bandwidth domain.</li>
+          <li><strong>PP</strong> (Pipeline Parallel) — split layers across GPUs. Cross-machine, InfiniBand-bound. Sparse communication, tolerates slower links.</li>
+          <li><strong>DP</strong> (Data Parallel) — replicate the model, split the batch. Tolerant of slow communication. Outer loop of the parallelism nest.</li>
+          <li><strong>EP</strong> (Expert Parallel) — split MoE experts across GPUs. Necessary above ~30B-parameter MoE models. Required for DeepSeek-V3, Qwen3-MoE, GPT-OSS.</li>
+          <li><strong>CP</strong> (Context Parallel) — split the sequence dimension across GPUs. Needed for long-context training (32K+ tokens) and for video models (100K+ tokens).</li>
+        </ul>
+
+        <p>The product space is enormous: TP × PP × DP × EP × CP. Choosing the right point in this grid for a given model and cluster is a small art. Megatron's defaults are good, but the framework above (verl, slime, etc.) typically overrides them for the RL-specific case where rollout and training have conflicting preferences.</p>
+
+        <blockquote class="pull">
+          The communication intensity decreases as you move right through TP → CP → EP → DP → PP. Place the densest communication on the fastest hardware (NVLink within a node) and the sparsest on the slowest (cross-rack InfiniBand). This is the structure principle of every distributed training topology.
+        </blockquote>
+
+        <h3>Megatron's own RL module</h3>
+
+        <p>Less well-known: Megatron-LM ships its own RL training module at <code>megatron/rl/</code>. It includes <code>agent/</code>, <code>inference/</code>, <code>server/</code>, <code>rl_utils.py</code>, and <code>sequence_packing_utils.py</code> — an integrated RL framework, sitting alongside the verl / slime / Miles ecosystem. This is partly redundant with those frameworks but useful when you want first-party NVIDIA support and tight Megatron-Core integration. The <code>post_training/</code> directory handles quantization, distillation, and pruning, which the next section will cover.</p>
+
+        <h3>What's mathematically interesting</h3>
+
+        <p>The communication overlapping flags (<code>--overlap-grad-reduce</code>, <code>--overlap-param-gather</code>, <code>--tp-comm-overlap</code>) are an exercise in hiding latency behind compute — a kind of staggered evaluation. Pipeline parallelism's "1F1B" schedule (one forward, one backward, interleaved) recovers most of the bubble in a fully-synchronous pipeline; the math of why this works is straightforward but writing it down clarifies why Megatron's MFU stays high even with PP.</p>
+
+        <p>The dynamic context parallelism shipped in January 2026 (1.48× speedup for variable-length sequences) is a nice example of treating CP size as a runtime variable rather than a static config. The "right" CP size depends on the sequence length of the current batch — adapting it dynamically is essentially online load balancing.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — Megatron-LM</div>
+          <ul>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM" target="_blank">NVIDIA/Megatron-LM</a> — repo root</li>
+            <li><a href="https://docs.nvidia.com/megatron-core/developer-guide/latest/index.html" target="_blank">Megatron Core docs</a> — parallelism guide, mixed precision, quickstart</li>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/rl" target="_blank"><code>megatron/rl/</code></a> — Megatron's own RL module</li>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/post_training" target="_blank"><code>megatron/post_training/</code></a> — quantization and distillation paths</li>
+            <li><a href="https://arxiv.org/abs/1909.08053" target="_blank">Megatron-LM paper (arxiv 1909.08053)</a> — the original tensor-parallel architecture</li>
+            <li><a href="https://github.com/NVIDIA-NeMo/Megatron-Bridge" target="_blank">Megatron-Bridge</a> — bidirectional HuggingFace ↔ Megatron checkpoint conversion</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="quantization">
+        <h2>Quantization and the numerical-alignment problem</h2>
+
+        <p>If you're reading the Miles paper or the DeepSeek-V3 technical report and wondering why so much engineering effort goes into <em>making FP8 training work correctly</em>, this section is for you. Quantization is where the abstract algorithm meets the concrete number system, and getting it wrong silently corrupts the policy.</p>
+
+        <h3>The numerical formats</h3>
+
+        <p>Three families are worth knowing:</p>
+
+        <ul>
+          <li><strong>FP8</strong> (E4M3 and E5M2) — IEEE-754-style 8-bit floats with two variants: E4M3 has 4 exponent bits and 3 mantissa bits (used for forward activations, weights); E5M2 has 5/2 (used for gradients, with their wider dynamic range). H100-and-newer hardware has native FP8 tensor cores. The two variants exist because forward and backward have different statistical profiles.</li>
+          <li><strong>INT4 / INT8</strong> — fixed-point integers. INT4 weight-only quantization (W4A16) is the workhorse for inference of large models (Llama-70B fits on a single H100 at INT4). Quantization-aware training in INT4 is hard; post-training quantization with GPTQ / AWQ is more common.</li>
+          <li><strong>MXFP4 / MXFP8 / NVFP4</strong> — block-scaled formats. Each block of 16 or 32 values shares a single scale; the per-value representation is small (4 or 8 bits) but the dynamic range is large. NVFP4 is NVIDIA Blackwell-specific (the B200 and beyond); MXFP4 is the OCP standard.</li>
+        </ul>
+
+        <h3>QAT vs PTQ</h3>
+
+        <p>Two strategies for converting a model to a lower-precision format:</p>
+
+        <ul>
+          <li><strong>Quantization-Aware Training (QAT)</strong> — simulate the quantization during training, so the optimizer learns weights that are robust to the lower precision. Expensive but produces the highest-quality models. Miles' INT4-QAT pipeline is the most aggressive example in this survey.</li>
+          <li><strong>Post-Training Quantization (PTQ)</strong> — train in full precision, quantize at the end. Algorithms include GPTQ (one-shot, second-order weight rounding), AWQ (activation-aware weight quantization), GGUF (llama.cpp's format), and ModelOpt (NVIDIA's toolkit). Cheap but lossy.</li>
+        </ul>
+
+        <p>For RL specifically, the question is whether the inference engine can be in a lower precision than the trainer without breaking learning. The answer turns out to be "yes, but only with care."</p>
+
+        <h3>The MoE routing divergence problem</h3>
+
+        <p>This is the deep reason Miles exists. In a Mixture-of-Experts model, each token is routed to k experts based on the output of a small gating network. The gating decision is a top-k over k experts' affinity scores. Under floating-point arithmetic, the affinity scores are computed in a specific precision. If the inference engine computes them in FP8 and the trainer in BF16, two scores that are equal in BF16 can be unequal in FP8 (or vice versa), <em>and the top-k decision can flip</em>. The token routes to a different expert at inference than it did at training time. The gradient signal becomes random noise with respect to which expert actually generated the token.</p>
+
+        <p>This is the "BERT-era unsolved bug" that Chenyang's tutorial flags — the existence of a numerical-precision-induced routing divergence has been known for years. The brute-force fix is to make inference and training share the same precision and the same kernels for the routing computation. That's what Miles' <strong>Unified FP8 Pipeline</strong> does. The cleverer fix is to <em>replay</em> the routing decision: record which experts inference picked, force training to use the same picks. This is <strong>R3 — Rollout Routing Replay</strong>, Miles' signature contribution. It guarantees the routing is identical regardless of precision.</p>
+
+        <blockquote class="pull">
+          The mathematical invariant: routing(x, θ, fp8) ≡ routing(x, θ, bf16) by replay, not by approximation. Without it, every gradient update in an MoE model is partially noise.
+        </blockquote>
+
+        <p>For non-MoE models the problem is milder but still present: numerical drift in logprobs accumulates batch-to-batch. The safe practice (every framework in this survey follows it) is to <em>never</em> use the inference engine's logprobs for loss computation. Always recompute logprobs with the training engine, even at the cost of an extra forward pass. The inference engine generates the tokens; the trainer recomputes their probabilities.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — quantization</div>
+          <ul>
+            <li><a href="https://arxiv.org/abs/2210.17323" target="_blank">GPTQ paper</a> · <a href="https://arxiv.org/abs/2306.00978" target="_blank">AWQ paper</a> — the standard PTQ algorithms</li>
+            <li><a href="https://github.com/NVIDIA/TensorRT-Model-Optimizer" target="_blank">NVIDIA ModelOpt</a> — production toolkit for FP8/INT4/MXFP4 conversion</li>
+            <li><a href="https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf" target="_blank">OCP MX format spec</a> — the standard behind MXFP4 / MXFP8</li>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/post_training" target="_blank">Megatron's <code>post_training/</code></a> — checkpointing and conversion paths</li>
+            <li><a href="https://github.com/radixark/miles/tree/main/docs" target="_blank">Miles docs</a> — R3 + unified FP8 pipeline writeups (the canonical RL-quantization references)</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="code">
+        <h2>Reading real code: verl's <code>fit()</code> loop</h2>
+
+        <p>Everything above has been concept. If you want to see how it ties together in a real framework, the cleanest reference is <a href="https://github.com/verl-project/verl">verl</a>'s <code>ray_trainer.py</code>. One PPO/GRPO iteration is roughly 30 lines of driver code; every phase is a <code>marked_timer</code> block; every cross-module call is a Ray dispatch to SPMD worker groups. The <code>batch: DataProto</code> accumulates fields phase by phase via <code>.union(...)</code>.</p>
+
+<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/ray_trainer.py#L1274" target="_blank"><span class="file-path">verl/trainer/ppo/ray_trainer.py</span><span class="file-meta">· the canonical PPO step</span></a>
 <pre class="with-source"><code>with marked_timer("step", timing_raw):
     with marked_timer("gen", timing_raw, color="red"):
         combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
@@ -1139,97 +1002,22 @@
             batch = batch.union(values)
 
     with marked_timer("adv", timing_raw, color="brown"):
-        batch = compute_advantage(
-            batch, adv_estimator=self.config.algorithm.adv_estimator,
-            gamma=self.config.algorithm.gamma, lam=self.config.algorithm.lam,
-            num_repeat=self.config.actor_rollout_ref.rollout.n,
-            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo, config=self.config.algorithm,
-        )
+        batch = compute_advantage(batch, adv_estimator=self.config.algorithm.adv_estimator, ...)
 
     if self.use_critic:
         with marked_timer("update_critic", timing_raw, color="pink"):
             critic_output = self._update_critic(batch)
 
     with marked_timer("update_actor", timing_raw, color="red"):
-        actor_output = self._update_actor(batch)
-</code></pre>
+        actor_output = self._update_actor(batch)</code></pre>
 
-      <div class="callout">
-        <strong>What this teaches.</strong> The <em>colors</em> are not decorative — they correspond to phases you'd see in verl's wandb traces. Red = generation, yellow = reward, blue = old_log_prob, etc. The driver code is short because every method call is a Ray dispatch to SPMD worker groups. <strong>Reading this once is worth more than reading 20 papers.</strong>
-      </div>
+        <p>The colors aren't decorative — they map to phases you'd see in verl's wandb traces. Red is generation, yellow is reward, blue is old_log_prob, etc. The driver code is short because every method call is a Ray dispatch to SPMD worker groups, which expand to hundreds of GPUs internally. Reading this once is worth more than reading 20 RL papers — it makes the abstract loop in Figure 1 fully concrete.</p>
 
-      <div class="lesson-transition">
-        <em>Next:</em> What is the <code>batch: DataProto</code> that flows through this loop, and how does the dispatch work? <a href="#lesson-14">Lesson 14 — DataProto + dispatch</a>.
-      </div>
-    </section>
+        <p>The contrast worth looking at is AReaL's async path. The single keyword that distinguishes "synchronous" from "fully async" RL is <code>async_op=True</code> on the NCCL broadcasts. AReaL launches them, queues them in memory-bounded buckets, and continues without waiting; OpenRLHF's <code>broadcast_to_vllm</code> blocks until every engine acknowledges. Two designs, one keyword apart, with substantially different scaling properties:</p>
 
-    <section class="lesson" id="lesson-14">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 14</span>
-        <h2>The DataProto envelope and SPMD dispatch</h2>
-        <p class="lesson-q">What is the data structure that flows between modules, and how does "single line on the driver" become "100 GPUs running in parallel"?</p>
-      </div>
-
-      <p>Every batch that flows between modules in verl is a <code>DataProto</code>. Three fields: <code>batch</code> (TensorDict for tensors), <code>non_tensor_batch</code> (numpy arrays for things like images), <code>meta_info</code> (Python dict for metadata). Polymorphic indexing supports int, slice, list, numpy, and torch tensor.</p>
-
-<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/protocol.py" target="_blank"><span class="file-path">verl/protocol.py</span><span class="file-meta">· the universal data envelope</span></a>
-<pre class="with-source"><code>@dataclass
-class DataProto:
-    """A DataProto is a data structure for data exchange between functions."""
-    batch: TensorDict = None
-    non_tensor_batch: dict = field(default_factory=dict)
-    meta_info: dict = field(default_factory=dict)
-
-    def __getitem__(self, item):
-        """Enhanced indexing supporting int, slice, list, numpy array, torch tensor."""
-        if isinstance(item, slice):
-            return self.slice(item.start, item.stop, item.step)
-        elif isinstance(item, list | np.ndarray | torch.Tensor):
-            return self.select_idxs(item)
-        elif isinstance(item, int | np.integer):
-            return self._get_item(item)
-</code></pre>
-
-      <p>And the SPMD dispatch is where "one driver call" expands into "100 GPUs running":</p>
-
-<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/single_controller/base/decorator.py" target="_blank"><span class="file-path">verl/single_controller/base/decorator.py</span><span class="file-meta">· dispatch / collect for SPMD work groups</span></a>
-<pre class="with-source"><code>def dispatch_dp_compute_data_proto(worker_group, *args, **kwargs):
-    """Splits DataProto args across worker_group ranks with auto-padding."""
-    assert isinstance(worker_group, WorkerGroup)
-    splitted_args, splitted_kwargs = _split_args_kwargs_data_proto_with_auto_padding(
-        worker_group.world_size, *args, **kwargs,
-    )
-    return splitted_args, splitted_kwargs
-
-def collect_dp_compute_data_proto(worker_group, output):
-    """Gather results from all workers and concatenate DataProto outputs."""
-    assert BatchData(output).is_concatable()
-    output = collect_dp_compute(worker_group, output)
-    return _concat_data_proto_or_future(output)
-</code></pre>
-
-      <div class="callout">
-        <strong>What this teaches.</strong> "Single-controller interface, multi-controller execution." The framework <em>looks</em> single-threaded; it <em>runs</em> SPMD across hundreds of GPUs. Auto-padding handles the case where batch size isn't divisible by world_size. This pattern (dispatch / execute / collect) is the universal RL workflow primitive — RLinf's M2Flow generalizes it.
-      </div>
-
-      <div class="lesson-transition">
-        <em>Next:</em> verl is one framework. Let's see what AReaL did differently — and why OpenRLHF couldn't. <a href="#lesson-15">Lesson 15 — AReaL vs OpenRLHF</a>.
-      </div>
-    </section>
-
-    <section class="lesson" id="lesson-15">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 15</span>
-        <h2>AReaL vs OpenRLHF — async in one keyword</h2>
-        <p class="lesson-q">What's the single keyword that distinguishes "synchronous" from "fully async" RL?</p>
-      </div>
-
-      <p>AReaL's fully-async design and OpenRLHF's synchronous design differ in one keyword: <code>async_op=True</code>. AReaL launches NCCL broadcasts that return immediately; OpenRLHF blocks until every engine acknowledges.</p>
-
-      <h4>AReaL: launch and continue</h4>
 <a class="source-badge" href="https://github.com/inclusionAI/AReaL/blob/main/areal/engine/fsdp_engine.py" target="_blank"><span class="file-path">areal/engine/fsdp_engine.py</span><span class="file-meta">· memory-bounded async broadcast buckets</span></a>
 <pre class="with-source"><code>class _PendingWeightUpdateBucket:
-    handles: list[dist.broadcast]  # async_op=True handles
+    handles: list[dist.broadcast]   # async_op=True handles
     futures: list[torch.cuda.Event]
     tensors: list[torch.Tensor]
 
@@ -1239,578 +1027,292 @@ for bucket in buckets:
     # continue iterating — don't wait
 
 # Inference side:
-future = rollout_engine.update_weights_from_distributed(
-    meta, param_specs, async_op=True
-)
-# Inference keeps running until it explicitly awaits the future
-</code></pre>
-
-      <h4>OpenRLHF: synchronous broadcast</h4>
-<a class="source-badge" href="https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/ppo_actor.py" target="_blank"><span class="file-path">openrlhf/trainer/ray/ppo_actor.py</span><span class="file-meta">· the structural limit Chenyang identified</span></a>
-<pre class="with-source"><code>@ray.remote(num_gpus=1)
-class PolicyModelActor(BaseModelActor):
-    def fit(self, kl_ctl):
-        return self.trainer.ppo_train(kl_ctl)
-
-    def broadcast_to_vllm(self, vllm_engines):
-        # synchronous: waits for all engines to acknowledge
-        for engine in vllm_engines:
-            engine.update_weights.remote(...)
-        # blocks here until done
-</code></pre>
-
-      <div class="callout">
-        <strong>What this teaches.</strong> The structural limit Chenyang Zhao identified in his tutorial. OpenRLHF's design is correct but synchronous. Each step pays a fixed weight-sync latency before the next rollout can begin. At 256 GPUs with frequent updates, that latency cost grows from a nuisance to the dominant term in step time. AReaL and verl's async paths exist <em>because</em> of this limit.
-      </div>
-
-      <div class="study">
-        <div class="study-title">Cross-reference</div>
-        <ul>
-          <li><a href="https://github.com/inclusionAI/AReaL" target="_blank">inclusionAI/AReaL</a> — full repo</li>
-          <li><a href="https://github.com/OpenRLHF/OpenRLHF" target="_blank">OpenRLHF/OpenRLHF</a> — full repo</li>
-          <li><a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial" target="_blank">Chenyang's tutorial</a> — the comparative analysis that informs this lesson</li>
-        </ul>
-      </div>
-
-      <div class="lesson-transition">
-        <em>Next:</em> You've seen three frameworks' code. Now zoom out: what's the full landscape of 9 frameworks, and how do they differ? <a href="#lesson-16">Lesson 16 — The 5 axes of choice</a>.
-      </div>
-    </section>
-
-    <div class="act-intro" id="act-v">
-      <span class="act-label">Act V</span>
-      <h2>The Framework Landscape</h2>
-      <p>Now that you understand the universal pattern and the engineered primitives, you can place every framework on a 5-dimensional map. Same skeleton, different choices. By the end of this act you'll know who picked what and why.</p>
-    </div>
-
-    <section class="lesson" id="lesson-16">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 16</span>
-        <h2>The 5 axes of choice</h2>
-        <p class="lesson-q">What questions actually distinguish one RL framework from another?</p>
-      </div>
-
-      <p>Every framework picks a coordinate on these five axes. These are the questions that actually differentiate them — beneath the marketing, this is all there is.</p>
-
-      <table>
-        <thead><tr><th>Axis</th><th>Choices</th><th>Why it matters</th></tr></thead>
-        <tbody>
-          <tr><td><strong>Training backend</strong></td><td>FSDP · Megatron · DeepSpeed · custom</td><td>Megatron wins above ~30B; FSDP wins for prototyping. Sets the parallelism ceiling.</td></tr>
-          <tr><td><strong>Inference backend</strong></td><td>SGLang · vLLM · TRT-LLM · diffusers</td><td>Determines rollout speed, weight-update API, and which optimizations you get for free.</td></tr>
-          <tr><td><strong>Orchestration</strong></td><td>Ray · custom NCCL · torchrun</td><td>Ray = flexible / agentic; custom NCCL (cosmos-rl) = peak HW efficiency on InfiniBand.</td></tr>
-          <tr><td><strong>Placement</strong></td><td>Colocated · Disaggregated · Hybrid (M2Flow)</td><td>Colocate to share GPUs; disaggregate for throughput. RLinf claims 2.4× from getting this right.</td></tr>
-          <tr><td><strong>Domain</strong></td><td>Chat LLM · Reasoning · Agentic · VLA · World/Video</td><td>Sets reward design. Math/code = rule-based; chat = neural RM; robotics = sim-in-loop.</td></tr>
-        </tbody>
-      </table>
-
-      <div class="lesson-transition">
-        <em>Next:</em> Apply the 5 axes to every framework. <a href="#lesson-17">Lesson 17 — 9 frameworks compared</a>.
-      </div>
-    </section>
-
-    <section class="lesson" id="lesson-17">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 17</span>
-        <h2>9 frameworks compared</h2>
-        <p class="lesson-q">Side by side: how does each framework answer the five axes?</p>
-      </div>
-
-      <table>
-        <thead>
-          <tr>
-            <th>Framework</th>
-            <th>Training</th>
-            <th>Inference</th>
-            <th>Orchestration</th>
-            <th>Domain focus</th>
-            <th>Distinctive bet</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><span class="label label-purple">Miles</span></td>
-            <td>Megatron (plugin bridge)</td>
-            <td>SGLang</td>
-            <td>Ray</td>
-            <td>Frontier MoE LLMs</td>
-            <td>Bit-identical FP8 / INT4; <strong>R3 routing replay</strong></td>
-          </tr>
-          <tr>
-            <td><span class="label label-green">SLIME</span></td>
-            <td>Megatron</td>
-            <td>SGLang</td>
-            <td>Ray</td>
-            <td>Reasoning + agentic LLMs (GLM-5.1)</td>
-            <td><strong>On-policy distillation</strong>; rich math/science graders</td>
-          </tr>
-          <tr>
-            <td><span class="label label-orange">SGLang</span></td>
-            <td>—</td>
-            <td>(itself)</td>
-            <td>—</td>
-            <td>Inference engine for everyone above</td>
-            <td><code>update_weights_from_*</code>, RadixAttention, spec decoding</td>
-          </tr>
-          <tr>
-            <td><span class="label label-sky">SkyRL</span></td>
-            <td>FSDP / FSDP2 / Megatron</td>
-            <td>vLLM / SGLang / OpenAI API</td>
-            <td>Ray (hierarchical placement)</td>
-            <td>Multi-turn agents (SWE, search, SQL)</td>
-            <td><code>skyrl-gym</code> + <code>skyrl-agent</code> + Tinker API</td>
-          </tr>
-          <tr>
-            <td><span class="label label-nv">cosmos-rl</span></td>
-            <td>PyTorch native + custom 6D parallel</td>
-            <td>vLLM / diffusers / TRT-LLM</td>
-            <td>Custom controller-replica + dynamic NCCL</td>
-            <td>Physical AI: world models, VLA, robotics</td>
-            <td>WFM RL (DDRL); FP8/MXFP4; async reward microservice</td>
-          </tr>
-          <tr>
-            <td><span class="label label-rlinf">RLinf</span></td>
-            <td>FSDP + Megatron (hybrid)</td>
-            <td>SGLang + vLLM</td>
-            <td>Ray + <strong>M2Flow</strong> scheduler</td>
-            <td>Embodied + agentic (unified)</td>
-            <td>Macro→Micro flow: 2.43× throughput from scheduling alone</td>
-          </tr>
-          <tr>
-            <td><span class="label label-verl">verl</span></td>
-            <td>FSDP / FSDP2 / Megatron</td>
-            <td>vLLM / SGLang / HF</td>
-            <td>Ray (HybridFlow controller)</td>
-            <td>Frontier LLM RL (ByteDance Seed origins)</td>
-            <td>3D-HybridEngine + handle-tuple weight sync; DAPO/PRIME/GSPO recipes</td>
-          </tr>
-          <tr>
-            <td><span class="label label-openrlhf">OpenRLHF</span></td>
-            <td>DeepSpeed</td>
-            <td>vLLM (primary), SGLang</td>
-            <td>Centralized Ray driver</td>
-            <td>RLHF baseline</td>
-            <td>The OG framework; synchronous design now structurally limited</td>
-          </tr>
-          <tr>
-            <td><span class="label label-areal">AReaL</span></td>
-            <td>FSDP / Megatron</td>
-            <td>SGLang (default)</td>
-            <td>Ray + async futures</td>
-            <td>Fully-async RL</td>
-            <td><code>_PendingWeightUpdateBucket</code> — non-blocking NCCL; 2.77× speedup</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <div class="lesson-transition">
-        <em>Next:</em> Group these 9 into families. <a href="#lesson-18">Lesson 18 — Family clusters</a>.
-      </div>
-    </section>
-
-    <section class="lesson" id="lesson-18">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 18</span>
-        <h2>Family clusters</h2>
-        <p class="lesson-q">If we group the 9 frameworks by what they're <em>betting</em> on, what families emerge?</p>
-      </div>
-
-      <p>The 9 frameworks cluster into four families. Each family has a different theory of where the engineering progress is to be made.</p>
-
-      <table>
-        <thead><tr><th>Family</th><th>Members</th><th>Theory</th></tr></thead>
-        <tbody>
-          <tr>
-            <td><strong>LLM purists</strong></td>
-            <td><span class="label label-purple">Miles</span> · <span class="label label-green">SLIME</span> · <span class="label label-verl">verl</span></td>
-            <td>Tight Megatron + SGLang + Ray bet. Innovate on <em>numerics</em> and <em>algorithms</em>. Goal: train frontier LLMs as cheaply as possible.</td>
-          </tr>
-          <tr>
-            <td><strong>Agent platforms</strong></td>
-            <td><span class="label label-sky">SkyRL</span> · <span class="label label-rlinf">RLinf</span></td>
-            <td>Abstract <em>environments</em>. Trade backend specificity for flexibility. Goal: train agents that interact with tools and the real world.</td>
-          </tr>
-          <tr>
-            <td><strong>Domain extenders</strong></td>
-            <td><span class="label label-nv">cosmos-rl</span></td>
-            <td>Bring RL to non-text modalities (video, robotics). Rebuild orchestration around hardware. Goal: physical AI.</td>
-          </tr>
-          <tr>
-            <td><strong>Substrate</strong></td>
-            <td><span class="label label-orange">SGLang</span></td>
-            <td>Be the picks-and-shovels. Don't compete with frameworks; <em>enable</em> them. Goal: every RL framework names you as an adopter.</td>
-          </tr>
-          <tr>
-            <td><strong>Performance specialists</strong></td>
-            <td><span class="label label-areal">AReaL</span> · <span class="label label-openrlhf">OpenRLHF</span></td>
-            <td>AReaL bets on async; OpenRLHF was the baseline. Both are about <em>orchestration choices</em>.</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <div class="callout">
-        <strong>Pattern.</strong> Frameworks cluster into three primary families plus the substrate. <em>LLM purists</em> innovate on numerics. <em>Agent platforms</em> abstract environments. <em>Domain extenders</em> bring RL to non-text modalities. SGLang sits underneath all of them.
-      </div>
-
-      <div class="lesson-transition">
-        <em>Next:</em> Quick tour of each framework's distinctive contribution. <a href="#lesson-19">Lesson 19 — Tour of the 9</a>.
-      </div>
-    </section>
-
-    <section class="lesson" id="lesson-19">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 19</span>
-        <h2>Tour of the 9 frameworks</h2>
-        <p class="lesson-q">In one paragraph each: what's the framework about, and what file should you read first?</p>
-      </div>
-
-      <h3>verl — the hybrid-engine reference implementation</h3>
-      <p><a href="https://github.com/verl-project/verl">verl</a> (Volcano Engine RL, originally ByteDance Seed) is the open-source version of the <a href="https://arxiv.org/abs/2409.19256">HybridFlow paper</a>. Most patterns we've discussed — handle-tuple weight sync, single-controller dispatch, ResourcePoolManager, <code>marked_timer</code> phases — were canonicalized here. Trained Doubao-1.5-pro, Seed-Thinking-v1.5, DAPO-32B. <strong>Read first:</strong> <a href="https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/ray_trainer.py" target="_blank"><code>verl/trainer/ppo/ray_trainer.py</code></a>.</p>
-
-      <h3>Miles — bit-identical RL for frontier MoEs</h3>
-      <p><a href="https://github.com/radixark/miles">Miles</a> targets the hardest case: training trillion-parameter MoE models where any numerical drift between inference and training collapses learning. Its signature contributions — Unified FP8 Pipeline, R3 routing replay, INT4 quant-aware training — all attack this single problem. <strong>Read first:</strong> <a href="https://github.com/radixark/miles/tree/main/miles/backends" target="_blank"><code>miles/backends/</code></a> for FP8 configs.</p>
-
-      <h3>SLIME — RL flexibility for reasoning + agents</h3>
-      <p><a href="https://github.com/THUDM/slime">SLIME</a> trains GLM-5.1 and emphasizes algorithmic flexibility over numerical sophistication. Signature contribution: <strong>on-policy distillation</strong>. <strong>Read first:</strong> <a href="https://github.com/THUDM/slime/tree/main/slime/rollout" target="_blank"><code>slime/rollout/</code></a> — particularly <code>on_policy_distillation.py</code>.</p>
-
-      <h3>SkyRL — modular RL for agents</h3>
-      <p><a href="https://github.com/NovaSky-AI/SkyRL">SkyRL</a> (Berkeley NovaSky) bets on modularity. Five sub-packages: <code>skyrl-train</code>, <code>skyrl-gym</code>, <code>skyrl-agent</code>, <code>skyrl-tx</code> (Tinker), plus unified <code>skyrl/</code>. Trained <strong>SA-SWE-32B</strong> on SWEBench. <strong>Read first:</strong> <a href="https://github.com/NovaSky-AI/SkyRL/tree/main/skyrl-gym" target="_blank"><code>skyrl-gym/</code></a>.</p>
-
-      <h3>cosmos-rl — RL for physical AI (NVIDIA)</h3>
-      <p><a href="https://github.com/nvidia-cosmos/cosmos-rl">cosmos-rl</a> is the only framework that <em>isn't</em> chat-LLM-centric. "Flexible and scalable RL framework specialized for Physical AI." Diffusion world models, VLA robotics, video generation. Custom controller-replica with dynamic NCCL — no Ray. <strong>Read first:</strong> <a href="https://github.com/nvidia-cosmos/cosmos-rl/tree/main/cosmos_rl/policy" target="_blank"><code>cosmos_rl/policy/</code></a>.</p>
-
-      <h3>RLinf — flexibility through scheduling</h3>
-      <p><a href="https://github.com/RLinf/RLinf">RLinf</a> ("Reinforcement Learning Infrastructure" / "Infinite") argues that the core problem in RL infra is <em>system flexibility</em>. Their answer: <strong>M2Flow</strong>. Up to 2.43× throughput from scheduling alone. Three arxiv papers (2509.15965, 2510.06710, 2602.07837). <strong>Read first:</strong> <a href="https://github.com/RLinf/RLinf/tree/main/rlinf/scheduler" target="_blank"><code>rlinf/scheduler/</code></a>.</p>
-
-      <h3>OpenRLHF — the OG, structurally limited</h3>
-      <p><a href="https://github.com/OpenRLHF/OpenRLHF">OpenRLHF</a> was the first widely-adopted open-source RLHF framework. Synchronous design limits scaling, but it's the easiest framework to read end-to-end. Every modern framework's architecture is a response to OpenRLHF's structural choices. <strong>Read first:</strong> <a href="https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ppo_trainer.py" target="_blank"><code>openrlhf/trainer/ppo_trainer.py</code></a>.</p>
-
-      <h3>AReaL — fully-async RL</h3>
-      <p><a href="https://github.com/inclusionAI/AReaL">AReaL</a> (Inclusion AI) makes <em>fully asynchronous</em> first-class. <code>_PendingWeightUpdateBucket</code> queues NCCL broadcasts; trainer never blocks. 2.77× speedup over synchronous designs. <strong>Read first:</strong> <a href="https://github.com/inclusionAI/AReaL/blob/main/areal/engine/fsdp_engine.py" target="_blank"><code>areal/engine/fsdp_engine.py</code></a>.</p>
-
-      <h3>SGLang — the substrate</h3>
-      <p><a href="https://github.com/sgl-project/sglang">SGLang</a>'s README explicitly calls itself "a proven rollout backend used for training many frontier models, with native RL integrations." Adopted by Miles, SLIME, AReaL, verl, Tunix. The picks-and-shovels everyone else builds on. <strong>Read first:</strong> <a href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/scheduler_update_weights_mixin.py" target="_blank"><code>scheduler_update_weights_mixin.py</code></a> — the four <code>update_weights_from_*</code> verbs.</p>
-
-      <div class="lesson-transition">
-        <em>Next:</em> All 9 frameworks above train LLMs. Act VI is about what happens when the target isn't chat. <a href="#lesson-20">Lesson 20 — Multi-turn agents</a>.
-      </div>
-    </section>
-
-    <div class="act-intro" id="act-vi">
-      <span class="act-label">Act VI</span>
-      <h2>Beyond Chat</h2>
-      <p>So far we've assumed the target is a chat LLM. But the 2026 frontier is wider — multi-turn agents, vision-language-action policies, diffusion world models, video generators. These targets push different requirements onto the framework, and frameworks that can't accommodate them get left behind. Three lessons on what changes when you leave the chat domain.</p>
-    </div>
-
-    <section class="lesson" id="lesson-20">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 20</span>
-        <h2>Multi-turn agents and tool use</h2>
-        <p class="lesson-q">What changes when a "rollout" is a 10-turn conversation with API calls, not a single completion?</p>
-      </div>
-
-      <p>Single-turn RL: one prompt → one completion → one reward. Easy. <strong>Multi-turn RL</strong>: the model emits a tool call, gets a tool response, emits another action, gets another response — across 10+ turns. Reward arrives at the end (task success) or per-turn (intermediate signals). The rollout is now a <em>trajectory</em>, not a completion.</p>
-
-      <p>The systems requirements change:</p>
-      <ul style="padding-left: 22px; margin-bottom: 14px;">
-        <li><strong>KV cache reuse across turns</strong> — SGLang's <code>open_session()</code> / <code>close_session()</code>. Without it, every turn re-prefills the entire history.</li>
-        <li><strong>Variable-length trajectories</strong> — some agents finish in 2 turns, some in 20. Long-tail is brutal. Partial rollout (Lesson 12) becomes mandatory.</li>
-        <li><strong>Environment as a service</strong> — the agent needs to call real tools (a search API, a code executor, a database). The framework needs a clean environment abstraction.</li>
-      </ul>
-
-      <p>Two frameworks lead here: <strong><a href="https://github.com/NovaSky-AI/SkyRL">SkyRL</a></strong> with its <code>skyrl-gym</code> + <code>skyrl-agent</code> sub-packages (trained the <a href="https://arxiv.org/abs/2511.16108">SA-SWE-32B model</a> on SWEBench), and <strong><a href="https://github.com/THUDM/slime">SLIME</a></strong> with concrete examples (<code>tau-bench</code>, <code>retool</code>, <code>search-r1</code>). verl's <code>examples/sglang_multiturn</code> shows the ReTool recipe.</p>
-
-      <div class="lesson-transition">
-        <em>Next:</em> If multi-turn agents are one extension, embodied AI is the other — and it has even harder requirements. <a href="#lesson-21">Lesson 21 — Embodied AI, VLA, world models</a>.
-      </div>
-    </section>
-
-    <section class="lesson" id="lesson-21">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 21</span>
-        <h2>Embodied AI, VLA, and world models</h2>
-        <p class="lesson-q">What does an RL framework need when the target outputs robot actions or video frames instead of tokens?</p>
-      </div>
-
-      <p>Three new model classes have appeared:</p>
-
-      <ul style="padding-left: 22px; margin-bottom: 14px;">
-        <li><strong>Vision-Language-Action (VLA)</strong> — π₀ / π₀.₅ (Physical Intelligence), OpenVLA, NVIDIA GR00T-N1.5. Take image + language instruction; output continuous action sequences for robots.</li>
-        <li><strong>World foundation models (WFM)</strong> — Cosmos-Predict 2B/14B, SANA, SD3. Diffusion-based video generators that can simulate environments.</li>
-        <li><strong>Diffusion image models</strong> — FLUX.1 (schnell, dev, Canny, Depth, Redux), FLUX.2 (klein for sub-second inference, dev for quality). Targets for RL refinement via reward models (pickscore, aesthetic).</li>
-      </ul>
-
-      <p>The systems requirements:</p>
-
-      <ul style="padding-left: 22px; margin-bottom: 14px;">
-        <li><strong>Diffusion is iterative</strong> — each "rollout" is 50+ denoising network calls, not one autoregressive pass. Cost-per-sample dominates. Batching at the trajectory level (not the token level) is the only economic path.</li>
-        <li><strong>Wan2.2 is MoE video</strong> — 27B total params, ~14B active per timestep. Multi-GPU inference via FSDP and DeepSpeed Ulysses.</li>
-        <li><strong>Long context</strong> — video tokens reach 100K+. cosmos-rl's <strong>6D parallelism</strong> (Sequence × Tensor × Context × Pipeline × FSDP × DDP) exists to handle this.</li>
-        <li><strong>DDRL (Data-regularized DRL)</strong> — cosmos-rl's diffusion-model RL algorithm; replaces KL with reward + standard diffusion training.</li>
-      </ul>
-
-      <p>Two frameworks cover this terrain. <strong><a href="https://github.com/nvidia-cosmos/cosmos-rl">cosmos-rl</a></strong> is the only one with a <code>diffusers</code> backend and DDRL. <strong><a href="https://github.com/RLinf/RLinf">RLinf</a></strong> (as of Feb 2026) supports RL fine-tuning of VLA on Wan world models — closing the loop where Wan simulates rollouts for embodied agents.</p>
-
-      <div class="lesson-transition">
-        <em>Next:</em> One more environment frontier — what if you're not on GPUs at all? <a href="#lesson-22">Lesson 22 — The TPU detour</a>.
-      </div>
-    </section>
-
-    <section class="lesson" id="lesson-22">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 22</span>
-        <h2>The TPU detour</h2>
-        <p class="lesson-q">If you're forced onto Google TPUs, can you still use any of this?</p>
-      </div>
-
-      <p>The <a href="https://cambrian-mllm.github.io/blog/tpu-training-experiments.html">Cambrian-MLLM TPU training blog</a> documents two years of training multimodal models on TPUs. The systems-level findings are directly relevant to RL infra:</p>
-
-      <ul style="padding-left: 22px; margin-bottom: 14px;">
-        <li><strong>"Dynamic shapes are the enemy"</strong> — every shape change triggers XLA recompilation (minutes). RL pipelines on TPU must use fixed batch sizes and dummy-image padding. Variable-length generation as we know it on GPU is essentially banned.</li>
-        <li><strong>"Arbitrary SPMD sharding proved impractical"</strong> — the team hit three critical bugs and fell back to "FSDP via SPMD." Ray-based hybrid placement doesn't translate.</li>
-        <li><strong>Silent library incompatibilities</strong> — <code>F.scaled_dot_product_attention</code> and <code>torch.utils.checkpoint</code> fail without errors on TorchXLA.</li>
-      </ul>
-
-      <p>The conclusion: a TPU-native RL framework would look fundamentally different. Static graph compilation, fixed shape contracts, no Ray, no SGLang. <em>No one has built this yet.</em> vLLM has plugin support for TPUs in inference, but the full RL-on-TPU story is open. <strong>This is a real research gap.</strong></p>
-
-      <div class="lesson-transition">
-        <em>Next:</em> Act VII — synthesis. What breaks at each cluster scale, and what saves you? <a href="#lesson-23">Lesson 23 — The scaling chain</a>.
-      </div>
-    </section>
-
-    <div class="act-intro" id="act-vii">
-      <span class="act-label">Act VII</span>
-      <h2>Synthesis</h2>
-      <p>Two final lessons that synthesize everything you've learned. The scaling chain shows how the primitives from Act III combine to scale from 8 GPUs to 10,000+. The pitfalls (踩坑录) show what the community paid in pain to figure all of this out.</p>
-    </div>
-
-    <section class="lesson" id="lesson-23">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 23</span>
-        <h2>The scaling chain — what breaks at each tier</h2>
-        <p class="lesson-q">As you scale from 8 GPUs to 10,000+, the bottleneck moves. Which primitive saves you at each tier?</p>
-      </div>
-
-      <p>The architecture is elegant because each primitive is designed to address the bottleneck that appears at the <em>next</em> scale tier. Walking up the chain:</p>
-
-      <div class="diagram-wrap">
-        <img src="diagrams/06-scaling-chain.svg" alt="Six tiers from 8 GPUs to 10K+, each with what breaks (red), what dominates cost (gray), and what primitive saves you (green).">
-        <div class="diagram-caption">Figure 6 — The scaling chain. Each primitive is critical at one tier and free at smaller ones.</div>
-      </div>
-
-      <table>
-        <thead>
-          <tr><th>Tier</th><th>What breaks first</th><th>What saves you</th></tr>
-        </thead>
-        <tbody>
-          <tr><td><strong>~8 GPUs</strong> (single node)</td><td>KV + train state collide → OOM</td><td><code>release_memory_occupation</code> + colocate (Lesson 7-8)</td></tr>
-          <tr><td><strong>~64 GPUs</strong> (small cluster)</td><td>GRPO group prefills duplicate work</td><td>RadixAttention prefix cache (Lesson 11)</td></tr>
-          <tr><td><strong>~256 GPUs</strong> (medium)</td><td>Naïve param copy = 50ms × thousands of tensors</td><td>Handle-tuple zero-copy via CUDA IPC + ZMQ (Lesson 9)</td></tr>
-          <tr><td><strong>~1024 GPUs</strong> (large)</td><td>Long-tail rollouts — 90% GPUs idle 18s/iter</td><td>Partial rollout + TIS/MIS staleness corrections (Lesson 12)</td></tr>
-          <tr><td><strong>~4096 GPUs</strong> (frontier)</td><td>Single-controller becomes CPU bottleneck</td><td>SPMD multi-controller; M2Flow dynamic scheduling (RLinf)</td></tr>
-          <tr><td><strong>~10000+ GPUs</strong></td><td>NCCL groups can't be resized — one node down = redo rendezvous</td><td>RDMA point-to-point + disaggregated rollout pools</td></tr>
-        </tbody>
-      </table>
-
-      <div class="callout">
-        <strong>Why this scales — the meta-property.</strong> Each primitive is a <em>local</em> optimization that becomes critical only at a specific scale tier. You don't pay for RDMA until you need elasticity. You don't pay for partial rollout until tail latency dominates. The stack is "pay for what you need" — a property that comes from making each concern <strong>orthogonal</strong>. The opposite design (monolithic optimization) wins at one tier and dies at the next.
-      </div>
-
-      <div class="lesson-transition">
-        <em>Next:</em> The pitfalls that took the community years to figure out. <a href="#lesson-24">Lesson 24 — Pitfalls (踩坑录)</a>.
-      </div>
-    </section>
-
-    <section class="lesson" id="lesson-24">
-      <div class="lesson-header">
-        <span class="lesson-number">Lesson 24</span>
-        <h2>Pitfalls — lessons paid in pain (踩坑录)</h2>
-        <p class="lesson-q">What does Chenyang Zhao's tutorial call out as having burned the community? What were the painful lessons?</p>
-      </div>
-
-      <h4>1. Training-inference numerical drift ("BERT-era unsolved bug")</h4>
-      <p>Inference kernels fuse operations to maximize throughput; the fusion depends on batch shape. The same model + same input + different batch size = slightly different output. For sampled tokens this is invisible. For logprobs that drive PPO loss, accumulated drift makes the policy appear to update toward a target that doesn't exist.</p>
-      <p><strong>Lesson:</strong> Never trust inference-engine logprobs for loss computation. Always recompute with the training engine.</p>
-
-      <h4>2. Handle-tuple deserialization segfaults</h4>
-      <p>verl's <code>update_weights_from_tensor</code> requires <code>monkey_patch_torch_reductions()</code> to register CUDA IPC handle deserializers. Missing this call → silent segfault on the SGLang side, but only intermittently.</p>
-      <p><strong>Lesson:</strong> Handle tuples are low-level. The abstraction leaks. Read the integration code line by line.</p>
-
-      <h4>3. NCCL hang under mixed inference backends</h4>
-      <p>OpenRLHF + SGLang integration: "the entire process was very painful... there's still an NCCL hang error." NCCL hangs are silent deadlocks — no error, just a stalled run.</p>
-      <p><strong>Lesson:</strong> Mixing distributed backends (DeepSpeed + Ray + SGLang's own dist) creates fragile NCCL group management.</p>
-
-      <h4>4. Memory choreography under colocate</h4>
-      <p>Megatron's CPU offload is "not perfect" — KV cache and model parameters contend for the same address ranges. slime's bucket-based weight update exists specifically to avoid OOM on large MoE models.</p>
-      <p><strong>Lesson:</strong> The "memory hand-off" between train and rollout phases is the most common production failure mode. Test at full scale early.</p>
-
-      <h4>5. Off-policy ratio drift</h4>
-      <p>Partial rollout introduces staleness. Without correction (TIS/MIS) or operational bounds (Kimi's curriculum), the off-policy ratio grows monotonically until the policy is training on data from a fundamentally different policy. The training curve looks fine. The eval curve mysteriously degrades.</p>
-      <p><strong>Lesson:</strong> Monitor off-policy ratio as a first-class metric. Cap staleness even if it costs throughput.</p>
-
-      <h4>6. Mixing precisions across train and infer</h4>
-      <p>BF16 training + FP8 inference + FP32 optimizer state = three numerical regimes interacting via weight sync. MoE expert routing diverges between regimes (the problem Miles' R3 was built to solve).</p>
-      <p><strong>Lesson:</strong> If you can't make precision uniform, instrument routing decisions and gradients per-expert. The bug is invisible at the loss level.</p>
-
-      <div class="callout">
-        <strong>The painful lesson behind all of these.</strong> Chenyang's most-repeated line, paraphrased: <em>"A large number of RL conclusions derived from papers are based on RL infrastructure that may be extremely flawed."</em> Every pitfall above produces results that look fine on the loss curve and fail silently on the policy. <strong>Infrastructure correctness precedes algorithmic speed.</strong>
-      </div>
-
-      <div class="lesson-transition">
-        <em>You've finished the 24 lessons.</em> The Capstone synthesizes everything into a decision tree, a 5-week reading plan, and pointers to where the field is going. <a href="#choose">Capstone — Choose your framework</a>.
-      </div>
-    </section>
-
-    <div class="act-intro" id="capstone">
-      <span class="act-label">Capstone</span>
-      <h2>Putting it together</h2>
-      <p>You've completed the 24 lessons. The capstone gives you three practical artifacts: a decision tree for choosing a framework, a 5-week reading plan for going deeper, and a canonical literature list for going further still.</p>
-    </div>
-
-    <section id="choose">
-      <h2>Choose your framework</h2>
-      <p>A decision table. Pick the first row that fits.</p>
-      <table>
-        <thead><tr><th>If your goal is...</th><th>Pick</th><th>Why</th></tr></thead>
-        <tbody>
-          <tr>
-            <td>Train a frontier MoE LLM with quant precision</td>
-            <td><span class="label label-purple">Miles</span></td>
-            <td>Only framework with bit-identical FP8/INT4 + R3 routing replay</td>
-          </tr>
-          <tr>
-            <td>Reasoning model post-training with rich math/science graders</td>
-            <td><span class="label label-green">SLIME</span></td>
-            <td>13 well-documented examples; on-policy distillation built in</td>
-          </tr>
-          <tr>
-            <td>Agent that uses tools / browses / calls APIs (SWE-bench-style)</td>
-            <td><span class="label label-sky">SkyRL</span></td>
-            <td><code>skyrl-gym</code> + <code>skyrl-agent</code>; SA-SWE-32B is the proof point</td>
-          </tr>
-          <tr>
-            <td>Robot policy (π₀, OpenVLA) or sim2real loop</td>
-            <td><span class="label label-rlinf">RLinf</span></td>
-            <td>15+ simulators unified; 8+ algorithms incl. SAC and offline RL</td>
-          </tr>
-          <tr>
-            <td>Video generation / world model RL</td>
-            <td><span class="label label-nv">cosmos-rl</span></td>
-            <td>Only framework with diffusion-grade rollout + DDRL + 6D parallel</td>
-          </tr>
-          <tr>
-            <td>Read one framework's source end-to-end to learn</td>
-            <td><span class="label label-verl">verl</span></td>
-            <td>Cleanest mapping of RL algorithm to orchestration code</td>
-          </tr>
-          <tr>
-            <td>Maximum throughput, can tolerate off-policy drift</td>
-            <td><span class="label label-areal">AReaL</span></td>
-            <td>Fully-async; trainer never blocks on weight sync</td>
-          </tr>
-          <tr>
-            <td>You're building <em>another</em> RL framework</td>
-            <td><span class="label label-orange">SGLang</span></td>
-            <td>The shared inference substrate. Read its weight-update API first.</td>
-          </tr>
-          <tr>
-            <td>Run RL on your laptop without cloud</td>
-            <td><span class="label label-sky">SkyRL Tinker API</span></td>
-            <td>Database-backed registry, no Ray cluster required</td>
-          </tr>
-          <tr>
-            <td>You're stuck on TPUs</td>
-            <td>—</td>
-            <td>Research gap. No mature framework. See Lesson 22.</td>
-          </tr>
-        </tbody>
-      </table>
-    </section>
-
-    <section id="path">
-      <h2>5-week reading plan</h2>
-      <p>If I were learning this space from scratch today, I'd walk it like this:</p>
-      <ol style="padding-left: 22px; margin-bottom: 16px;">
-        <li style="margin-bottom: 8px;"><strong>Week 1 — RL primitives.</strong> Sutton &amp; Barto Ch. 13, OpenAI Spinning Up, the GRPO paper (DeepSeekMath). Don't touch any framework yet.</li>
-        <li style="margin-bottom: 8px;"><strong>Week 2 — SGLang.</strong> It's the substrate. Read <code>entrypoints/engine.py</code>, <code>scheduler_update_weights_mixin.py</code>, <code>radix_cache.py</code>. Understand the four <code>update_weights_from_*</code> flavors.</li>
-        <li style="margin-bottom: 8px;"><strong>Week 3 — verl's <code>fit()</code> loop.</strong> Read it line by line. Trace one PPO step through every <code>marked_timer</code> block. Then run a small example (<code>examples/grpo_trainer/run_qwen3_8b_fsdp.sh</code>).</li>
-        <li style="margin-bottom: 8px;"><strong>Week 4 — One specialty.</strong> If you care about numerics → Miles' R3. If you care about agents → SkyRL's <code>skyrl-agent</code>. If you care about throughput → AReaL's <code>_PendingWeightUpdateBucket</code>.</li>
-        <li style="margin-bottom: 8px;"><strong>Week 5 — Read the tutorial.</strong> Go through <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial">Chenyang Zhao's Awesome-ML-SYS-Tutorial</a> end-to-end. By now you'll have the context to actually understand it.</li>
-      </ol>
-
-      <div class="callout tip">
-        <strong>Shortcut.</strong> If you're a senior engineer who just needs the lay of the land, read Acts II and V of this course (Lessons 4-6 and 16-19). That's 7 lessons covering the universal pattern and the framework matrix. Should take about 90 minutes.
-      </div>
-    </section>
-
-    <section id="canonical">
-      <h2>Canonical literature — start here if you read nothing else</h2>
-      <div class="study" style="border-left-color:var(--purple);">
-        <div class="study-title" style="color:var(--purple);">Required reading</div>
-        <ul>
-          <li><a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial" target="_blank">Awesome-ML-SYS-Tutorial</a> (Chenyang Zhao) — the Chinese-language deep dive on verl, slime, SGLang internals; this entire course is synthesized from his writing</li>
-          <li><a href="https://arxiv.org/abs/2409.19256" target="_blank">HybridFlow paper</a> (verl/EuroSys 2025) — the colocated hybrid-engine pattern</li>
-          <li><a href="https://arxiv.org/abs/2309.06180" target="_blank">PagedAttention paper</a> (vLLM/SOSP 2023) — the KV cache management primitive</li>
-          <li><a href="https://arxiv.org/abs/2312.07104" target="_blank">SGLang paper</a> — RadixAttention + structured generation</li>
-          <li><a href="https://lmsys.org/blog/2024-01-17-sglang/" target="_blank">LMSys: Fast and Expressive LLM Inference with RadixAttention</a></li>
-          <li><a href="https://arxiv.org/abs/2402.03300" target="_blank">DeepSeekMath / GRPO paper</a> — the algorithm at the heart of every framework here</li>
-          <li><a href="https://docs.sglang.ai/" target="_blank">SGLang docs</a> · <a href="https://docs.vllm.ai/" target="_blank">vLLM docs</a> · <a href="https://verl.readthedocs.io/" target="_blank">verl docs</a> · <a href="https://rlinf.readthedocs.io/" target="_blank">RLinf docs</a></li>
-        </ul>
-      </div>
-
-      <h3>The 15 source repos</h3>
-      <p>
-        <a href="https://github.com/verl-project/verl">verl</a> ·
-        <a href="https://github.com/radixark/miles">miles</a> ·
-        <a href="https://github.com/THUDM/slime">slime</a> ·
-        <a href="https://github.com/NovaSky-AI/SkyRL">SkyRL</a> ·
-        <a href="https://github.com/nvidia-cosmos/cosmos-rl">cosmos-rl</a> ·
-        <a href="https://github.com/RLinf/RLinf">RLinf</a> ·
-        <a href="https://github.com/sgl-project/sglang">SGLang</a> ·
-        <a href="https://github.com/vllm-project/vllm">vLLM</a> ·
-        <a href="https://github.com/inclusionAI/AReaL">AReaL</a> ·
-        <a href="https://github.com/OpenRLHF/OpenRLHF">OpenRLHF</a> ·
-        <a href="https://github.com/NVIDIA/TensorRT">TensorRT</a> ·
-        <a href="https://github.com/NVIDIA/TensorRT-LLM">TensorRT-LLM</a> ·
-        <a href="https://github.com/black-forest-labs/flux">FLUX</a> ·
-        <a href="https://github.com/black-forest-labs/flux2">FLUX2</a> ·
-        <a href="https://github.com/Wan-Video/Wan2.2">Wan2.2</a> ·
-        <a href="https://cambrian-mllm.github.io/blog/tpu-training-experiments.html">Cambrian TPU blog</a>
-      </p>
-    </section>
-
-    <footer>
-      Built as a pedagogical reference for learning RL infrastructure. The lessons synthesize <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial">Chenyang Zhao's tutorial</a> with primary-source reading of 15 production repos. Visual styling after <a href="https://github.com/just-the-docs/just-the-docs">just-the-docs</a>.
-      <br><br>
-      <a class="edit-this-page" href="https://github.com/chenggong-zhang/RL_infra" target="_blank">📂 Source repo · chenggong-zhang/RL_infra</a>
-      &nbsp;
-      <a class="edit-this-page" href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial" target="_blank">📚 Conceptual source</a>
-    </footer>
+future = rollout_engine.update_weights_from_distributed(meta, param_specs, async_op=True)
+# Inference keeps running until it explicitly awaits the future</code></pre>
+      </section>
+
+      <section id="landscape">
+        <h2>The framework landscape</h2>
+
+        <p>Nine frameworks, all instantiations of the skeleton in Section 2. They differ on five axes: training backend, inference backend, orchestrator, placement policy, and target domain. Once you know the five axes, you can place every framework on a 5-dimensional map and the surface differences (DAPO vs PRIME vs GSPO vs OPD) collapse into local choices made within the same architectural envelope.</p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Framework</th>
+              <th>Training</th>
+              <th>Inference</th>
+              <th>Orchestration</th>
+              <th>Domain</th>
+              <th>Distinctive bet</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="label label-purple">Miles</span></td>
+              <td>Megatron (plugin)</td>
+              <td>SGLang</td>
+              <td>Ray</td>
+              <td>Frontier MoE</td>
+              <td>FP8/INT4 bit-identical · R3 routing replay</td>
+            </tr>
+            <tr>
+              <td><span class="label label-green">SLIME</span></td>
+              <td>Megatron</td>
+              <td>SGLang</td>
+              <td>Ray</td>
+              <td>Reasoning + agentic (GLM-5.1)</td>
+              <td>On-policy distillation · math/science graders</td>
+            </tr>
+            <tr>
+              <td><span class="label label-orange">SGLang</span></td>
+              <td>—</td>
+              <td>(itself)</td>
+              <td>—</td>
+              <td>Substrate</td>
+              <td>update_weights_from_* · RadixAttention</td>
+            </tr>
+            <tr>
+              <td><span class="label label-sky">SkyRL</span></td>
+              <td>FSDP / Megatron</td>
+              <td>vLLM / SGLang</td>
+              <td>Ray</td>
+              <td>Multi-turn agents</td>
+              <td>skyrl-gym + skyrl-agent + Tinker</td>
+            </tr>
+            <tr>
+              <td><span class="label label-nv">cosmos-rl</span></td>
+              <td>PyTorch + 6D parallel</td>
+              <td>vLLM / diffusers</td>
+              <td>Custom NCCL</td>
+              <td>Physical AI</td>
+              <td>WFM RL (DDRL) · FP8/MXFP4</td>
+            </tr>
+            <tr>
+              <td><span class="label label-rlinf">RLinf</span></td>
+              <td>FSDP + Megatron</td>
+              <td>SGLang + vLLM</td>
+              <td>Ray + M2Flow</td>
+              <td>Embodied + agentic</td>
+              <td>Macro→Micro flow: 2.43× from scheduling</td>
+            </tr>
+            <tr>
+              <td><span class="label label-verl">verl</span></td>
+              <td>FSDP / Megatron</td>
+              <td>vLLM / SGLang</td>
+              <td>Ray (HybridFlow)</td>
+              <td>Frontier LLM RL</td>
+              <td>3D-HybridEngine · DAPO/PRIME/GSPO recipes</td>
+            </tr>
+            <tr>
+              <td><span class="label label-openrlhf">OpenRLHF</span></td>
+              <td>DeepSpeed</td>
+              <td>vLLM</td>
+              <td>Centralized Ray</td>
+              <td>RLHF baseline</td>
+              <td>The OG · structurally synchronous</td>
+            </tr>
+            <tr>
+              <td><span class="label label-areal">AReaL</span></td>
+              <td>FSDP / Megatron</td>
+              <td>SGLang</td>
+              <td>Ray + async futures</td>
+              <td>Fully-async RL</td>
+              <td>_PendingWeightUpdateBucket · 2.77× speedup</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>If you cluster these by their bet, three families emerge. <strong>LLM purists</strong> (Miles, SLIME, verl) make a tight Megatron + SGLang + Ray bet and innovate on numerics and algorithms. <strong>Agent platforms</strong> (SkyRL, RLinf) abstract environments and trade backend specificity for flexibility. The <strong>domain extender</strong> (cosmos-rl) brings RL to non-text modalities — diffusion video, robotics — and rebuilds orchestration around hardware. SGLang sits underneath all of them as substrate; AReaL and OpenRLHF are performance specialists that differ mainly in their async choice.</p>
+
+        <p>For a theorist, the useful exercise is to ask, for a given research result, which framework it was trained on and whether the framework's choices preserve the assumptions the result needs. A claim about variance reduction under GRPO needs the prefix cache to behave; a claim about MoE expert specialization needs the routing-replay invariant; a claim about off-policy correction needs the IS weights to actually be computed. The framework matters more than the algorithm name suggests.</p>
+      </section>
+
+      <section id="beyond">
+        <h2>Beyond chat LLMs</h2>
 
+        <p>All nine frameworks above were designed for chat LLMs. The 2026 frontier is wider — multi-turn agents that call tools, vision-language-action policies for robots, diffusion world models that generate video. These targets push different requirements onto the framework, and frameworks that can't accommodate them get left behind.</p>
+
+        <h3>Multi-turn agents</h3>
+
+        <p>Single-turn RL: one prompt → one completion → one reward. Easy. Multi-turn RL: the model emits a tool call, gets a tool response, emits another action, gets another response — across 10+ turns. Reward arrives at the end (task success) or per-turn (intermediate signals). The rollout is a <em>trajectory</em>, not a completion. New systems requirements: KV cache reuse across turns (SGLang's <code>open_session()</code>), variable-length trajectories (mandates partial rollout), and a clean environment abstraction so the agent can call real tools. SkyRL with <code>skyrl-gym</code> + <code>skyrl-agent</code> (which trained the <a href="https://arxiv.org/abs/2511.16108">SA-SWE-32B SWE-bench model</a>) and SLIME with its concrete examples (<code>tau-bench</code>, <code>retool</code>, <code>search-r1</code>) are the leaders.</p>
+
+        <h3>Embodied AI and VLA</h3>
+
+        <p>Vision-Language-Action models (π₀ / π₀.₅ from Physical Intelligence, OpenVLA, NVIDIA GR00T-N1.5) take an image plus a language instruction and output continuous action sequences for robots. The action space is no longer discrete tokens but continuous joint angles. RL algorithms shift to SAC, DAPO, SAC-Flow (a flow-matching policy variant). The simulator-in-the-loop becomes a non-negotiable part of the framework — RLinf abstracts ManiSkill, IsaacLab, Habitat, LIBERO, RoboTwin, CALVIN, MetaWorld behind a single <code>envs/</code> wrapper.</p>
+
+        <h3>World foundation models and diffusion</h3>
+
+        <p>Cosmos-Predict, SANA, Stable Diffusion 3, Wan2.2 (Alibaba's 27B-total/14B-active MoE video model), FLUX/FLUX.2 (Black Forest Labs) — these are diffusion-based generators. Each "rollout" is 50+ denoising steps, not one autoregressive pass; cost-per-sample dominates everything. Long-context handling becomes critical (video tokens reach 100K+), which is why cosmos-rl needs 6D parallelism. The algorithm shifts too: PPO/GRPO doesn't directly apply to diffusion models. Cosmos-rl's <strong>DDRL</strong> (Data-Regularized DRL) replaces the KL term with reward maximization plus standard diffusion training loss. RLinf as of Feb 2026 supports RL fine-tuning of VLA on Wan world models — closing the loop where Wan simulates rollouts for embodied agents.</p>
+
+        <h3>The TPU detour</h3>
+
+        <p>If you're forced onto Google TPUs, almost none of this works. The <a href="https://cambrian-mllm.github.io/blog/tpu-training-experiments.html">Cambrian-MLLM TPU training blog</a> documents two years of training multimodal models on TPUs and reaches three uncomfortable conclusions. First, "dynamic shapes are the enemy" — every shape change triggers XLA recompilation. Variable-length generation as we know it on GPU is essentially banned. Second, "arbitrary SPMD sharding proved impractical" — Ray-based hybrid placement doesn't translate. Third, silent library incompatibilities hide everywhere: <code>F.scaled_dot_product_attention</code> and <code>torch.utils.checkpoint</code> fail without errors on TorchXLA.</p>
+
+        <p>The conclusion: a TPU-native RL framework would look fundamentally different. Static graph compilation, fixed shape contracts, no Ray, no SGLang. No one has built this yet. vLLM has plugin support for TPUs in inference, but the full RL-on-TPU story is open. <strong>This is a real research gap.</strong></p>
+      </section>
+
+      <section id="scaling">
+        <h2>The scaling chain</h2>
+
+        <p>The architecture is elegant because each primitive is designed to address the bottleneck that appears at the <em>next</em> scale tier. Walking up the chain:</p>
+
+        <figure>
+          <img src="diagrams/06-scaling-chain.svg" alt="Six tiers from 8 GPUs to 10K+, each with what breaks (red), what dominates cost (gray), and what primitive saves you (green).">
+          <figcaption><span class="fig-label">Figure 6.</span> The scaling chain. Each primitive is critical at one tier and effectively free at smaller ones.</figcaption>
+        </figure>
+
+        <table>
+          <thead>
+            <tr><th>Tier</th><th>What breaks first</th><th>What saves you</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>~8 GPUs</strong> (single node)</td><td>KV + train state collide → OOM</td><td><code>release_memory_occupation</code> + colocate</td></tr>
+            <tr><td><strong>~64 GPUs</strong> (small cluster)</td><td>GRPO group prefills duplicate work</td><td>RadixAttention prefix cache</td></tr>
+            <tr><td><strong>~256 GPUs</strong> (medium)</td><td>Naïve param copy = 50ms × thousands of tensors</td><td>Handle-tuple zero-copy via CUDA IPC + ZMQ</td></tr>
+            <tr><td><strong>~1024 GPUs</strong> (large)</td><td>Long-tail rollouts — 90% GPUs idle 18s/iter</td><td>Partial rollout + TIS/MIS staleness corrections</td></tr>
+            <tr><td><strong>~4096 GPUs</strong> (frontier)</td><td>Single-controller becomes CPU bottleneck</td><td>SPMD multi-controller; M2Flow dynamic scheduling</td></tr>
+            <tr><td><strong>~10000+ GPUs</strong></td><td>NCCL groups can't be resized</td><td>RDMA point-to-point + disaggregated rollout pools</td></tr>
+          </tbody>
+        </table>
+
+        <p>The meta-property is that each primitive is a <em>local</em> optimization. You don't pay for RDMA until you need elasticity. You don't pay for partial rollout until tail latency dominates. The stack is "pay for what you need," which is what makes it scale — the opposite design (monolithic optimization tuned to one tier) wins at that tier and dies at the next.</p>
+      </section>
+
+      <section id="pitfalls">
+        <h2>Pitfalls — 踩坑录, lessons paid in pain</h2>
+
+        <p>Chenyang's tutorial catalogs the production failure modes the field has paid years of debugging on. Six are worth knowing for anyone trying to interpret RL results:</p>
+
+        <h4>1. Training-inference numerical drift</h4>
+        <p>Inference kernels fuse operations to maximize throughput; the fusion depends on batch shape. Same model, same input, different batch size = slightly different logits. Invisible at the token level, fatal at the logprob level. <em>Never trust inference-engine logprobs for loss computation.</em></p>
+
+        <h4>2. Handle-tuple deserialization segfaults</h4>
+        <p>verl's <code>update_weights_from_tensor</code> requires <code>monkey_patch_torch_reductions()</code> to register CUDA IPC handle deserializers. Missing this call: silent segfault, intermittent.</p>
+
+        <h4>3. NCCL hangs under mixed inference backends</h4>
+        <p>OpenRLHF + SGLang integration: silent deadlocks, no error, the run just stalls. Mixing distributed backends (DeepSpeed + Ray + SGLang's own dist) creates fragile NCCL group management.</p>
+
+        <h4>4. Memory choreography under colocate</h4>
+        <p>Megatron's CPU offload is imperfect — KV cache and model parameters contend for the same address ranges. slime's bucket-based weight update exists specifically to avoid OOM on large MoE models. <em>Test the memory hand-off at full scale early.</em></p>
+
+        <h4>5. Off-policy ratio drift</h4>
+        <p>Without explicit IS correction or operational staleness bounds, the off-policy ratio grows monotonically until the policy is training on data from a fundamentally different policy. <em>Training curve looks fine. Eval curve mysteriously degrades.</em> Monitor off-policy ratio as a first-class metric.</p>
+
+        <h4>6. Mixing precisions across train and infer</h4>
+        <p>BF16 training + FP8 inference + FP32 optimizer state = three numerical regimes interacting via weight sync. MoE routing diverges between regimes (the problem R3 solves). <em>If you can't make precision uniform, instrument routing decisions per-expert. The bug is invisible at the loss level.</em></p>
+
+        <aside class="note">
+          <strong>The common thread.</strong> Each pitfall produces results that look fine on the loss curve and fail silently on the policy. For a theorist this is the worst possible class of bug — the empirical signal you'd normally trust to validate a theorem is the exact signal these bugs leave intact. The discipline this demands — instrumenting routing, monitoring staleness, recomputing logprobs on the training engine — is what separates production RL from research toys.
+        </aside>
+      </section>
+
+      <section id="reading">
+        <h2>A reading list for the theoretically inclined</h2>
+
+        <p>Ordered not by sequence but by what you want to understand. Pick a row.</p>
+
+        <table>
+          <thead><tr><th>If you want to understand...</th><th>Read</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>The mental model behind every modern RL framework</td>
+              <td><a href="https://arxiv.org/abs/2409.19256">HybridFlow paper</a> (verl/EuroSys 2025)</td>
+            </tr>
+            <tr>
+              <td>The connective tissue between the abstract algorithm and the engineering</td>
+              <td><a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial">Chenyang Zhao's tutorial</a> (中文, the canonical reference)</td>
+            </tr>
+            <tr>
+              <td>What makes inference engines fast</td>
+              <td><a href="https://arxiv.org/abs/2309.06180">PagedAttention paper</a> (vLLM/SOSP 2023) · <a href="https://arxiv.org/abs/2312.07104">SGLang paper</a> · <a href="https://lmsys.org/blog/2024-01-17-sglang/">LMSys RadixAttention announcement</a></td>
+            </tr>
+            <tr>
+              <td>Why GRPO works (and where group size matters)</td>
+              <td><a href="https://arxiv.org/abs/2402.03300">DeepSeekMath / GRPO paper</a></td>
+            </tr>
+            <tr>
+              <td>What MoE routing replay actually preserves</td>
+              <td><a href="https://github.com/radixark/miles/tree/main/docs">Miles docs</a> on R3 and the FP8 pipeline</td>
+            </tr>
+            <tr>
+              <td>How to write a fast GPU kernel without learning CUDA proper</td>
+              <td><a href="https://triton-lang.org/">Triton tutorials</a> · <a href="https://github.com/srush/Triton-Puzzles">Sasha Rush's Triton Puzzles</a></td>
+            </tr>
+            <tr>
+              <td>What 5D parallelism looks like in practice</td>
+              <td><a href="https://docs.nvidia.com/megatron-core/developer-guide/latest/user-guide/parallelism-guide.html">Megatron Core parallelism guide</a></td>
+            </tr>
+            <tr>
+              <td>One framework's source code, end to end</td>
+              <td><a href="https://github.com/verl-project/verl/blob/main/verl/trainer/ppo/ray_trainer.py">verl's <code>ray_trainer.py</code></a></td>
+            </tr>
+            <tr>
+              <td>The mathematician's case for caring about systems</td>
+              <td>(this survey)</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>The 19 source repos surveyed</h3>
+        <p>
+          <a href="https://github.com/verl-project/verl">verl</a> ·
+          <a href="https://github.com/radixark/miles">miles</a> ·
+          <a href="https://github.com/THUDM/slime">slime</a> ·
+          <a href="https://github.com/NovaSky-AI/SkyRL">SkyRL</a> ·
+          <a href="https://github.com/nvidia-cosmos/cosmos-rl">cosmos-rl</a> ·
+          <a href="https://github.com/RLinf/RLinf">RLinf</a> ·
+          <a href="https://github.com/sgl-project/sglang">SGLang</a> ·
+          <a href="https://github.com/vllm-project/vllm">vLLM</a> ·
+          <a href="https://github.com/inclusionAI/AReaL">AReaL</a> ·
+          <a href="https://github.com/OpenRLHF/OpenRLHF">OpenRLHF</a> ·
+          <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a> ·
+          <a href="https://github.com/triton-lang/triton">Triton</a> ·
+          <a href="https://github.com/tile-ai/tilelang">TileLang</a> ·
+          <a href="https://github.com/nvidia/cuda-python">cuda-python</a> ·
+          <a href="https://github.com/NVIDIA/TensorRT">TensorRT</a> ·
+          <a href="https://github.com/NVIDIA/TensorRT-LLM">TensorRT-LLM</a> ·
+          <a href="https://github.com/black-forest-labs/flux">FLUX</a> ·
+          <a href="https://github.com/black-forest-labs/flux2">FLUX2</a> ·
+          <a href="https://github.com/Wan-Video/Wan2.2">Wan2.2</a> ·
+          <a href="https://cambrian-mllm.github.io/blog/tpu-training-experiments.html">Cambrian TPU blog</a>
+        </p>
+      </section>
+
+      <footer>
+        Written as an engineering survey for theorists. The connective analysis (especially "what's mathematically interesting") synthesizes <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial">Chenyang Zhao's tutorial</a> with primary-source reading of 19 production repos. The framework authors did the engineering; this survey just connects the dots and points you to the source.
+        <br><br>
+        Visual styling after <a href="https://github.com/just-the-docs/just-the-docs">just-the-docs</a>.
+        <br>
+        Repository: <a href="https://github.com/chenggong-zhang/RL_infra">github.com/chenggong-zhang/RL_infra</a>.
+      </footer>
+
+    </article>
   </main>
 
   <aside class="toc-rail">
-    <h4>Roadmap</h4>
+    <h4>On this page</h4>
     <ul>
-      <li><a href="#welcome">Welcome</a></li>
-      <li><a href="#roadmap">Course roadmap</a></li>
-    </ul>
-    <h4 style="margin-top:18px;">Acts</h4>
-    <ul>
-      <li><a href="#act-i">I — The Question</a></li>
-      <li><a href="#act-ii">II — Universal Pattern</a></li>
-      <li><a href="#act-iii">III — Engineered Solutions</a></li>
-      <li><a href="#act-iv">IV — Reading Real Code</a></li>
-      <li><a href="#act-v">V — Framework Landscape</a></li>
-      <li><a href="#act-vi">VI — Beyond Chat</a></li>
-      <li><a href="#act-vii">VII — Synthesis</a></li>
-      <li><a href="#capstone">Capstone</a></li>
+      <li><a href="#why">Why this matters</a></li>
+      <li><a href="#skeleton">The skeleton</a></li>
+      <li><a href="#tension">The central tension</a></li>
+      <li><a href="#primitives">Six primitives</a></li>
+      <li><a href="#kernels">CUDA, Triton, TileLang</a></li>
+      <li><a href="#megatron">Megatron-LM</a></li>
+      <li><a href="#quantization">Quantization</a></li>
+      <li><a href="#code">Reading real code</a></li>
+      <li><a href="#landscape">Framework landscape</a></li>
+      <li><a href="#beyond">Beyond chat</a></li>
+      <li><a href="#scaling">Scaling chain</a></li>
+      <li><a href="#pitfalls">Pitfalls</a></li>
+      <li><a href="#reading">Reading list</a></li>
     </ul>
   </aside>
 </div>
 
 <script>
 const navLinks = document.querySelectorAll('.nav-link');
-const sections = document.querySelectorAll('.lesson, section, .act-intro');
+const sections = document.querySelectorAll('article section, article > header');
 
 const observer = new IntersectionObserver(entries => {
   entries.forEach(entry => {
@@ -1829,9 +1331,9 @@ const searchBox = document.getElementById('searchBox');
 if (searchBox) {
   searchBox.addEventListener('input', e => {
     const q = e.target.value.toLowerCase().trim();
-    document.querySelectorAll('.lesson').forEach(lesson => {
-      const text = lesson.textContent.toLowerCase();
-      lesson.style.display = (!q || text.includes(q)) ? '' : 'none';
+    document.querySelectorAll('article section').forEach(sec => {
+      const text = sec.textContent.toLowerCase();
+      sec.style.display = (!q || text.includes(q)) ? '' : 'none';
     });
   });
 }
