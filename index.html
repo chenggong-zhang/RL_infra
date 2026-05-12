@@ -559,6 +559,7 @@
   <ul>
     <li><a href="#multi-turn" class="nav-link">Multi-turn agentic RL</a></li>
     <li><a href="#miles-pipeline" class="nav-link">Miles · DeepSeek-V3</a></li>
+    <li><a href="#deepseek-v4" class="nav-link">DeepSeek V4 · OPD-heavy</a></li>
     <li><a href="#recent" class="nav-link">Recent advances</a></li>
   </ul>
 
@@ -583,13 +584,13 @@
       <header>
         <div class="eyebrow">An engineering survey · for the mathematically inclined</div>
         <h1>RL Infrastructure for the Mathematically Inclined</h1>
-        <p class="subtitle">A field survey of reinforcement-learning post-training systems — six engineering primitives, three kernel-level DSLs, the training backbone, the quantization problem, two case studies, five recurring design patterns, a researcher's checklist, and open questions at the systems–theory boundary. Written for mathematicians and RL theorists who want to read the source code of <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a>, <a href="https://github.com/triton-lang/triton">Triton</a> and recognize what's mathematically interesting about the engineering choices.</p>
+        <p class="subtitle">A field survey of reinforcement-learning post-training systems — six engineering primitives, three kernel-level DSLs, the training backbone, the quantization problem, three production case studies (Miles · DeepSeek V4 · slime OPD), six recurring design patterns, a researcher's checklist, and open questions at the systems–theory boundary. Written for mathematicians and RL theorists who want to read the source code of <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a>, <a href="https://github.com/triton-lang/triton">Triton</a> and recognize what's mathematically interesting about the engineering choices.</p>
         <div class="byline">
-          <span>~55 min read</span>
+          <span>~65 min read</span>
           <span>·</span>
-          <span>19 repos surveyed · 8 diagrams · 10+ code excerpts</span>
+          <span>20 repos surveyed · 8 diagrams · 12+ code excerpts</span>
           <span>·</span>
-          <span>5 design patterns · 9-question checklist · 7 open questions</span>
+          <span>6 design patterns · 9-question checklist · 7 open questions</span>
         </div>
       </header>
 
@@ -1182,10 +1183,103 @@ obs_ids = encode(full)[trim:]   # delta tokens only</code></pre>
         <p>For a theorist this matters because the empirical claims in the field's papers (DeepSeek-R1, GLM-5.1, K2-Thinking, Doubao-1.5-pro) are produced under these specific infrastructure choices. If your work depends on understanding why those models behave as they do, the choices above are the assumption set you're implicitly invoking.</p>
       </section>
 
+      <section id="deepseek-v4">
+        <h2>Case study — DeepSeek V4's post-training infrastructure</h2>
+
+        <p>If Miles is the case study of "train one policy with RL," <a href="https://arxiv.org/abs/DeepSeek-V4">DeepSeek V4</a>'s post-training is the case study of the opposite bet: <em>train many domain experts with RL separately, then merge them into one student via multi-teacher On-Policy Distillation (OPD)</em>. The algorithmic choice — distillation instead of RL as the final-stage merging primitive — shapes a different set of infrastructure problems, and DeepSeek's V4 report (Sections 5.1.2 and 5.2) reads as a clinic on what those problems are and how their team solves them. The system extends the same primitives Miles uses (hybrid engine, FP-aware QAT, fault-tolerant rollout) but adds two genuinely new pieces: efficient multi-teacher scheduling for OPD at trillion-parameter scale, and a production-grade sandbox platform (DSec) for the agentic-AI rollout side. Below is the reading of Section 5 a theorist should take away.</p>
+
+        <h3>Multi-teacher OPD — the merging objective</h3>
+
+        <p>The V4 team trains specialist models in math, coding, reasoning, world-knowledge etc. as separate post-training runs, then distills all of them into one unified student. The objective is a weighted sum of reverse KL divergences against each teacher, computed on trajectories sampled from the <em>student</em>:</p>
+
+        <blockquote class="pull">
+          ℒ<sub>OPD</sub>(M<sub>S</sub>) = Σ<sub>i=1..L</sub> w<sub>i</sub> · D<sub>KL</sub>(M<sub>S</sub> ∥ M<sub>T<sub>i</sub></sub>)
+          <cite>— V4 §5.1.2. <em>L</em> teachers, w<sub>i</sub> weights, trajectories drawn from M<sub>S</sub> to preserve the on-policy property.</cite>
+        </blockquote>
+
+        <p>Two design choices deserve a theorist's attention. <strong>Reverse KL on student trajectories</strong> is what makes "on-policy distillation" on-policy: the student samples its own actions and the teachers score them, so the gradient is taken against the distribution the student actually inhabits. The alternative — forward KL with teacher trajectories — would give a Behavior Cloning-style loss that ignores the student's own failure modes. <strong>Selective alignment per task</strong> emerges from the formulation: w<sub>i</sub> · D<sub>KL</sub> downweights teachers whose distribution is far from the student's current trajectory, so the math expert dominates math contexts and the coding expert dominates coding contexts automatically. The student converges to a policy that <em>chooses</em> which expert to imitate per context — without an explicit gating network.</p>
+
+        <p>The infrastructure twist is in how to compute that KL term. <strong>Prior practice approximates D<sub>KL</sub> with a per-token estimate</strong>: at each position, treat log(M<sub>T</sub>(a)/M<sub>S</sub>(a)) for the sampled action as the per-token advantage and reuse the RL framework's PPO/GRPO loss machinery. Cheap, but high-variance — the per-token ratio swings wildly across positions and the gradient is noisy. V4 instead computes the <strong>full-vocabulary reverse KL</strong> at every position, summing across all |V| ≈ 100k+ tokens. The gradient is lower-variance and faithful to the teacher's full distribution, but the compute and memory cost is what the rest of Section 5.2 exists to make tractable.</p>
+
+        <h3>Efficient teacher scheduling — the hardest piece</h3>
+
+        <p>The challenge V4 had to solve: <em>more than ten teacher models, each potentially trillion-parameter scale, contributing to a single student training step</em>. The naive setup — materialize all teachers' full logits over the full vocabulary at every position — is prohibitive, even spooled to disk (think hundreds of GB of logits per mini-batch). V4's framework solves it through four composed engineering moves:</p>
+
+        <ul>
+          <li><strong>Offload all teacher weights to centralized distributed storage</strong>, load on demand with ZeRO-like parameter sharding. Teachers live in shared storage, not in GPU memory.</li>
+          <li><strong>Cache only the last-layer hidden states</strong> in a centralized buffer during the teacher forward pass — not the full logits. The logit dimension |V| collapses; the hidden dimension d is ~10× smaller.</li>
+          <li><strong>Reconstruct full logits on demand</strong> via the prediction head module at training time. Negligible recomputation, no logit-materialization memory burden.</li>
+          <li><strong>Order training samples by teacher index</strong> during data dispatching, so each teacher head is loaded exactly once per mini-batch and at most one head resides in device memory at any moment. Parameter loading and offloading proceeds asynchronously, off the critical path.</li>
+        </ul>
+
+        <p>And — closing the loop with this survey's TileLang section — V4 reports that "the exact KL divergences between teacher and student logits are computed using a specialized <strong>TileLang kernel</strong>, which accelerates the computation and curtails dynamic memory allocation." The hidden-state-cache + on-demand prediction-head trick is what makes the algorithm fit in memory; the TileLang kernel is what makes the KL computation fast. The whole subsection is a microcosm of how the survey's separate primitives compose: distributed storage offload, parameter sharding, asynchronous I/O, a custom DSL kernel — all stacked to make one mathematical objective economical.</p>
+
+        <h3>FP4 (MXFP4) QAT — lossless FP4→FP8 dequant</h3>
+
+        <p>V4 applies MXFP4 quantization-aware training (FP4 weights with block-shared exponents, the OCP standard) to two components: MoE expert weights and the QK path in the indexer of Compressed Sparse Attention. The trick worth flagging is what they call <em>lossless FP4→FP8 dequantization</em>:</p>
+
+        <blockquote class="pull">
+          FP8 (E4M3) has 2 more exponent bits than FP4 (E2M1). As long as the ratio between max and min scale factors of the FP4 sub-blocks (1×32 tiles) within each FP8 quantization block (128×128 tiles) doesn't exceed a threshold, the fine-grained scale information is fully absorbed by the FP8 dynamic range.
+        </blockquote>
+
+        <p>The mathematical statement: under a bounded-scale-ratio condition (empirically satisfied by their weights), the composition FP32 → FP4 → FP8 preserves the FP4 scale-block information exactly when re-expressed in FP8. This means the existing FP8 training framework is reused without modification — the QAT pipeline plugs in via Straight-Through Estimator on the FP8 backward, and the entire framework's FP8 numerics stack remains intact. For deployment, native FP4 quantized weights are used during rollout instead of simulated quantization, so model behavior during sampling is bit-consistent with online inference. Where the survey's quantization section discussed FP8 and INT4 separately, V4 demonstrates a clean composition: MXFP4 weights flowing through FP8 compute paths, with neither the training framework nor the inference framework needing to know about the FP4 layer underneath.</p>
+
+        <h3>Token-granular Write-Ahead Log — fault-tolerant rollout</h3>
+
+        <p>This is the most mathematically interesting piece of V4's infrastructure, and it ties to the survey's design patterns directly. The problem: in a cluster-wide preemptive scheduler, any rollout request can be interrupted at any token by hardware failure or by preemption for a higher-priority task. The naive recovery — restart preempted requests from scratch — is the kind of thing that looks fine but is mathematically wrong.</p>
+
+        <blockquote class="pull">
+          Regenerating unfinished requests from scratch introduces length bias. <em>Shorter responses are more likely to survive interruption</em>, so regenerating from scratch makes the model more prone to producing shorter sequences whenever an interruption occurs. The bias is a survivorship artifact of the recovery policy, not the policy gradient.
+          <cite>— DeepSeek V4 §5.2.3</cite>
+        </blockquote>
+
+        <p>For a probabilist this is the kind of subtle bias they should hear once and recognize forever. The fix is a token-granular Write-Ahead Log (WAL): every new token is immediately appended to a persistent log; preemption pauses the inference engine and persists the in-flight KV cache; resumption replays the WAL + cached KV to continue decoding. Even on fatal hardware failure, the WAL's tokens are enough to re-run prefill and reconstruct the KV cache from a clean start without restarting generation. The mathematical claim is that the distribution of output sequences is the same whether or not preemption occurred — the WAL preserves on-policy statistics under arbitrary interruption.</p>
+
+        <p>An equivalent solution V4 considers and rejects: a batch-invariant, deterministic inference stack with seeded PRNGs would also let interrupted runs be replayed exactly. Mathematically equivalent; engineering-wise prohibitive (full re-decoding cost instead of WAL-replay cost). The WAL is the right answer at this scale, and it generalizes to any rollout system that has to be preemption-safe.</p>
+
+        <p>This is a sixth design pattern, complementing the five from the next section: <strong>persistent log + replay = correctness under preemption</strong>. I'll formalize it there.</p>
+
+        <h3>Million-token RL — metadata vs heavy data separation</h3>
+
+        <p>V4 supports million-token context windows. The corresponding rollout infrastructure has to handle trajectories where a single sample's per-token fields (logprobs, masks, multimodal payloads) easily exceed gigabytes. The team's solution is to decompose rollout data into two streams: <strong>lightweight metadata</strong> (lengths, sample IDs, reward scalars) loaded eagerly for global shuffling and packing layout decisions; and <strong>heavy per-token fields</strong> loaded lazily via a shared-memory data loader (intra-node deduplication) and released immediately upon consumption at mini-batch granularity. The number of on-device mini-batches is determined dynamically based on workload to trade compute throughput against I/O overlap.</p>
+
+        <p>For a theorist this is "buffer-then-fold" (pattern 5 in the next section) at the data-pipeline layer rather than the tensor layer — same structural argument, different granularity.</p>
+
+        <h3>DeepSeek Elastic Compute (DSec) — agentic-AI sandbox platform</h3>
+
+        <p>The agentic-RL frontier (SWE-bench, web research, tool-use trained policies) needs the rollout engine to call <em>code execution</em>, not just to generate tokens. V4 builds this as a separate platform: <strong>DSec</strong>, a Rust-based production sandbox system that manages "hundreds of thousands of concurrent sandbox instances" per cluster. Four execution substrates behind one unified Python SDK:</p>
+
+        <ul>
+          <li><strong>Function Call</strong> — stateless invocations dispatched to a pre-warmed container pool, no cold start</li>
+          <li><strong>Container</strong> — Docker-compatible, EROFS on-demand image loading</li>
+          <li><strong>microVM</strong> — Firecracker, for security-sensitive high-density</li>
+          <li><strong>fullVM</strong> — QEMU, for arbitrary guest OSes</li>
+        </ul>
+
+        <p>Built on the 3FS distributed filesystem and a custom RPC protocol. Crucially, sandbox lifecycles coordinate with GPU training schedules — preemption and checkpoint-based resumption are first-class. Each sandbox maintains a globally-ordered trajectory log that serves three purposes: <em>fast-forward replay</em> (when training is preempted, cached results for completed commands are replayed on resumption to skip non-idempotent re-execution); <em>fine-grained provenance</em> (every state change is traceable to its command); <em>deterministic replay</em> (any historical session reproduces from its log).</p>
+
+        <p>The unifying observation: V4 has now applied the WAL-replay pattern twice — once at token granularity for LLM rollout (Section 5.2.3), once at command granularity for sandbox state (Section 5.2.5). The same correctness argument carries over: persistent ordered logs let you preempt at any boundary and resume without changing the output distribution. The pattern generalizes; the granularity changes with the workload.</p>
+
+        <h3>What's interesting about V4 as a case study</h3>
+
+        <p>The honest summary: <em>V4's contribution is not a new RL algorithm but a new merging algorithm</em>. The team trains specialists with RL (covered in Section 5.1.1 with GRPO), then uses OPD to consolidate them. The infrastructure innovations — multi-teacher scheduling, WAL fault-tolerance, DSec sandboxes — exist because OPD-as-merger creates problems that pure RL doesn't. For a theorist reading V4 alongside Miles, the right framing is that both papers solve the same skeleton (rollout cycle, three pillars, hybrid engine) but assemble different upper layers on top.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — DeepSeek V4 + OPD</div>
+          <ul>
+            <li>DeepSeek V4 technical report — Section 5.1.2 (OPD objective) and Section 5.2 (post-training infrastructure)</li>
+            <li><a href="https://arxiv.org/abs/2306.08543" target="_blank">Gu et al. 2024 — MiniLLM</a>: the original on-policy distillation formulation</li>
+            <li><a href="https://thinkingmachines.ai/blog/on-policy-distillation/" target="_blank">Lu &amp; Lab 2025 — Thinking Machines OPD blog</a>: a sharper case for OPD over RLHF</li>
+            <li><a href="https://github.com/THUDM/slime/tree/main/examples/on_policy_distillation" target="_blank">slime · examples/on_policy_distillation</a> — the open-source reference with two teacher modes (sglang external, megatron in-process)</li>
+            <li><a href="https://github.com/THUDM/slime/blob/main/examples/on_policy_distillation/README.md" target="_blank">slime OPD README</a> — flags: <code>--use-opd</code>, <code>--opd-type</code>, <code>--opd-kl-coef</code>, <code>--opd-teacher-load</code></li>
+          </ul>
+        </div>
+      </section>
+
       <section id="patterns">
         <h2>Engineering design patterns — the algebraic view</h2>
 
-        <p>Five patterns recur across every framework in the survey. Once you see them named, the rest of the page reads as variations on a small set of themes. I lay them out here as a synthesis of what the previous sections have already shown.</p>
+        <p>Six patterns recur across every framework in the survey. Once you see them named, the rest of the page reads as variations on a small set of themes. I lay them out here as a synthesis of what the previous sections have already shown. The sixth pattern is the one V4 just demonstrated above — I add it explicitly at the end.</p>
 
         <h3>1. Functor — one verb, many topologies</h3>
 
@@ -1219,11 +1313,19 @@ obs_ids = encode(full)[trim:]   # delta tokens only</code></pre>
 
         <p>The pattern recurs in AReaL's <code>_PendingWeightUpdateBucket</code> (queue NCCL broadcasts in memory-bounded buckets, fire them at the end), in verl's <code>DataProto.union</code> (merge fields lazily, materialize the full batch once at dispatch time), and in slime's bucket-based weight sync (avoid OOM by streaming updates in slices). The unifying claim: do not perform an O(n) operation inside an O(n) loop unless you must.</p>
 
+        <h3>6. Persistent log + replay — correctness under preemption</h3>
+
+        <p>The pattern V4 demonstrates with the token-granular Write-Ahead Log. The setup: a long-running stateful computation (a rollout, an agent session, a database transaction) can be interrupted at any moment. The naive recovery — restart from the most recent persistent checkpoint — has subtle correctness pitfalls. Restarting an in-flight LLM generation, as we saw, introduces length bias: shorter responses are over-represented in the survivor population, distorting the empirical distribution of trajectories the policy gradient sees.</p>
+
+        <p>The pattern's claim: <em>maintain an append-only log of every operation; on resumption, replay the log to reconstruct the pre-interruption state</em>. The result is that the post-interruption execution is indistinguishable from a no-interruption execution at the observable boundary (the sampled trajectory distribution in V4's case; the database state in a transactional setting). Token-granular WAL is the LLM-rollout instance; command-granular trajectory logs are DSec's agentic-sandbox instance; the same correctness argument applies in both.</p>
+
+        <p>Mathematically, the pattern is a fixed-point claim: the function from input prompt to output trajectory is the same with or without preemption, when preemption is bracketed by WAL persistence + replay. This is a stronger guarantee than "results are <em>approximately</em> the same" — it's that they're <em>distributionally identical</em>. For a probabilist, the recognition is that recovery policies are part of the data-generating process, and the wrong recovery policy is a hidden experimental variable.</p>
+
         <h3>The synthesis</h3>
 
-        <p>Once you have these five patterns, reading a new RL framework becomes pattern-matching. The first time you see RLinf's M2Flow scheduler, you ask: "what's the functor here, and what's the consistency obligation downstream?" The first time you see cosmos-rl's async reward microservice, you ask: "what's the mutual exclusion contract, and what's the buffer-then-fold strategy?" The first time you read a new framework's <code>train.py</code>, the five patterns are the lens.</p>
+        <p>Once you have these six patterns, reading a new RL framework becomes pattern-matching. The first time you see RLinf's M2Flow scheduler, you ask: "what's the functor here, and what's the consistency obligation downstream?" The first time you see cosmos-rl's async reward microservice, you ask: "what's the mutual exclusion contract, and what's the buffer-then-fold strategy?" The first time you see a fault-tolerant rollout pipeline, you ask: "what's logged, what's replayed, and what's the distributional-equivalence claim?" The first time you read a new framework's <code>train.py</code>, the six patterns are the lens.</p>
 
-        <p>This is why the survey insists on names. Naming the patterns turns "what's going on in this code" into "which of the five patterns is this." The latter is a search; the former is reading.</p>
+        <p>This is why the survey insists on names. Naming the patterns turns "what's going on in this code" into "which of the six patterns is this." The latter is a search; the former is reading.</p>
       </section>
 
       <section id="code">
@@ -1650,6 +1752,7 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
       <li><a href="#quantization">Quantization</a></li>
       <li><a href="#multi-turn">Multi-turn agentic RL</a></li>
       <li><a href="#miles-pipeline">Miles · DeepSeek-V3</a></li>
+      <li><a href="#deepseek-v4">DeepSeek V4 · OPD</a></li>
       <li><a href="#recent">Recent advances</a></li>
       <li><a href="#patterns">Design patterns</a></li>
       <li><a href="#code">Reading real code</a></li>
