@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 540" font-family="system-ui, -apple-system, sans-serif">
+  <title>The three pillars of every RL post-training framework</title>
+  <desc>Training engine + Inference engine + Orchestrator. Around them sits a shared data/reward layer.</desc>
+
+  <defs>
+    <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5c5962"/>
+    </marker>
+  </defs>
+
+  <rect width="900" height="540" fill="#ffffff"/>
+  <text x="450" y="40" text-anchor="middle" font-size="22" font-weight="600" fill="#27262b">The three pillars</text>
+  <text x="450" y="64" text-anchor="middle" font-size="13" fill="#5c5962">Every framework stitches these three together. Pick a row from each column and you've described a framework.</text>
+
+  <!-- Pillar 1: Training -->
+  <g>
+    <rect x="60" y="100" width="240" height="280" rx="6" fill="#fff" stroke="#7253ed" stroke-width="2"/>
+    <rect x="60" y="100" width="240" height="42" rx="6" fill="#7253ed"/>
+    <text x="180" y="128" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">① Training engine</text>
+
+    <text x="180" y="166" text-anchor="middle" font-size="11" fill="#5c5962" font-style="italic">computes gradients · holds optimizer</text>
+
+    <line x1="80" y1="190" x2="280" y2="190" stroke="#e6e1e8"/>
+    <text x="180" y="218" text-anchor="middle" font-size="14" font-weight="600" fill="#27262b">Megatron-LM</text>
+    <text x="180" y="234" text-anchor="middle" font-size="10" fill="#959396">3D parallelism · trillion-param</text>
+
+    <text x="180" y="268" text-anchor="middle" font-size="14" font-weight="600" fill="#27262b">FSDP / FSDP2</text>
+    <text x="180" y="284" text-anchor="middle" font-size="10" fill="#959396">PyTorch native · LoRA-friendly</text>
+
+    <text x="180" y="318" text-anchor="middle" font-size="14" font-weight="600" fill="#27262b">DeepSpeed</text>
+    <text x="180" y="334" text-anchor="middle" font-size="10" fill="#959396">ZeRO offload · OpenRLHF default</text>
+
+    <text x="180" y="368" text-anchor="middle" font-size="11" fill="#7253ed" font-weight="600">→ owns the policy weights of record</text>
+  </g>
+
+  <!-- Pillar 2: Inference -->
+  <g>
+    <rect x="330" y="100" width="240" height="280" rx="6" fill="#fff" stroke="#b85c00" stroke-width="2"/>
+    <rect x="330" y="100" width="240" height="42" rx="6" fill="#b85c00"/>
+    <text x="450" y="128" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">② Inference engine</text>
+
+    <text x="450" y="166" text-anchor="middle" font-size="11" fill="#5c5962" font-style="italic">runs the policy · generates rollouts</text>
+
+    <line x1="350" y1="190" x2="550" y2="190" stroke="#e6e1e8"/>
+    <text x="450" y="218" text-anchor="middle" font-size="14" font-weight="600" fill="#27262b">SGLang</text>
+    <text x="450" y="234" text-anchor="middle" font-size="10" fill="#959396">RadixAttention · weight hot-swap</text>
+
+    <text x="450" y="268" text-anchor="middle" font-size="14" font-weight="600" fill="#27262b">vLLM</text>
+    <text x="450" y="284" text-anchor="middle" font-size="10" fill="#959396">PagedAttention origin</text>
+
+    <text x="450" y="318" text-anchor="middle" font-size="14" font-weight="600" fill="#27262b">TRT-LLM / diffusers</text>
+    <text x="450" y="334" text-anchor="middle" font-size="10" fill="#959396">specialty · not RL-friendly (AOT)</text>
+
+    <text x="450" y="368" text-anchor="middle" font-size="11" fill="#b85c00" font-weight="600">→ exposes update_weights_from_*</text>
+  </g>
+
+  <!-- Pillar 3: Orchestrator -->
+  <g>
+    <rect x="600" y="100" width="240" height="280" rx="6" fill="#fff" stroke="#0ea5e9" stroke-width="2"/>
+    <rect x="600" y="100" width="240" height="42" rx="6" fill="#0ea5e9"/>
+    <text x="720" y="128" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">③ Orchestrator</text>
+
+    <text x="720" y="166" text-anchor="middle" font-size="11" fill="#5c5962" font-style="italic">placement · weight sync · fault recovery</text>
+
+    <line x1="620" y1="190" x2="820" y2="190" stroke="#e6e1e8"/>
+    <text x="720" y="218" text-anchor="middle" font-size="14" font-weight="600" fill="#27262b">Ray</text>
+    <text x="720" y="234" text-anchor="middle" font-size="10" fill="#959396">actors · placement groups · 5/6 frameworks</text>
+
+    <text x="720" y="268" text-anchor="middle" font-size="14" font-weight="600" fill="#27262b">Custom NCCL</text>
+    <text x="720" y="284" text-anchor="middle" font-size="10" fill="#959396">cosmos-rl · peak HW efficiency</text>
+
+    <text x="720" y="318" text-anchor="middle" font-size="14" font-weight="600" fill="#27262b">torchrun</text>
+    <text x="720" y="334" text-anchor="middle" font-size="10" fill="#959396">simplest · static topology</text>
+
+    <text x="720" y="368" text-anchor="middle" font-size="11" fill="#0ea5e9" font-weight="600">→ owns when each pillar runs</text>
+  </g>
+
+  <!-- Connecting arrows: data flow -->
+  <path d="M 300 235 L 330 235" stroke="#5c5962" stroke-width="1.5" marker-end="url(#arr2)"/>
+  <text x="315" y="225" text-anchor="middle" font-size="10" fill="#5c5962" font-style="italic">new weights</text>
+
+  <path d="M 330 305 L 300 305" stroke="#5c5962" stroke-width="1.5" marker-end="url(#arr2)"/>
+  <text x="315" y="320" text-anchor="middle" font-size="10" fill="#5c5962" font-style="italic">rollouts</text>
+
+  <path d="M 570 270 L 600 270" stroke="#5c5962" stroke-width="1.5" marker-end="url(#arr2)"/>
+  <text x="585" y="262" text-anchor="middle" font-size="10" fill="#5c5962" font-style="italic">topology</text>
+
+  <!-- Data layer at bottom -->
+  <rect x="60" y="410" width="780" height="80" rx="6" fill="#f5f6fa" stroke="#e6e1e8"/>
+  <text x="450" y="438" text-anchor="middle" font-size="13" font-weight="600" fill="#27262b">Shared data layer · sits underneath all three pillars</text>
+  <text x="180" y="465" text-anchor="middle" font-size="12" fill="#5c5962"><tspan font-weight="600">Reward hub</tspan> · rm_hub/</text>
+  <text x="450" y="465" text-anchor="middle" font-size="12" fill="#5c5962"><tspan font-weight="600">Filter hub</tspan> · filter_hub/</text>
+  <text x="720" y="465" text-anchor="middle" font-size="12" font-style="italic" fill="#5c5962"><tspan font-weight="600">Data buffer</tspan> · DataProto</text>
+  <text x="450" y="480" text-anchor="middle" font-size="10" fill="#959396" font-style="italic">scoring · quality gates · async bridge between rollout and training</text>
+
+  <text x="450" y="518" text-anchor="middle" font-size="11" fill="#7253ed"><tspan font-weight="600">Picking a row from each column = picking a framework.</tspan> e.g. (Megatron + SGLang + Ray) describes Miles, SLIME, verl, RLinf...</text>
+</svg>

@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 540" font-family="system-ui, -apple-system, sans-serif">
+  <title>The hybrid engine memory choreography (训推一体)</title>
+  <desc>One GPU, two roles. The timeline shows how release_memory_occupation / resume_memory_occupation swap memory ownership between inference and training.</desc>
+
+  <defs>
+    <marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#27262b"/>
+    </marker>
+  </defs>
+
+  <rect width="1000" height="540" fill="#ffffff"/>
+  <text x="500" y="40" text-anchor="middle" font-size="22" font-weight="600" fill="#27262b">The hybrid engine memory choreography</text>
+  <text x="500" y="62" text-anchor="middle" font-size="13" fill="#5c5962">训推一体 — one GPU, two roles. Serialize them in time; swap memory ownership with two function calls.</text>
+
+  <!-- Timeline axis -->
+  <line x1="80" y1="450" x2="940" y2="450" stroke="#27262b" stroke-width="1.5" marker-end="url(#arr3)"/>
+  <text x="965" y="455" font-size="11" fill="#5c5962">time</text>
+
+  <!-- Phase markers -->
+  <g font-size="11" fill="#27262b" font-weight="600">
+    <text x="140" y="475" text-anchor="middle">T=0</text>
+    <text x="280" y="475" text-anchor="middle">T=1</text>
+    <text x="420" y="475" text-anchor="middle">T=2</text>
+    <text x="560" y="475" text-anchor="middle">T=3</text>
+    <text x="700" y="475" text-anchor="middle">T=4</text>
+    <text x="840" y="475" text-anchor="middle">T=5</text>
+  </g>
+  <g font-size="10" fill="#5c5962">
+    <text x="140" y="490" text-anchor="middle">rollout</text>
+    <text x="280" y="490" text-anchor="middle">release</text>
+    <text x="420" y="490" text-anchor="middle">train fwd</text>
+    <text x="560" y="490" text-anchor="middle">train bwd</text>
+    <text x="700" y="490" text-anchor="middle">sync + resume</text>
+    <text x="840" y="490" text-anchor="middle">next rollout</text>
+  </g>
+
+  <!-- Tick marks -->
+  <g stroke="#959396" stroke-width="0.8">
+    <line x1="140" y1="445" x2="140" y2="455"/>
+    <line x1="280" y1="445" x2="280" y2="455"/>
+    <line x1="420" y1="445" x2="420" y2="455"/>
+    <line x1="560" y1="445" x2="560" y2="455"/>
+    <line x1="700" y1="445" x2="700" y2="455"/>
+    <line x1="840" y1="445" x2="840" y2="455"/>
+  </g>
+
+  <!-- Lane label: GPU memory -->
+  <text x="70" y="155" text-anchor="end" font-size="12" font-weight="600" fill="#27262b">GPU memory</text>
+  <text x="70" y="170" text-anchor="end" font-size="10" fill="#959396">~80 GB H100</text>
+
+  <!-- Memory bars per phase -->
+  <!-- T=0: Inference owns -->
+  <g>
+    <rect x="90" y="105" width="100" height="32" fill="#b85c00" opacity="0.85"/>
+    <text x="140" y="125" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">weights</text>
+    <rect x="90" y="142" width="100" height="32" fill="#b85c00" opacity="0.55"/>
+    <text x="140" y="162" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">KV cache</text>
+    <rect x="90" y="179" width="100" height="22" fill="#b85c00" opacity="0.3"/>
+    <text x="140" y="194" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">CUDA graphs</text>
+  </g>
+
+  <!-- T=1: Release -->
+  <g>
+    <rect x="230" y="105" width="100" height="32" fill="#b85c00" opacity="0.85"/>
+    <text x="280" y="125" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">weights ↓</text>
+    <rect x="230" y="142" width="100" height="32" fill="#fff" stroke="#dd2e2e" stroke-dasharray="3,3"/>
+    <text x="280" y="162" text-anchor="middle" font-size="10" fill="#dd2e2e" font-weight="600">freed</text>
+    <rect x="230" y="179" width="100" height="22" fill="#fff" stroke="#dd2e2e" stroke-dasharray="3,3"/>
+    <text x="280" y="194" text-anchor="middle" font-size="9" fill="#dd2e2e" font-weight="600">freed</text>
+  </g>
+
+  <!-- T=2: Train fwd -->
+  <g>
+    <rect x="370" y="100" width="100" height="32" fill="#7253ed" opacity="0.85"/>
+    <text x="420" y="120" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">weights (train)</text>
+    <rect x="370" y="137" width="100" height="32" fill="#7253ed" opacity="0.6"/>
+    <text x="420" y="157" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">activations</text>
+    <rect x="370" y="174" width="100" height="27" fill="#7253ed" opacity="0.4"/>
+    <text x="420" y="192" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">optimizer</text>
+  </g>
+
+  <!-- T=3: Train bwd -->
+  <g>
+    <rect x="510" y="95" width="100" height="32" fill="#7253ed" opacity="0.85"/>
+    <text x="560" y="115" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">weights</text>
+    <rect x="510" y="132" width="100" height="32" fill="#7253ed" opacity="0.7"/>
+    <text x="560" y="152" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">gradients</text>
+    <rect x="510" y="169" width="100" height="32" fill="#7253ed" opacity="0.5"/>
+    <text x="560" y="189" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">optimizer</text>
+  </g>
+
+  <!-- T=4: Sync + Resume -->
+  <g>
+    <rect x="650" y="105" width="100" height="32" fill="#b85c00" opacity="0.85"/>
+    <text x="700" y="125" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">new weights</text>
+    <rect x="650" y="142" width="100" height="32" fill="#b85c00" opacity="0.55"/>
+    <text x="700" y="162" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">KV restored</text>
+    <rect x="650" y="179" width="100" height="22" fill="#b85c00" opacity="0.3"/>
+    <text x="700" y="194" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">CUDA graphs</text>
+  </g>
+
+  <!-- T=5: Next rollout -->
+  <g>
+    <rect x="790" y="105" width="100" height="32" fill="#b85c00" opacity="0.85"/>
+    <text x="840" y="125" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">weights θ_{t+1}</text>
+    <rect x="790" y="142" width="100" height="32" fill="#b85c00" opacity="0.55"/>
+    <text x="840" y="162" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">KV cache</text>
+    <rect x="790" y="179" width="100" height="22" fill="#b85c00" opacity="0.3"/>
+    <text x="840" y="194" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">CUDA graphs</text>
+  </g>
+
+  <!-- Owner lane labels -->
+  <text x="70" y="260" text-anchor="end" font-size="12" font-weight="600" fill="#27262b">GPU owner</text>
+
+  <!-- Owner bands -->
+  <rect x="90" y="240" width="100" height="36" fill="#fff" stroke="#b85c00" stroke-width="1.5"/>
+  <text x="140" y="263" text-anchor="middle" font-size="11" fill="#b85c00" font-weight="600">Inference</text>
+
+  <rect x="230" y="240" width="100" height="36" fill="#fff" stroke="#959396" stroke-dasharray="3,3"/>
+  <text x="280" y="263" text-anchor="middle" font-size="11" fill="#5c5962" font-weight="600">handoff</text>
+
+  <rect x="370" y="240" width="240" height="36" fill="#fff" stroke="#7253ed" stroke-width="1.5"/>
+  <text x="490" y="263" text-anchor="middle" font-size="11" fill="#7253ed" font-weight="600">Training</text>
+
+  <rect x="650" y="240" width="100" height="36" fill="#fff" stroke="#959396" stroke-dasharray="3,3"/>
+  <text x="700" y="263" text-anchor="middle" font-size="11" fill="#5c5962" font-weight="600">handoff</text>
+
+  <rect x="790" y="240" width="100" height="36" fill="#fff" stroke="#b85c00" stroke-width="1.5"/>
+  <text x="840" y="263" text-anchor="middle" font-size="11" fill="#b85c00" font-weight="600">Inference</text>
+
+  <!-- Function call annotations -->
+  <line x1="220" y1="285" x2="220" y2="430" stroke="#dd2e2e" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="220" y="307" text-anchor="middle" font-size="10" fill="#dd2e2e" font-weight="600">release_memory_</text>
+  <text x="220" y="320" text-anchor="middle" font-size="10" fill="#dd2e2e" font-weight="600">occupation()</text>
+
+  <line x1="635" y1="285" x2="635" y2="430" stroke="#026e57" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="635" y="307" text-anchor="middle" font-size="10" fill="#026e57" font-weight="600">resume_memory_</text>
+  <text x="635" y="320" text-anchor="middle" font-size="10" fill="#026e57" font-weight="600">occupation()</text>
+
+  <line x1="640" y1="350" x2="640" y2="350" stroke="#026e57"/>
+  <text x="635" y="345" text-anchor="middle" font-size="10" fill="#026e57">+ update_weights_from_distributed()</text>
+
+  <!-- Key insight at bottom -->
+  <rect x="200" y="370" width="600" height="50" rx="6" fill="#f5f2ff" stroke="#7253ed"/>
+  <text x="500" y="390" text-anchor="middle" font-size="12" font-weight="600" fill="#27262b">Key insight: the GPU is owned by exactly ONE role at any moment.</text>
+  <text x="500" y="408" text-anchor="middle" font-size="11" fill="#5c5962">Two functions encode the entire concurrency contract. No locks, no races, no torn reads.</text>
+</svg>

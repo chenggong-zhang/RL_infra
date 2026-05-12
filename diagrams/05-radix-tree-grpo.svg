@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 580" font-family="system-ui, -apple-system, sans-serif">
+  <title>RadixAttention × GRPO — multiplicative composition</title>
+  <desc>GRPO generates N completions per prompt; they share an identical prefix. RadixAttention's prefix tree makes that sharing free.</desc>
+
+  <defs>
+    <marker id="ar5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7253ed"/>
+    </marker>
+  </defs>
+
+  <rect width="1000" height="580" fill="#ffffff"/>
+  <text x="500" y="36" text-anchor="middle" font-size="22" font-weight="600" fill="#27262b">RadixAttention × GRPO</text>
+  <text x="500" y="58" text-anchor="middle" font-size="13" fill="#5c5962">An algorithmic choice (group sampling) and a system optimization (prefix tree) that compose <tspan font-style="italic">multiplicatively</tspan>.</text>
+
+  <!-- LEFT: Without prefix cache (4× prefill) -->
+  <g>
+    <rect x="40" y="90" width="430" height="380" rx="6" fill="#fff" stroke="#dd2e2e" stroke-width="1.5"/>
+    <rect x="40" y="90" width="430" height="32" rx="6" fill="#fff5f5"/>
+    <text x="255" y="111" text-anchor="middle" font-size="14" font-weight="600" fill="#dd2e2e">Without prefix cache · hash-based</text>
+
+    <text x="255" y="142" text-anchor="middle" font-size="11" font-style="italic" fill="#5c5962">N = 4 group completions, each does its own full prefill</text>
+
+    <!-- 4 separate sequences -->
+    <g font-size="10" fill="#27262b">
+      <!-- Row 1 -->
+      <rect x="70" y="170" width="280" height="22" fill="#f5f6fa" stroke="#dd2e2e" stroke-dasharray="3,2"/>
+      <text x="210" y="185" text-anchor="middle">prompt P (5000 tokens — prefill)</text>
+      <rect x="350" y="170" width="70" height="22" fill="#fff" stroke="#5c5962"/>
+      <text x="385" y="185" text-anchor="middle">c₁</text>
+
+      <!-- Row 2 -->
+      <rect x="70" y="200" width="280" height="22" fill="#f5f6fa" stroke="#dd2e2e" stroke-dasharray="3,2"/>
+      <text x="210" y="215" text-anchor="middle">prompt P (5000 tokens — prefill AGAIN)</text>
+      <rect x="350" y="200" width="70" height="22" fill="#fff" stroke="#5c5962"/>
+      <text x="385" y="215" text-anchor="middle">c₂</text>
+
+      <!-- Row 3 -->
+      <rect x="70" y="230" width="280" height="22" fill="#f5f6fa" stroke="#dd2e2e" stroke-dasharray="3,2"/>
+      <text x="210" y="245" text-anchor="middle">prompt P (5000 tokens — prefill AGAIN)</text>
+      <rect x="350" y="230" width="70" height="22" fill="#fff" stroke="#5c5962"/>
+      <text x="385" y="245" text-anchor="middle">c₃</text>
+
+      <!-- Row 4 -->
+      <rect x="70" y="260" width="280" height="22" fill="#f5f6fa" stroke="#dd2e2e" stroke-dasharray="3,2"/>
+      <text x="210" y="275" text-anchor="middle">prompt P (5000 tokens — prefill AGAIN)</text>
+      <rect x="350" y="260" width="70" height="22" fill="#fff" stroke="#5c5962"/>
+      <text x="385" y="275" text-anchor="middle">c₄</text>
+    </g>
+
+    <!-- Cost -->
+    <rect x="70" y="310" width="370" height="110" rx="4" fill="#fff5f5" stroke="#dd2e2e" stroke-dasharray="3,3"/>
+    <text x="255" y="332" text-anchor="middle" font-size="12" font-weight="600" fill="#27262b">Cost</text>
+    <text x="80" y="354" font-size="11" fill="#5c5962">Prefill cost: <tspan font-weight="600" fill="#dd2e2e">4 × cost(P)</tspan> — duplicated work</text>
+    <text x="80" y="372" font-size="11" fill="#5c5962">KV memory: <tspan font-weight="600" fill="#dd2e2e">4 × KV(P)</tspan> — duplicated storage</text>
+    <text x="80" y="390" font-size="11" fill="#5c5962">Eviction: all-or-nothing per hash entry</text>
+    <text x="80" y="408" font-size="11" fill="#5c5962" font-style="italic">→ Prefill dominates step time for large group sizes.</text>
+  </g>
+
+  <!-- RIGHT: With RadixAttention (1× prefill) -->
+  <g>
+    <rect x="530" y="90" width="430" height="380" rx="6" fill="#fff" stroke="#026e57" stroke-width="1.5"/>
+    <rect x="530" y="90" width="430" height="32" rx="6" fill="#f0fdf9"/>
+    <text x="745" y="111" text-anchor="middle" font-size="14" font-weight="600" fill="#026e57">With RadixAttention · radix tree</text>
+
+    <text x="745" y="142" text-anchor="middle" font-size="11" font-style="italic" fill="#5c5962">shared prefix is one tree node — prefilled once</text>
+
+    <!-- Radix tree visualization -->
+    <!-- Root node (prefix P) -->
+    <rect x="630" y="170" width="230" height="48" rx="4" fill="#026e57" opacity="0.15" stroke="#026e57" stroke-width="1.8"/>
+    <text x="745" y="190" text-anchor="middle" font-size="12" font-weight="600" fill="#026e57">prefix P · 5000 tokens</text>
+    <text x="745" y="206" text-anchor="middle" font-size="10" fill="#5c5962">KV cached once · lock_ref = 4</text>
+
+    <!-- 4 children -->
+    <g>
+      <line x1="680" y1="220" x2="600" y2="265" stroke="#026e57" stroke-width="1.4"/>
+      <line x1="715" y1="220" x2="700" y2="265" stroke="#026e57" stroke-width="1.4"/>
+      <line x1="775" y1="220" x2="790" y2="265" stroke="#026e57" stroke-width="1.4"/>
+      <line x1="810" y1="220" x2="890" y2="265" stroke="#026e57" stroke-width="1.4"/>
+
+      <rect x="560" y="268" width="80" height="32" rx="4" fill="#fff" stroke="#5c5962"/>
+      <text x="600" y="288" text-anchor="middle" font-size="11" fill="#27262b">c₁ tail</text>
+
+      <rect x="660" y="268" width="80" height="32" rx="4" fill="#fff" stroke="#5c5962"/>
+      <text x="700" y="288" text-anchor="middle" font-size="11" fill="#27262b">c₂ tail</text>
+
+      <rect x="750" y="268" width="80" height="32" rx="4" fill="#fff" stroke="#5c5962"/>
+      <text x="790" y="288" text-anchor="middle" font-size="11" fill="#27262b">c₃ tail</text>
+
+      <rect x="850" y="268" width="80" height="32" rx="4" fill="#fff" stroke="#5c5962"/>
+      <text x="890" y="288" text-anchor="middle" font-size="11" fill="#27262b">c₄ tail</text>
+    </g>
+
+    <!-- Cost -->
+    <rect x="560" y="310" width="370" height="110" rx="4" fill="#f0fdf9" stroke="#026e57" stroke-dasharray="3,3"/>
+    <text x="745" y="332" text-anchor="middle" font-size="12" font-weight="600" fill="#27262b">Cost</text>
+    <text x="570" y="354" font-size="11" fill="#5c5962">Prefill cost: <tspan font-weight="600" fill="#026e57">1 × cost(P)</tspan> + 4 × decode tails</text>
+    <text x="570" y="372" font-size="11" fill="#5c5962">KV memory: <tspan font-weight="600" fill="#026e57">1 × KV(P)</tspan> + tails</text>
+    <text x="570" y="390" font-size="11" fill="#5c5962">Eviction: per-node, ref-counted (use-after-free unrepresentable)</text>
+    <text x="570" y="408" font-size="11" fill="#026e57" font-style="italic">→ Near-free group rollouts as N grows.</text>
+  </g>
+
+  <!-- Bottom punchline -->
+  <rect x="60" y="490" width="880" height="70" rx="6" fill="#f5f2ff" stroke="#7253ed"/>
+  <text x="500" y="515" text-anchor="middle" font-size="13" font-weight="600" fill="#27262b">Why this is elegant: neither was designed for the other.</text>
+  <text x="500" y="533" text-anchor="middle" font-size="11" fill="#5c5962">GRPO chose group sampling for variance reduction. RadixAttention chose a tree for cache reuse.</text>
+  <text x="500" y="550" text-anchor="middle" font-size="11" fill="#5c5962">Their composition <tspan font-weight="600" fill="#7253ed">multiplies</tspan> savings — and reference counting means cache lifetime is automatic.</text>
+</svg>

@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 620" font-family="system-ui, -apple-system, sans-serif">
+  <title>The scaling chain — what breaks at each cluster tier</title>
+  <desc>Six cluster sizes; at each, what dominates cost, what breaks first, and which primitive saves you.</desc>
+
+  <defs>
+    <marker id="ar6" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#27262b"/>
+    </marker>
+  </defs>
+
+  <rect width="1100" height="620" fill="#ffffff"/>
+  <text x="550" y="40" text-anchor="middle" font-size="22" font-weight="600" fill="#27262b">The scaling chain</text>
+  <text x="550" y="62" text-anchor="middle" font-size="13" fill="#5c5962">Each primitive in the course is a <tspan font-style="italic">local</tspan> optimization that becomes critical at a specific cluster tier.</text>
+
+  <!-- Horizontal axis -->
+  <line x1="80" y1="540" x2="1050" y2="540" stroke="#27262b" stroke-width="1.5" marker-end="url(#ar6)"/>
+  <text x="1075" y="544" font-size="11" fill="#5c5962">scale</text>
+
+  <!-- Tier vertical lines + labels -->
+  <g font-size="12" font-weight="600" fill="#27262b">
+    <line x1="160" y1="540" x2="160" y2="545" stroke="#27262b"/>
+    <text x="160" y="562" text-anchor="middle">~8 GPUs</text>
+    <text x="160" y="578" text-anchor="middle" font-size="10" fill="#959396" font-weight="400">single node</text>
+
+    <line x1="310" y1="540" x2="310" y2="545" stroke="#27262b"/>
+    <text x="310" y="562" text-anchor="middle">~64 GPUs</text>
+    <text x="310" y="578" text-anchor="middle" font-size="10" fill="#959396" font-weight="400">small cluster</text>
+
+    <line x1="470" y1="540" x2="470" y2="545" stroke="#27262b"/>
+    <text x="470" y="562" text-anchor="middle">~256 GPUs</text>
+    <text x="470" y="578" text-anchor="middle" font-size="10" fill="#959396" font-weight="400">medium</text>
+
+    <line x1="640" y1="540" x2="640" y2="545" stroke="#27262b"/>
+    <text x="640" y="562" text-anchor="middle">~1024 GPUs</text>
+    <text x="640" y="578" text-anchor="middle" font-size="10" fill="#959396" font-weight="400">large</text>
+
+    <line x1="800" y1="540" x2="800" y2="545" stroke="#27262b"/>
+    <text x="800" y="562" text-anchor="middle">~4096 GPUs</text>
+    <text x="800" y="578" text-anchor="middle" font-size="10" fill="#959396" font-weight="400">frontier</text>
+
+    <line x1="970" y1="540" x2="970" y2="545" stroke="#27262b"/>
+    <text x="970" y="562" text-anchor="middle">~10K+</text>
+    <text x="970" y="578" text-anchor="middle" font-size="10" fill="#959396" font-weight="400">multi-DC</text>
+  </g>
+
+  <!-- "What breaks" row -->
+  <text x="60" y="125" text-anchor="end" font-size="12" font-weight="600" fill="#dd2e2e">Breaks</text>
+  <g font-size="10" fill="#27262b">
+    <rect x="100" y="100" width="120" height="46" rx="4" fill="#fff5f5" stroke="#dd2e2e"/>
+    <text x="160" y="120" text-anchor="middle" font-size="10" fill="#dd2e2e">KV + train state</text>
+    <text x="160" y="135" text-anchor="middle" font-size="10" fill="#dd2e2e">collide → OOM</text>
+
+    <rect x="250" y="100" width="120" height="46" rx="4" fill="#fff5f5" stroke="#dd2e2e"/>
+    <text x="310" y="120" text-anchor="middle" font-size="10" fill="#dd2e2e">GRPO prefills</text>
+    <text x="310" y="135" text-anchor="middle" font-size="10" fill="#dd2e2e">duplicate work</text>
+
+    <rect x="410" y="100" width="120" height="46" rx="4" fill="#fff5f5" stroke="#dd2e2e"/>
+    <text x="470" y="120" text-anchor="middle" font-size="10" fill="#dd2e2e">naïve param copy</text>
+    <text x="470" y="135" text-anchor="middle" font-size="10" fill="#dd2e2e">50ms × thousands</text>
+
+    <rect x="580" y="100" width="120" height="46" rx="4" fill="#fff5f5" stroke="#dd2e2e"/>
+    <text x="640" y="120" text-anchor="middle" font-size="10" fill="#dd2e2e">long-tail rollouts</text>
+    <text x="640" y="135" text-anchor="middle" font-size="10" fill="#dd2e2e">90% GPUs idle 18s</text>
+
+    <rect x="740" y="100" width="120" height="46" rx="4" fill="#fff5f5" stroke="#dd2e2e"/>
+    <text x="800" y="120" text-anchor="middle" font-size="10" fill="#dd2e2e">single-controller</text>
+    <text x="800" y="135" text-anchor="middle" font-size="10" fill="#dd2e2e">CPU saturated</text>
+
+    <rect x="910" y="100" width="120" height="46" rx="4" fill="#fff5f5" stroke="#dd2e2e"/>
+    <text x="970" y="120" text-anchor="middle" font-size="10" fill="#dd2e2e">NCCL groups</text>
+    <text x="970" y="135" text-anchor="middle" font-size="10" fill="#dd2e2e">can't resize</text>
+  </g>
+
+  <!-- "What dominates" row -->
+  <text x="60" y="225" text-anchor="end" font-size="12" font-weight="600" fill="#959396">Dominates cost</text>
+  <g font-size="10" fill="#5c5962">
+    <text x="160" y="200" text-anchor="middle">GPU mem pressure</text>
+    <text x="160" y="215" text-anchor="middle">on single node</text>
+
+    <text x="310" y="200" text-anchor="middle">rollout time</text>
+    <text x="310" y="215" text-anchor="middle">(58.9% — verl)</text>
+
+    <text x="470" y="200" text-anchor="middle">weight-sync</text>
+    <text x="470" y="215" text-anchor="middle">latency</text>
+
+    <text x="640" y="200" text-anchor="middle">tail latency from</text>
+    <text x="640" y="215" text-anchor="middle">mixed-length tasks</text>
+
+    <text x="800" y="200" text-anchor="middle">NCCL AllReduce +</text>
+    <text x="800" y="215" text-anchor="middle">control plane</text>
+
+    <text x="970" y="200" text-anchor="middle">inter-DC weight</text>
+    <text x="970" y="215" text-anchor="middle">propagation</text>
+  </g>
+
+  <!-- Horizontal divider -->
+  <line x1="80" y1="270" x2="1050" y2="270" stroke="#e6e1e8" stroke-dasharray="4,4"/>
+
+  <!-- "Saves you" row -->
+  <text x="60" y="345" text-anchor="end" font-size="12" font-weight="600" fill="#026e57">Saves you</text>
+  <g font-size="10" fill="#27262b">
+    <rect x="100" y="305" width="120" height="80" rx="4" fill="#f0fdf9" stroke="#026e57"/>
+    <text x="160" y="325" text-anchor="middle" font-size="11" font-weight="600" fill="#026e57">colocate +</text>
+    <text x="160" y="340" text-anchor="middle" font-size="11" font-weight="600" fill="#026e57">release_memory</text>
+    <text x="160" y="365" text-anchor="middle" font-size="10" fill="#5c5962" font-style="italic">Lesson 6-7</text>
+
+    <rect x="250" y="305" width="120" height="80" rx="4" fill="#f0fdf9" stroke="#026e57"/>
+    <text x="310" y="325" text-anchor="middle" font-size="11" font-weight="600" fill="#026e57">RadixAttention</text>
+    <text x="310" y="340" text-anchor="middle" font-size="11" font-weight="600" fill="#026e57">prefix cache</text>
+    <text x="310" y="365" text-anchor="middle" font-size="10" fill="#5c5962" font-style="italic">Lesson 11</text>
+
+    <rect x="410" y="305" width="120" height="80" rx="4" fill="#f0fdf9" stroke="#026e57"/>
+    <text x="470" y="325" text-anchor="middle" font-size="11" font-weight="600" fill="#026e57">handle-tuple</text>
+    <text x="470" y="340" text-anchor="middle" font-size="11" font-weight="600" fill="#026e57">zero-copy + ZMQ</text>
+    <text x="470" y="365" text-anchor="middle" font-size="10" fill="#5c5962" font-style="italic">Lesson 9</text>
+
+    <rect x="580" y="305" width="120" height="80" rx="4" fill="#f0fdf9" stroke="#026e57"/>
+    <text x="640" y="325" text-anchor="middle" font-size="11" font-weight="600" fill="#026e57">partial rollout</text>
+    <text x="640" y="340" text-anchor="middle" font-size="11" font-weight="600" fill="#026e57">+ TIS/MIS</text>
+    <text x="640" y="365" text-anchor="middle" font-size="10" fill="#5c5962" font-style="italic">Lesson 13-14</text>
+
+    <rect x="740" y="305" width="120" height="80" rx="4" fill="#f0fdf9" stroke="#026e57"/>
+    <text x="800" y="325" text-anchor="middle" font-size="11" font-weight="600" fill="#026e57">SPMD multi-ctrl</text>
+    <text x="800" y="340" text-anchor="middle" font-size="11" font-weight="600" fill="#026e57">M2Flow scheduling</text>
+    <text x="800" y="365" text-anchor="middle" font-size="10" fill="#5c5962" font-style="italic">Lesson 17 (RLinf)</text>
+
+    <rect x="910" y="305" width="120" height="80" rx="4" fill="#f0fdf9" stroke="#026e57"/>
+    <text x="970" y="325" text-anchor="middle" font-size="11" font-weight="600" fill="#026e57">RDMA P2P +</text>
+    <text x="970" y="340" text-anchor="middle" font-size="11" font-weight="600" fill="#026e57">disaggregate</text>
+    <text x="970" y="365" text-anchor="middle" font-size="10" fill="#5c5962" font-style="italic">Lesson 10 + 22</text>
+  </g>
+
+  <!-- Connecting curves from "breaks" to "saves" -->
+  <g stroke="#7253ed" stroke-width="1.4" fill="none" opacity="0.5" stroke-dasharray="3,3">
+    <path d="M 160 148 L 160 305"/>
+    <path d="M 310 148 L 310 305"/>
+    <path d="M 470 148 L 470 305"/>
+    <path d="M 640 148 L 640 305"/>
+    <path d="M 800 148 L 800 305"/>
+    <path d="M 970 148 L 970 305"/>
+  </g>
+
+  <!-- Bottom note -->
+  <rect x="80" y="430" width="970" height="80" rx="6" fill="#f5f2ff" stroke="#7253ed"/>
+  <text x="565" y="455" text-anchor="middle" font-size="13" font-weight="600" fill="#27262b">Why this scales — the meta-property.</text>
+  <text x="565" y="475" text-anchor="middle" font-size="11" fill="#5c5962">Each primitive is critical at <tspan font-style="italic">one</tspan> tier and free at smaller ones. You don't pay for RDMA until you need elasticity;</text>
+  <text x="565" y="492" text-anchor="middle" font-size="11" fill="#5c5962">you don't pay for partial rollout until tail latency dominates. "Pay for what you need" comes from making each concern <tspan font-weight="600">orthogonal</tspan>.</text>
+</svg>

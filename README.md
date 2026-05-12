@@ -1,113 +1,171 @@
-# RL Infra Learning Thesis
+# RL Infra · A Course
 
-> An interactive learning map for reinforcement-learning post-training infrastructure — 9 frameworks, 15 repos read end-to-end, code excerpts annotated against the engineering principles they demonstrate.
+> A pedagogical course on reinforcement-learning post-training infrastructure. **7 acts, 24 lessons**, six SVG diagrams, eight annotated code excerpts pulled live from production frameworks.
 
-**Live site:** https://chenggong-zhang.github.io/RL_infra/
+**🌐 Live site:** https://chenggong-zhang.github.io/RL_infra/
 
-A single-page HTML deep dive on the design of modern RL infrastructure. The thesis: every RL post-training framework is the same skeleton — a training engine + an inference engine + an orchestrator, stitched around a single cycle (generate → score → train → sync weights). Once you see that skeleton, every repo becomes legible.
+Most resources on RL infrastructure are either too high-level (marketing pages) or too low-level (one repo's source). This site sits in between — a structured course that builds your mental model lesson by lesson, with diagrams and real code at every step.
 
-## What the page covers
+---
 
-### Universal architecture
-The 3-pillar diagram every framework instantiates, the rollout cycle written out as code, and the **5 axes of choice** that distinguish frameworks (training backend · inference backend · orchestration · placement · domain).
+## The course at a glance
 
-### Framework matrix
-Nine frameworks compared across the five axes with each one's distinctive bet:
+The course is structured as a story in **7 acts**. Each act builds on the previous. Each lesson asks a question, answers it, and points you to the next.
 
-| Framework | Distinctive bet |
-|---|---|
-| [Miles](https://github.com/radixark/miles) | Bit-identical FP8 / INT4 across train↔infer; **R3 routing replay** |
-| [SLIME](https://github.com/THUDM/slime) | On-policy distillation; rich math/science graders |
-| [SGLang](https://github.com/sgl-project/sglang) | The picks-and-shovels: `update_weights_from_*`, RadixAttention, spec decoding |
-| [SkyRL](https://github.com/NovaSky-AI/SkyRL) | `skyrl-gym` + `skyrl-agent` + Tinker API |
-| [cosmos-rl](https://github.com/nvidia-cosmos/cosmos-rl) | Physical AI: WFM RL (DDRL); FP8/MXFP4; 6D parallelism |
-| [RLinf](https://github.com/RLinf/RLinf) | Macro→Micro flow transformation: 2.43× throughput |
-| [verl](https://github.com/verl-project/verl) | 3D-HybridEngine + handle-tuple zero-copy weight sync |
-| [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) | The OG — now structurally limited by sync design |
-| [AReaL](https://github.com/inclusionAI/AReaL) | Fully-async via `_PendingWeightUpdateBucket` |
+| Act | What you'll learn | Lessons |
+|-----|-------------------|---------|
+| **I. The Question** | Why RL post-training infra exists; the central tension | L1–3 |
+| **II. The Universal Pattern** | The rollout cycle and the three pillars every framework instantiates | L4–6 |
+| **III. Engineered Solutions** | The six primitives that solve the central tension | L7–12 |
+| **IV. Reading Real Code** | Walk through the actual `fit()` loops | L13–15 |
+| **V. Framework Landscape** | How the 9 frameworks differ on 5 axes | L16–19 |
+| **VI. Beyond Chat** | Multi-turn agents, embodied AI, world models | L20–22 |
+| **VII. Synthesis** | Scaling chain + lessons paid in pain | L23–24 |
+| **Capstone** | Decision tree + 5-week reading plan + canonical literature | — |
 
-### The elegance of rollout design
-Eight design pillars distilled from [Chenyang Zhao's tutorial](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial): the opposing-preferences problem, hybrid engine pattern (训推一体), the four `update_weights_from_*` paths, NCCL static vs RDMA dynamic, RadixAttention × GRPO multiplicative composition, Engine vs Server duality, partial rollout + staleness, correctness by construction.
+---
 
-### Connected analysis — why this stack scales
-An end-to-end walk through one RL step (18 numbered steps across 5 phases), six design decisions interrogated against their alternatives, and a **scaling chain** (~8 GPUs → 10000+ GPUs) showing what breaks first at each tier and which primitive saves you.
+## Visual diagrams
 
-### Where the alternatives die
-8 paths the community tried and abandoned, each with concrete cost numbers — monolithic RL (2-3× slower), strict on-policy (5 GPU-hours/GPU wasted per 1000 iters), CPU rollout, hash-based prefix cache, shared memory for weight sync, inference-engine logprobs for loss.
+The course includes six SVG diagrams that visualize the design principles. They live in [`diagrams/`](diagrams/) and are embedded in the relevant lessons.
 
-### Pitfalls — 踩坑录
-Six concrete production failures from Chenyang's tutorial: BERT-era numerical drift, handle-tuple segfaults, NCCL hangs, memory choreography under colocate, off-policy ratio drift, mixed-precision routing divergence.
+| # | Diagram | Lesson | What it shows |
+|---|---------|--------|---------------|
+| 1 | [`01-rollout-cycle.svg`](diagrams/01-rollout-cycle.svg) | L4 | The five-stage loop every framework instantiates |
+| 2 | [`02-three-pillars.svg`](diagrams/02-three-pillars.svg) | L5 | Training engine + Inference engine + Orchestrator |
+| 3 | [`03-hybrid-engine-timeline.svg`](diagrams/03-hybrid-engine-timeline.svg) | L8 | Memory choreography over time (训推一体) |
+| 4 | [`04-weight-update-paths.svg`](diagrams/04-weight-update-paths.svg) | L10 | The four `update_weights_from_*` topologies |
+| 5 | [`05-radix-tree-grpo.svg`](diagrams/05-radix-tree-grpo.svg) | L11 | RadixAttention × GRPO multiplicative composition |
+| 6 | [`06-scaling-chain.svg`](diagrams/06-scaling-chain.svg) | L23 | What breaks at each cluster tier (8 → 10K GPUs) |
 
-### Code patterns made concrete
-Eight annotated real code excerpts (all linked to source on GitHub):
-1. verl's `fit()` body — the `marked_timer` phase blocks
-2. SGLang's four `update_weights_from_*` methods
-3. `release_memory_occupation` — tag-based GPU memory choreography
-4. verl's `DataProto` — the universal data envelope
-5. verl's dispatch decorator — SPMD made invisible
-6. AReaL's `_PendingWeightUpdateBucket` — `async_op=True`
-7. OpenRLHF's blocking `broadcast_to_vllm` — the structural limit
-8. RadixCache method signatures — reference-counted prefix sharing
+---
 
-### Rollout targets
-What RL infra actually trains on: FLUX/FLUX.2 (image diffusion), Wan2.2 (video MoE), VLA models (π₀, OpenVLA, GR00T), and the [TPU detour](https://cambrian-mllm.github.io/blog/tpu-training-experiments.html) — why no TPU-native RL framework exists yet.
+## The 24 lessons in detail
 
-### Choosing a framework
-A decision table — pick the first row that fits your use case.
+### Act I — The Question (Lessons 1–3)
+- **L1. What does RL infrastructure actually solve?** — Why pretraining and inference primitives aren't enough.
+- **L2. Two halves that fight** — The opposing-preferences problem: training wants TP/PP, rollout wants DP.
+- **L3. Why this is harder than it looks** — The three pain points colocation creates.
+
+### Act II — The Universal Pattern (Lessons 4–6)
+- **L4. The rollout cycle** — Generate → Score → Filter → Train → Sync weights. (Figure 1)
+- **L5. The three pillars** — Training engine + inference engine + orchestrator. (Figure 2)
+- **L6. One step end-to-end** — The 18-step call graph for one PPO iteration.
+
+### Act III — The Engineered Solutions (Lessons 7–12)
+- **L7. The hybrid engine (训推一体)** — Colocate and serialize.
+- **L8. Memory choreography** — `release_memory_occupation` / `resume_memory_occupation`. (Figure 3)
+- **L9. The weight-sync handoff** — Handle tuples and CUDA IPC.
+- **L10. Four `update_weights_from_*` paths** — One verb, four transports. (Figure 4)
+- **L11. RadixAttention × GRPO** — Multiplicative composition. (Figure 5)
+- **L12. Async & staleness** — Partial rollout, TIS/MIS, AReaL's bucket pattern.
+
+### Act IV — Reading Real Code (Lessons 13–15)
+- **L13. verl's `fit()` loop** — The canonical PPO orchestration.
+- **L14. DataProto + SPMD dispatch** — One driver call → 100 GPUs running.
+- **L15. AReaL vs OpenRLHF** — Async vs sync in one keyword.
+
+### Act V — The Framework Landscape (Lessons 16–19)
+- **L16. The 5 axes of choice** — What actually distinguishes frameworks.
+- **L17. 9 frameworks compared** — verl, Miles, SLIME, SGLang, SkyRL, cosmos-rl, RLinf, OpenRLHF, AReaL.
+- **L18. Family clusters** — LLM purists vs Agent platforms vs Domain extenders vs Substrate.
+- **L19. Tour of the 9** — One paragraph each + the file to read first.
+
+### Act VI — Beyond Chat (Lessons 20–22)
+- **L20. Multi-turn agents and tool use** — SkyRL, SLIME, verl multi-turn.
+- **L21. Embodied AI, VLA, world models** — cosmos-rl, RLinf, FLUX, Wan2.2.
+- **L22. The TPU detour** — Why a TPU-native RL framework doesn't exist yet.
+
+### Act VII — Synthesis (Lessons 23–24)
+- **L23. The scaling chain** — What breaks at each tier from 8 GPUs to 10K+. (Figure 6)
+- **L24. Pitfalls (踩坑录)** — The six lessons paid in pain.
+
+### Capstone
+- Decision table — choose your framework
+- 5-week reading plan
+- Canonical literature
+
+---
 
 ## Source repos covered
 
 15 repos read end-to-end:
 
-1. [verl-project/verl](https://github.com/verl-project/verl)
-2. [black-forest-labs/flux2](https://github.com/black-forest-labs/flux2)
-3. [black-forest-labs/flux](https://github.com/black-forest-labs/flux)
-4. [Wan-Video/Wan2.2](https://github.com/Wan-Video/Wan2.2)
-5. [RLinf/RLinf](https://github.com/RLinf/RLinf)
-6. [NovaSky-AI/SkyRL](https://github.com/NovaSky-AI/SkyRL)
-7. [radixark/miles](https://github.com/radixark/miles)
-8. [THUDM/slime](https://github.com/THUDM/slime)
-9. [NVIDIA/TensorRT](https://github.com/NVIDIA/TensorRT)
-10. [NVIDIA/TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM)
-11. [sgl-project/sglang](https://github.com/sgl-project/sglang)
-12. [vllm-project/vllm](https://github.com/vllm-project/vllm)
-13. [inclusionAI/AReaL](https://github.com/inclusionAI/AReaL)
-14. [OpenRLHF/OpenRLHF](https://github.com/OpenRLHF/OpenRLHF)
-15. [Cambrian-MLLM TPU blog](https://cambrian-mllm.github.io/blog/tpu-training-experiments.html)
+1. [verl-project/verl](https://github.com/verl-project/verl) — the hybrid-engine reference implementation
+2. [radixark/miles](https://github.com/radixark/miles) — bit-identical FP8/INT4 + R3 routing replay
+3. [THUDM/slime](https://github.com/THUDM/slime) — on-policy distillation, GLM-5.1
+4. [NovaSky-AI/SkyRL](https://github.com/NovaSky-AI/SkyRL) — multi-turn agents, SA-SWE-32B
+5. [nvidia-cosmos/cosmos-rl](https://github.com/nvidia-cosmos/cosmos-rl) — physical AI, diffusion world models
+6. [RLinf/RLinf](https://github.com/RLinf/RLinf) — M2Flow scheduler, embodied + agentic
+7. [sgl-project/sglang](https://github.com/sgl-project/sglang) — the substrate
+8. [vllm-project/vllm](https://github.com/vllm-project/vllm) — PagedAttention origin
+9. [inclusionAI/AReaL](https://github.com/inclusionAI/AReaL) — fully-async RL
+10. [OpenRLHF/OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) — the OG framework
+11. [NVIDIA/TensorRT](https://github.com/NVIDIA/TensorRT) — the underlying compilation framework
+12. [NVIDIA/TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) — optimized inference (not RL-friendly)
+13. [black-forest-labs/flux](https://github.com/black-forest-labs/flux) — image diffusion rollout target
+14. [black-forest-labs/flux2](https://github.com/black-forest-labs/flux2) — FLUX.2 (klein for fast inference)
+15. [Wan-Video/Wan2.2](https://github.com/Wan-Video/Wan2.2) — video MoE rollout target
+16. [Cambrian-MLLM TPU blog](https://cambrian-mllm.github.io/blog/tpu-training-experiments.html) — why TPU-RL is unsolved
 
-## Page structure
+---
 
-- **Static HTML** — single `index.html`, no build step, no dependencies
-- **Visual template** styled after [just-the-docs](https://github.com/just-the-docs/just-the-docs) — light theme, purple `#7253ed` accent, sidebar nav, sticky right-rail TOC
-- **Source badges** above every code block linking to the exact file on GitHub
-- **Study-resource boxes** at the end of each framework deep-dive with curated reading lists
-- **Interactive** — clickable concept nodes, filterable by framework, live search
+## How to use this course
 
-## Build & deploy
+- **If you have 90 minutes:** Read Acts II and V (Lessons 4–6 and 16–19). Universal pattern + framework matrix.
+- **If you have a weekend:** Read Acts I → III in order. By the end you'll understand the central tension and the six engineered primitives that resolve it.
+- **If you have a week:** Read everything. End with the 5-week reading plan in the Capstone and pick one framework to go deeper into.
 
-This site has no build step. The single `index.html` is the whole site.
+Each lesson is short (5–10 minutes), self-contained, and ends with a "Next →" link to the next lesson. No need to navigate manually.
 
-Deployment is via GitHub Pages with a static-file workflow ([`.github/workflows/pages.yml`](.github/workflows/pages.yml)). The `.nojekyll` file at the root tells Pages to skip the Jekyll build pipeline.
+---
+
+## Repository layout
+
+```
+RL_infra/
+├── README.md                  # this file
+├── index.html                 # the 24-lesson course (single self-contained HTML)
+├── diagrams/                  # 6 SVG diagrams referenced by the course
+│   ├── 01-rollout-cycle.svg
+│   ├── 02-three-pillars.svg
+│   ├── 03-hybrid-engine-timeline.svg
+│   ├── 04-weight-update-paths.svg
+│   ├── 05-radix-tree-grpo.svg
+│   └── 06-scaling-chain.svg
+├── .github/workflows/pages.yml   # static deploy to GitHub Pages
+├── .nojekyll                  # bypass Jekyll on Pages
+├── .claude/settings.json      # project-shared Claude Code permissions
+├── .gitignore
+└── LICENSE
+```
+
+The site has no build step. `index.html` plus the SVGs in `diagrams/` are the entire deliverable.
 
 ### Local preview
 
-Just open the file:
-
 ```bash
+# Just open the HTML directly
 open index.html
-# or serve over HTTP for relative-link testing:
+
+# Or serve over HTTP (recommended — SVG <img> links work properly)
 python3 -m http.server -d . 8000
+# then visit http://localhost:8000
 ```
 
 ### Deploy
 
-Push to `main`. The Pages workflow uploads the repo root as the deployment artifact. Then in **Settings → Pages → Build and deployment → Source**, choose **GitHub Actions**.
+Push to `main`. The workflow at [`.github/workflows/pages.yml`](.github/workflows/pages.yml) uploads the repo root as the GitHub Pages artifact. In **Settings → Pages → Build and deployment → Source**, choose **GitHub Actions**.
+
+---
 
 ## Acknowledgements
 
-- **Conceptual source**: [Chenyang Zhao's Awesome-ML-SYS-Tutorial](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial) — the Chinese-language deep dives on SGLang, verl, and slime internals. Most of the "Connected analysis" and "Elegance of rollout" sections are synthesized from his writing.
-- **Visual template**: [just-the-docs](https://github.com/just-the-docs/just-the-docs) — the Jekyll documentation theme whose look this page approximates.
-- **Source repos**: all 15 above. The framework authors did the actual engineering; this page just connects the dots.
+- **Conceptual source**: [Chenyang Zhao's Awesome-ML-SYS-Tutorial](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial) — the Chinese-language deep dive on SGLang, verl, and slime internals. The course's connective analysis, the "elegance of rollout" thesis, and the 踩坑录 lesson are all synthesized from Chenyang's writing. If you can read Chinese, read his tutorial directly.
+- **Visual template**: [just-the-docs](https://github.com/just-the-docs/just-the-docs) — the Jekyll documentation theme whose look this course approximates.
+- **Source authors**: the framework teams at ByteDance Seed (verl), THUDM (slime), Radix Ark (Miles), Berkeley NovaSky (SkyRL), NVIDIA Cosmos (cosmos-rl), the RLinf team, the SGLang/vLLM communities, Inclusion AI (AReaL), and OpenRLHF.
+
+---
 
 ## License
 

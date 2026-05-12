@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 620" font-family="system-ui, -apple-system, sans-serif">
+  <title>The four update_weights_from_* paths</title>
+  <desc>One verb, four transports. Each one maps to a real deployment topology.</desc>
+
+  <defs>
+    <marker id="arr4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7253ed"/>
+    </marker>
+    <marker id="arr4d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#026e57"/>
+    </marker>
+  </defs>
+
+  <rect width="1000" height="620" fill="#ffffff"/>
+  <text x="500" y="40" text-anchor="middle" font-size="22" font-weight="600" fill="#27262b">Four <tspan font-family="SFMono-Regular, Menlo, monospace">update_weights_from_*</tspan> paths</text>
+  <text x="500" y="62" text-anchor="middle" font-size="13" fill="#5c5962">One verb, four transports. The framework above sees one method; the topology below dictates which one to call.</text>
+
+  <!-- Quadrant 1: from_tensor -->
+  <g>
+    <rect x="60" y="100" width="420" height="220" rx="6" fill="#fff" stroke="#7253ed" stroke-width="2"/>
+    <rect x="60" y="100" width="420" height="36" rx="6" fill="#f5f2ff"/>
+    <text x="80" y="123" font-size="14" font-weight="600" fill="#7253ed" font-family="SFMono-Regular, Menlo, monospace">update_weights_from_tensor</text>
+    <text x="460" y="123" text-anchor="end" font-size="11" fill="#5c5962">same Python process</text>
+
+    <!-- Diagram: trainer and inference in one process box -->
+    <rect x="100" y="170" width="340" height="100" rx="4" fill="#f5f6fa" stroke="#e6e1e8" stroke-dasharray="4,3"/>
+    <text x="270" y="190" text-anchor="middle" font-size="10" fill="#959396" font-style="italic">one Python process</text>
+
+    <rect x="120" y="200" width="120" height="55" rx="4" fill="#fff" stroke="#7253ed"/>
+    <text x="180" y="222" text-anchor="middle" font-size="12" font-weight="600" fill="#27262b">Trainer</text>
+    <text x="180" y="240" text-anchor="middle" font-size="10" fill="#5c5962">FSDP / DDP</text>
+
+    <rect x="300" y="200" width="120" height="55" rx="4" fill="#fff" stroke="#b85c00"/>
+    <text x="360" y="222" text-anchor="middle" font-size="12" font-weight="600" fill="#27262b">SGLang Engine</text>
+    <text x="360" y="240" text-anchor="middle" font-size="10" fill="#5c5962">tp_worker</text>
+
+    <path d="M 245 225 L 295 225" stroke="#7253ed" stroke-width="2" marker-end="url(#arr4)"/>
+    <text x="270" y="215" text-anchor="middle" font-size="9" fill="#7253ed" font-family="SFMono-Regular, Menlo, monospace">handle tuple</text>
+
+    <text x="270" y="295" text-anchor="middle" font-size="11" fill="#5c5962"><tspan font-weight="600">Used by:</tspan> small experiments, single-node colocated</text>
+    <text x="270" y="310" text-anchor="middle" font-size="10" fill="#959396" font-style="italic">latency &lt; 1µs via ZMQ + CUDA IPC</text>
+  </g>
+
+  <!-- Quadrant 2: from_disk -->
+  <g>
+    <rect x="520" y="100" width="420" height="220" rx="6" fill="#fff" stroke="#026e57" stroke-width="2"/>
+    <rect x="520" y="100" width="420" height="36" rx="6" fill="#f0fdf9"/>
+    <text x="540" y="123" font-size="14" font-weight="600" fill="#026e57" font-family="SFMono-Regular, Menlo, monospace">update_weights_from_disk</text>
+    <text x="920" y="123" text-anchor="end" font-size="11" fill="#5c5962">via shared storage</text>
+
+    <rect x="560" y="190" width="110" height="50" rx="4" fill="#fff" stroke="#7253ed"/>
+    <text x="615" y="210" text-anchor="middle" font-size="12" font-weight="600" fill="#27262b">Trainer</text>
+    <text x="615" y="225" text-anchor="middle" font-size="10" fill="#5c5962">save checkpoint</text>
+
+    <!-- Shared disk -->
+    <path d="M 700 200 a 25 12 0 0 0 60 0 v 30 a 25 12 0 0 1 -60 0 z" fill="#fff" stroke="#026e57"/>
+    <ellipse cx="730" cy="200" rx="30" ry="12" fill="#fff" stroke="#026e57"/>
+    <text x="730" y="252" text-anchor="middle" font-size="10" fill="#5c5962">shared FS</text>
+
+    <rect x="800" y="190" width="110" height="50" rx="4" fill="#fff" stroke="#b85c00"/>
+    <text x="855" y="210" text-anchor="middle" font-size="12" font-weight="600" fill="#27262b">Inference</text>
+    <text x="855" y="225" text-anchor="middle" font-size="10" fill="#5c5962">load checkpoint</text>
+
+    <path d="M 670 215 L 700 215" stroke="#026e57" stroke-width="2" marker-end="url(#arr4d)"/>
+    <path d="M 760 215 L 800 215" stroke="#026e57" stroke-width="2" marker-end="url(#arr4d)"/>
+
+    <text x="730" y="295" text-anchor="middle" font-size="11" fill="#5c5962"><tspan font-weight="600">Used by:</tspan> disaggregated rollout pools, elastic scaling</text>
+    <text x="730" y="310" text-anchor="middle" font-size="10" fill="#959396" font-style="italic">no NCCL group needed · add nodes mid-training</text>
+  </g>
+
+  <!-- Quadrant 3: from_distributed -->
+  <g>
+    <rect x="60" y="345" width="420" height="220" rx="6" fill="#fff" stroke="#dd2e2e" stroke-width="2"/>
+    <rect x="60" y="345" width="420" height="36" rx="6" fill="#fff5f5"/>
+    <text x="80" y="368" font-size="14" font-weight="600" fill="#dd2e2e" font-family="SFMono-Regular, Menlo, monospace">update_weights_from_distributed</text>
+    <text x="460" y="368" text-anchor="end" font-size="11" fill="#5c5962">NCCL broadcast</text>
+
+    <!-- Trainer ranks (4) -->
+    <g>
+      <rect x="100" y="400" width="80" height="36" rx="3" fill="#fff" stroke="#7253ed"/>
+      <text x="140" y="423" text-anchor="middle" font-size="11" fill="#27262b">T-rank 0</text>
+      <rect x="100" y="442" width="80" height="36" rx="3" fill="#fff" stroke="#7253ed"/>
+      <text x="140" y="465" text-anchor="middle" font-size="11" fill="#27262b">T-rank 1</text>
+      <rect x="100" y="484" width="80" height="36" rx="3" fill="#fff" stroke="#7253ed"/>
+      <text x="140" y="507" text-anchor="middle" font-size="11" fill="#27262b">T-rank 2</text>
+    </g>
+
+    <!-- Inference ranks (3) -->
+    <g>
+      <rect x="370" y="400" width="80" height="36" rx="3" fill="#fff" stroke="#b85c00"/>
+      <text x="410" y="423" text-anchor="middle" font-size="11" fill="#27262b">I-rank 0</text>
+      <rect x="370" y="442" width="80" height="36" rx="3" fill="#fff" stroke="#b85c00"/>
+      <text x="410" y="465" text-anchor="middle" font-size="11" fill="#27262b">I-rank 1</text>
+      <rect x="370" y="484" width="80" height="36" rx="3" fill="#fff" stroke="#b85c00"/>
+      <text x="410" y="507" text-anchor="middle" font-size="11" fill="#27262b">I-rank 2</text>
+    </g>
+
+    <!-- Many arrows (broadcast pattern) -->
+    <g stroke="#dd2e2e" stroke-width="1.2" opacity="0.7">
+      <line x1="180" y1="418" x2="370" y2="418"/>
+      <line x1="180" y1="418" x2="370" y2="460"/>
+      <line x1="180" y1="418" x2="370" y2="502"/>
+      <line x1="180" y1="460" x2="370" y2="418"/>
+      <line x1="180" y1="460" x2="370" y2="460"/>
+      <line x1="180" y1="460" x2="370" y2="502"/>
+      <line x1="180" y1="502" x2="370" y2="418"/>
+      <line x1="180" y1="502" x2="370" y2="460"/>
+      <line x1="180" y1="502" x2="370" y2="502"/>
+    </g>
+    <text x="275" y="395" text-anchor="middle" font-size="10" fill="#dd2e2e" font-family="SFMono-Regular, Menlo, monospace">NCCL all-to-all</text>
+
+    <text x="275" y="540" text-anchor="middle" font-size="11" fill="#5c5962"><tspan font-weight="600">Used by:</tspan> Miles, SLIME, verl, RLinf — the dominant path</text>
+    <text x="275" y="555" text-anchor="middle" font-size="10" fill="#959396" font-style="italic">requires init_weights_update_group first · static topology</text>
+  </g>
+
+  <!-- Quadrant 4: from_ipc -->
+  <g>
+    <rect x="520" y="345" width="420" height="220" rx="6" fill="#fff" stroke="#0ea5e9" stroke-width="2"/>
+    <rect x="520" y="345" width="420" height="36" rx="6" fill="#f0f9ff"/>
+    <text x="540" y="368" font-size="14" font-weight="600" fill="#0ea5e9" font-family="SFMono-Regular, Menlo, monospace">update_weights_from_ipc</text>
+    <text x="920" y="368" text-anchor="end" font-size="11" fill="#5c5962">CUDA IPC, same host</text>
+
+    <!-- One-host visualization -->
+    <rect x="560" y="400" width="340" height="130" rx="4" fill="#f5f6fa" stroke="#e6e1e8" stroke-dasharray="4,3"/>
+    <text x="730" y="420" text-anchor="middle" font-size="10" fill="#959396" font-style="italic">one host · multiple processes · shared GPU</text>
+
+    <rect x="580" y="435" width="120" height="55" rx="4" fill="#fff" stroke="#7253ed"/>
+    <text x="640" y="457" text-anchor="middle" font-size="12" font-weight="600" fill="#27262b">Trainer proc</text>
+    <text x="640" y="475" text-anchor="middle" font-size="10" fill="#5c5962">CUDA ctx A</text>
+
+    <rect x="760" y="435" width="120" height="55" rx="4" fill="#fff" stroke="#b85c00"/>
+    <text x="820" y="457" text-anchor="middle" font-size="12" font-weight="600" fill="#27262b">Server proc</text>
+    <text x="820" y="475" text-anchor="middle" font-size="10" fill="#5c5962">CUDA ctx B</text>
+
+    <path d="M 705 462 L 755 462" stroke="#0ea5e9" stroke-width="2" marker-end="url(#arr4)"/>
+    <text x="730" y="452" text-anchor="middle" font-size="9" fill="#0ea5e9" font-family="SFMono-Regular, Menlo, monospace">CUDA IPC handle</text>
+
+    <text x="730" y="545" text-anchor="middle" font-size="11" fill="#5c5962"><tspan font-weight="600">Used by:</tspan> trainer ↔ server on same machine, no NCCL setup cost</text>
+    <text x="730" y="560" text-anchor="middle" font-size="10" fill="#959396" font-style="italic">e.g. checkpoint-engine integration</text>
+  </g>
+
+  <!-- Bottom note -->
+  <rect x="60" y="580" width="880" height="30" rx="4" fill="#f5f2ff" stroke="#7253ed"/>
+  <text x="500" y="600" text-anchor="middle" font-size="12" fill="#27262b">All four paths share the same return shape and the same <tspan font-family="SFMono-Regular, Menlo, monospace" fill="#7253ed">flush_cache_after_weight_update</tspan> — the framework writes one verb regardless of topology.</text>
+</svg>
