@@ -167,11 +167,19 @@
   }
   .toc-rail h4 {
     font-size: 11px; font-weight: 700;
-    text-transform: uppercase; letter-spacing: 0.08em;
-    color: var(--text-muted);
-    margin-bottom: 10px;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--purple);
+    margin-bottom: 8px;
+    margin-top: 22px;
+    padding-left: 8px;
+    border-left: 2px solid var(--purple-soft);
   }
-  .toc-rail ul { list-style: none; }
+  .toc-rail h4:first-child { margin-top: 0; }
+  .toc-rail ul {
+    list-style: none;
+    margin: 0 0 14px 6px;
+    padding-left: 0;
+  }
   .toc-rail a {
     display: block;
     padding: 3px 0;
@@ -179,8 +187,13 @@
     text-decoration: none;
     font-size: 12px;
     line-height: 1.5;
+    border-bottom: none;
   }
   .toc-rail a:hover { color: var(--purple); }
+  .toc-rail a.active {
+    color: var(--purple-dark);
+    font-weight: 600;
+  }
 
   article {
     font-family: var(--font-serif);
@@ -1415,32 +1428,6 @@ obs_ids = encode(full)[trim:]   # delta tokens only</code></pre>
         </div>
       </section>
 
-      <section id="recent">
-        <h2>Recent advances from the SGLang RL team</h2>
-
-        <p>The slime + Miles + SGLang community has shipped a cluster of advances in late 2025 / early 2026 that are worth knowing collectively because they extend the survey's six primitives along five different axes. I list them with one-paragraph reads.</p>
-
-        <h4>INT4 QAT full-flow training</h4>
-        <p>Inspired by Kimi K2-Thinking's <strong>W4A16 QAT</strong> recipe, slime now runs an end-to-end INT4 quantization-aware training pipeline. The training side keeps BF16 master weights but inserts <em>fake quantization</em> (quant-dequant) into the forward pass — the model "sees" INT4 noise and learns weights robust to it. The backward pass uses Straight-Through Estimator (STE): the round function's derivative is set to 1, letting gradient flow through the unquantized weights. At inference time, SGLang loads true W4A16 weights with the Marlin kernel. Net effect: a 1TB-class model (Kimi K2 scale) fits the rollout in a single H200 (141GB), eliminating cross-machine communication overhead. <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/slime/int4/readme.md" target="_blank">Technical writeup</a>.</p>
-
-        <h4>Unified VLM/LLM multi-turn</h4>
-        <p>The first-principles design described in the previous section. One rollout function, two domains, full decoupling between sampling logic and environment. <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/slime/vlm-multi-turn/readme.md" target="_blank">Blog</a>.</p>
-
-        <h4>Rollout Router Replay (R3) for MoE stability</h4>
-        <p>Already covered as Miles' signature contribution to the quantization section. Captures expert-routing decisions during SGLang inference, replays them during Megatron training. Makes MoE RL stable under low-precision routing.</p>
-
-        <h4>Full-flow FP8 training and sampling</h4>
-        <p>The follow-on to R3. <a href="https://lmsys.org/blog/2025-11-25-fp8-rl/">"Unified FP8: Moving Beyond Mixed Precision for Stable and Accelerated MoE RL"</a> walks through hardware foundations, scale selection, and MoE experiment results. The headline: FP8 inference + FP8 training + R3-style routing replay gives bit-identical numerics and ~2× rollout throughput on H100/H200.</p>
-
-        <h4>Speculative decoding in RL</h4>
-        <p>Standard practice for serving, novel in RL training. A small draft model proposes tokens; the policy verifies them in parallel. Net effect: 25%+ rollout speedup with no accuracy compromise. <a href="https://thudm.github.io/slime/advanced/speculative-decoding.html">slime docs</a>.</p>
-
-        <blockquote class="pull">
-          The cluster of advances above traces one through-line: <em>the bottleneck of RL training is the rollout, not the gradient update.</em> Every primitive optimizes rollout throughput or stability. The R3 / FP8 work makes the rollout faster <em>and</em> correct on MoE. The QAT work shrinks the rollout's memory. The multi-turn work expands what counts as a rollout. The speculative work decodes faster.
-        </blockquote>
-
-        <p>For a theorist this matters because the empirical claims in the field's papers (DeepSeek-R1, GLM-5.1, K2-Thinking, Doubao-1.5-pro) are produced under these specific infrastructure choices. If your work depends on understanding why those models behave as they do, the choices above are the assumption set you're implicitly invoking.</p>
-      </section>
 
       <section id="verl-pipeline">
         <h2>Engineering case study — verl, the HybridFlow programming model</h2>
@@ -1745,6 +1732,32 @@ batch.batch["returns"] = ...</code></pre>
         </div>
       </section>
 
+      <section id="recent">
+        <h2>Recent advances from the SGLang RL team</h2>
+
+        <p>The slime + Miles + SGLang community has shipped a cluster of advances in late 2025 / early 2026 that are worth knowing collectively because they extend the survey's six primitives along five different axes. I list them with one-paragraph reads.</p>
+
+        <h4>INT4 QAT full-flow training</h4>
+        <p>Inspired by Kimi K2-Thinking's <strong>W4A16 QAT</strong> recipe, slime now runs an end-to-end INT4 quantization-aware training pipeline. The training side keeps BF16 master weights but inserts <em>fake quantization</em> (quant-dequant) into the forward pass — the model "sees" INT4 noise and learns weights robust to it. The backward pass uses Straight-Through Estimator (STE): the round function's derivative is set to 1, letting gradient flow through the unquantized weights. At inference time, SGLang loads true W4A16 weights with the Marlin kernel. Net effect: a 1TB-class model (Kimi K2 scale) fits the rollout in a single H200 (141GB), eliminating cross-machine communication overhead. <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/slime/int4/readme.md" target="_blank">Technical writeup</a>.</p>
+
+        <h4>Unified VLM/LLM multi-turn</h4>
+        <p>The first-principles design described in the previous section. One rollout function, two domains, full decoupling between sampling logic and environment. <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/slime/vlm-multi-turn/readme.md" target="_blank">Blog</a>.</p>
+
+        <h4>Rollout Router Replay (R3) for MoE stability</h4>
+        <p>Already covered as Miles' signature contribution to the quantization section. Captures expert-routing decisions during SGLang inference, replays them during Megatron training. Makes MoE RL stable under low-precision routing.</p>
+
+        <h4>Full-flow FP8 training and sampling</h4>
+        <p>The follow-on to R3. <a href="https://lmsys.org/blog/2025-11-25-fp8-rl/">"Unified FP8: Moving Beyond Mixed Precision for Stable and Accelerated MoE RL"</a> walks through hardware foundations, scale selection, and MoE experiment results. The headline: FP8 inference + FP8 training + R3-style routing replay gives bit-identical numerics and ~2× rollout throughput on H100/H200.</p>
+
+        <h4>Speculative decoding in RL</h4>
+        <p>Standard practice for serving, novel in RL training. A small draft model proposes tokens; the policy verifies them in parallel. Net effect: 25%+ rollout speedup with no accuracy compromise. <a href="https://thudm.github.io/slime/advanced/speculative-decoding.html">slime docs</a>.</p>
+
+        <blockquote class="pull">
+          The cluster of advances above traces one through-line: <em>the bottleneck of RL training is the rollout, not the gradient update.</em> Every primitive optimizes rollout throughput or stability. The R3 / FP8 work makes the rollout faster <em>and</em> correct on MoE. The QAT work shrinks the rollout's memory. The multi-turn work expands what counts as a rollout. The speculative work decodes faster.
+        </blockquote>
+
+        <p>For a theorist this matters because the empirical claims in the field's papers (DeepSeek-R1, GLM-5.1, K2-Thinking, Doubao-1.5-pro) are produced under these specific infrastructure choices. If your work depends on understanding why those models behave as they do, the choices above are the assumption set you're implicitly invoking.</p>
+      </section>
       <section id="patterns">
         <h2>Engineering design patterns — the algebraic view</h2>
 
@@ -2261,29 +2274,54 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
   </main>
 
   <aside class="toc-rail">
-    <h4>On this page</h4>
+    <h4>① Foundations</h4>
     <ul>
       <li><a href="#why">Why this matters</a></li>
-      <li><a href="#how-to-read">How to read this</a></li>
+      <li><a href="#how-to-read">How to read this survey</a></li>
       <li><a href="#skeleton">The skeleton</a></li>
       <li><a href="#tension">The central tension</a></li>
-      <li><a href="#primitives">Six primitives</a></li>
-      <li><a href="#kernels">CUDA, Triton, TileLang</a></li>
+    </ul>
+
+    <h4>② Six primitives</h4>
+    <ul>
+      <li><a href="#hybrid-engine">① Hybrid engine (训推一体)</a></li>
+      <li><a href="#memory">② Memory choreography</a></li>
+      <li><a href="#weight-sync">③ Zero-copy weight sync</a></li>
+      <li><a href="#four-paths">④ Four update paths</a></li>
+      <li><a href="#radix-grpo">⑤ RadixAttention × GRPO</a></li>
+      <li><a href="#async">⑥ Async &amp; staleness</a></li>
+    </ul>
+
+    <h4>③ Layer beneath</h4>
+    <ul>
+      <li><a href="#kernels">CUDA · Triton · TileLang</a></li>
       <li><a href="#megatron">Megatron-LM</a></li>
       <li><a href="#quantization">Quantization</a></li>
+    </ul>
+
+    <h4>④ Case studies</h4>
+    <ul>
       <li><a href="#multi-turn">Multi-turn agentic RL</a></li>
       <li><a href="#slime-pipeline">slime · upstream framework</a></li>
       <li><a href="#miles-pipeline">Miles · DeepSeek-V3</a></li>
       <li><a href="#verl-pipeline">verl · HybridFlow</a></li>
       <li><a href="#deepseek-v4">DeepSeek V4 · OPD</a></li>
       <li><a href="#recent">Recent advances</a></li>
+    </ul>
+
+    <h4>⑤ Putting it together</h4>
+    <ul>
       <li><a href="#patterns">Design patterns</a></li>
       <li><a href="#code">Reading real code</a></li>
       <li><a href="#landscape">Framework landscape</a></li>
       <li><a href="#beyond">Beyond chat</a></li>
       <li><a href="#scaling">Scaling chain</a></li>
-      <li><a href="#pitfalls">Pitfalls</a></li>
+      <li><a href="#pitfalls">Pitfalls (踩坑录)</a></li>
       <li><a href="#checklist">Researcher's checklist</a></li>
+    </ul>
+
+    <h4>⑥ Going further</h4>
+    <ul>
       <li><a href="#reading-plan">19-repo reading plan</a></li>
       <li><a href="#open">Open questions</a></li>
       <li><a href="#reading">Reading list</a></li>
@@ -2292,7 +2330,8 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
 </div>
 
 <script>
-const navLinks = document.querySelectorAll('.nav-link');
+// Active-link tracking spans both sidebars: left nav (.nav-link) and right toc-rail (.toc-rail a)
+const navLinks = document.querySelectorAll('.nav-link, .toc-rail a');
 const sections = document.querySelectorAll('article section, article > header');
 
 const observer = new IntersectionObserver(entries => {
