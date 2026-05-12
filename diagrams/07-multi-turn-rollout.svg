@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 720" font-family="system-ui, -apple-system, sans-serif">
+  <title>Multi-turn agentic rollout — unified VLM / LLM</title>
+  <desc>The rollout side runs a turn loop: generate → tool/env interaction → encode observation → check termination → loop. The training side (Megatron/FSDP) consumes samples and pushes back new weights.</desc>
+
+  <defs>
+    <marker id="ar7" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#27262b"/>
+    </marker>
+    <marker id="ar7s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7253ed"/>
+    </marker>
+  </defs>
+
+  <rect width="1100" height="720" fill="#ffffff"/>
+  <text x="550" y="38" text-anchor="middle" font-size="22" font-weight="600" fill="#27262b">Multi-turn agentic rollout — unified VLM/LLM</text>
+  <text x="550" y="60" text-anchor="middle" font-size="13" fill="#5c5962">From first principles, any multi-turn training is just <tspan font-style="italic">custom sampling + interaction logic</tspan>.</text>
+
+  <!-- Rollout box (left, big) -->
+  <rect x="50" y="90" width="540" height="600" rx="10" fill="#fefcf3" stroke="#d4a800" stroke-width="2"/>
+  <text x="320" y="118" text-anchor="middle" font-size="14" font-weight="700" fill="#a07c00" letter-spacing="0.08em">ROLLOUT · SGLang</text>
+
+  <!-- Step 1: Prepare inputs -->
+  <rect x="170" y="135" width="300" height="44" rx="6" fill="#fcd34d" stroke="#a07c00"/>
+  <text x="320" y="162" text-anchor="middle" font-size="13" font-weight="600" fill="#27262b">Prepare model inputs</text>
+
+  <line x1="320" y1="179" x2="320" y2="205" stroke="#27262b" stroke-width="1.5" marker-end="url(#ar7)"/>
+
+  <!-- Step 2: SGLang generate -->
+  <rect x="170" y="205" width="300" height="44" rx="6" fill="#fde68a" stroke="#a07c00"/>
+  <text x="320" y="232" text-anchor="middle" font-size="13" font-weight="600" fill="#27262b">SGLang generate</text>
+
+  <line x1="320" y1="249" x2="320" y2="275" stroke="#27262b" stroke-width="1.5" marker-end="url(#ar7)"/>
+
+  <!-- Step 3: Concat assistant tokens -->
+  <rect x="135" y="275" width="370" height="56" rx="6" fill="#fde68a" stroke="#a07c00"/>
+  <text x="320" y="298" text-anchor="middle" font-size="13" font-weight="600" fill="#27262b">Concat assistant tokens</text>
+  <text x="320" y="318" text-anchor="middle" font-size="11" fill="#5c5962" font-family="SFMono-Regular, monospace">loss_mask = 1</text>
+
+  <line x1="320" y1="331" x2="320" y2="357" stroke="#27262b" stroke-width="1.5" marker-end="url(#ar7)"/>
+
+  <!-- Step 4: Tool call / Env interaction -->
+  <rect x="135" y="357" width="370" height="44" rx="6" fill="#fdba74" stroke="#a07c00"/>
+  <text x="320" y="384" text-anchor="middle" font-size="13" font-weight="600" fill="#27262b">Tool call / Env interaction</text>
+
+  <line x1="320" y1="401" x2="320" y2="427" stroke="#27262b" stroke-width="1.5" marker-end="url(#ar7)"/>
+
+  <!-- Step 5: Encode + concat observation -->
+  <rect x="105" y="427" width="430" height="68" rx="6" fill="#fed7aa" stroke="#a07c00"/>
+  <text x="320" y="450" text-anchor="middle" font-size="13" font-weight="600" fill="#27262b">Encode &amp; concat observation</text>
+  <text x="320" y="468" text-anchor="middle" font-size="11" fill="#5c5962" font-family="SFMono-Regular, monospace">loss_mask = 0 · multimodal state update</text>
+  <text x="320" y="485" text-anchor="middle" font-size="10" fill="#5c5962" font-style="italic">(dummy + delta tokens · O(n) tensor merge)</text>
+
+  <line x1="320" y1="495" x2="320" y2="521" stroke="#27262b" stroke-width="1.5" marker-end="url(#ar7)"/>
+
+  <!-- Step 6: Decision diamond -->
+  <polygon points="320,521 480,581 320,641 160,581" fill="#fb923c" stroke="#a07c00" stroke-width="2"/>
+  <text x="320" y="572" text-anchor="middle" font-size="12" font-weight="600" fill="#fff">Task done?</text>
+  <text x="320" y="590" text-anchor="middle" font-size="11" fill="#fff">max turns / context</text>
+  <text x="320" y="606" text-anchor="middle" font-size="11" fill="#fff">budget hit?</text>
+
+  <!-- No branch — loop back to SGLang generate -->
+  <path d="M 160 581 L 75 581 L 75 227 L 165 227" fill="none" stroke="#7253ed" stroke-width="1.8" marker-end="url(#ar7s)"/>
+  <text x="80" y="571" font-size="11" fill="#7253ed" font-weight="600">No</text>
+
+  <!-- Yes branch — finalize -->
+  <line x1="320" y1="641" x2="320" y2="668" stroke="#27262b" stroke-width="1.5"/>
+  <text x="345" y="660" font-size="11" fill="#27262b" font-weight="600">Yes</text>
+
+  <!-- Finalize -->
+  <rect x="170" y="660" width="300" height="20" rx="3" fill="#fcd34d" stroke="#a07c00"/>
+  <text x="320" y="675" text-anchor="middle" font-size="11" font-weight="600" fill="#27262b">Finalize sample · concat multimodal tensors</text>
+
+  <!-- Training box (right) -->
+  <rect x="700" y="270" width="340" height="240" rx="10" fill="#fdfaff" stroke="#7253ed" stroke-width="2"/>
+  <text x="870" y="298" text-anchor="middle" font-size="14" font-weight="700" fill="#5f3ceb" letter-spacing="0.08em">TRAINING · Megatron / FSDP</text>
+
+  <rect x="740" y="320" width="260" height="50" rx="6" fill="#fff" stroke="#7253ed"/>
+  <text x="870" y="342" text-anchor="middle" font-size="13" font-weight="600" fill="#27262b">PPO / GRPO update</text>
+  <text x="870" y="358" text-anchor="middle" font-size="10" fill="#5c5962">policy + critic gradients</text>
+
+  <rect x="740" y="385" width="260" height="40" rx="6" fill="#fff" stroke="#7253ed" stroke-dasharray="3,3"/>
+  <text x="870" y="408" text-anchor="middle" font-size="12" fill="#27262b">checkpoint · save / eval</text>
+
+  <text x="870" y="455" text-anchor="middle" font-size="11" fill="#5c5962" font-style="italic">Megatron 5D parallel:</text>
+  <text x="870" y="472" text-anchor="middle" font-size="11" fill="#5c5962" font-family="SFMono-Regular, monospace">TP × PP × DP × EP × CP</text>
+  <text x="870" y="495" text-anchor="middle" font-size="11" fill="#5c5962" font-style="italic">(R3 routing replay for MoE)</text>
+
+  <!-- Arrows between Rollout and Training -->
+  <path d="M 540 360 Q 620 360 700 360" fill="none" stroke="#27262b" stroke-width="1.8" marker-end="url(#ar7)"/>
+  <text x="620" y="350" text-anchor="middle" font-size="12" font-weight="600" fill="#27262b">Sample</text>
+
+  <path d="M 700 430 Q 620 430 540 430" fill="none" stroke="#27262b" stroke-width="1.8" marker-end="url(#ar7)"/>
+  <text x="620" y="448" text-anchor="middle" font-size="12" font-weight="600" fill="#27262b">Update weights</text>
+  <text x="620" y="462" text-anchor="middle" font-size="10" fill="#5c5962" font-style="italic">(handle tuples, zero-copy)</text>
+</svg>

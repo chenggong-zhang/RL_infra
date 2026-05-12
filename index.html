@@ -552,6 +552,13 @@
     <li><a href="#quantization" class="nav-link">Quantization</a></li>
   </ul>
 
+  <div class="nav-heading">Case studies</div>
+  <ul>
+    <li><a href="#multi-turn" class="nav-link">Multi-turn agentic RL</a></li>
+    <li><a href="#miles-pipeline" class="nav-link">Miles · DeepSeek-V3</a></li>
+    <li><a href="#recent" class="nav-link">Recent advances</a></li>
+  </ul>
+
   <div class="nav-heading">Putting it together</div>
   <ul>
     <li><a href="#code" class="nav-link">Reading real code</a></li>
@@ -572,11 +579,13 @@
         <h1>RL Infrastructure for the Mathematically Inclined</h1>
         <p class="subtitle">A field survey of reinforcement-learning post-training systems — six engineering primitives, three kernel-level DSLs, the training backbone, the quantization problem, and the nine production frameworks you'd actually use. Aimed at mathematicians and RL theorists who want to read the source code of <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a>, <a href="https://github.com/triton-lang/triton">Triton</a> and recognize what's mathematically interesting about the engineering choices.</p>
         <div class="byline">
-          <span>~30 min read</span>
+          <span>~40 min read</span>
           <span>·</span>
           <span>19 repos surveyed</span>
           <span>·</span>
-          <span>6 diagrams · 8 code excerpts</span>
+          <span>8 diagrams · 10+ code excerpts</span>
+          <span>·</span>
+          <span>incl. Miles · slime · SGLang RL team writeups</span>
         </div>
       </header>
 
@@ -967,6 +976,176 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, ...):
         </div>
       </section>
 
+      <section id="multi-turn">
+        <h2>Multi-turn agentic RL — unifying VLM and LLM from first principles</h2>
+
+        <p>Up to this point the survey has implicitly assumed a single-turn setting: one prompt, one completion, one reward. The 2026 frontier is multi-turn. A model is no longer a chatbot but a <em>thinking machine</em> embedded in an environment loop — it emits an action, the environment responds with an observation (possibly multimodal), the model reads the observation and emits the next action, and the trajectory grows. Computer Use agents, embodied robotics, and tool-augmented reasoning all live in this regime.</p>
+
+        <p>The mathematician's instinct here is right: a multi-turn setting is just a Markov decision process with episodes. The engineering question is then narrow — <em>how do you implement the trajectory generation cleanly enough that VLM and LLM share one code path?</em> The <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/slime/vlm-multi-turn/readme.md">slime + Miles answer</a> is what I'd call the first-principles answer: <strong>any multi-turn training is just custom sampling and interaction logic.</strong> Decouple the rollout function from the environment; let the user supply both.</p>
+
+        <figure>
+          <img src="diagrams/07-multi-turn-rollout.svg" alt="The multi-turn rollout loop: prepare inputs → SGLang generate → concat assistant tokens (loss_mask=1) → tool call / env interaction → encode observation (loss_mask=0) → check termination → loop or finalize. Training side runs Megatron/FSDP, exchanging samples and weight updates.">
+          <figcaption><span class="fig-label">Figure 7.</span> The rollout side runs a turn loop with two distinct token types — assistant tokens (loss_mask=1) and observation tokens (loss_mask=0). Training runs Megatron/FSDP and exchanges samples + weight updates over zero-copy handles.</figcaption>
+        </figure>
+
+        <h3>The turn loop</h3>
+
+        <p>Each turn of the loop has four distinct phases: (a) the actor generates a response under the current context and sampling parameters; (b) the environment steps on the response and returns an observation; (c) the observation is encoded into a fresh delta of tokens and appended to the context with <code>loss_mask = 0</code> — this is what tells the trainer "don't compute loss against the environment's words"; (d) any new multimodal payload is appended to two parallel buffers, one for inference, one for training. Termination is whichever fires first: <code>max_turns</code>, a token budget, or <code>env.step()</code> returning <code>done=True</code>.</p>
+
+<pre><code># Pseudocode: custom multi-turn rollout.generate
+async def generate(args, sample, sampling_params):
+    env = load_env_module(args.rollout_interaction_env_path).build_env(sample=sample, args=args)
+    max_turns = args.max_turns
+
+    sample.tokens, image_data, mm_train_buffer = init_from_prompt(sample, state)
+
+    for _ in range(max_turns):
+        # (a) Actor generation — assistant tokens
+        response_text, new_tokens, new_logprobs, finish_reason = sglang_generate(
+            url=url, input_ids=sample.tokens,
+            sampling_params=sampling_params, image_data=image_data
+        )
+        append(sample, new_tokens, new_logprobs, loss_mask_val=1)
+
+        # (b) Env step
+        observation, done, _ = env.step(response_text)
+        if done: break
+
+        # (c) Process &amp; append observation tokens
+        user_msg = env.format_observation(observation)
+        obs_ids, obs_image_data, obs_mm_inputs, obs_mm_train = encode_observation_delta(
+            user_msg, tokenizer=state.tokenizer, processor=state.processor,
+            tools=sample.metadata.get("tools")
+        )
+        append(sample, obs_ids, [0.0] * len(obs_ids), loss_mask_val=0)
+
+        # (d) Multimodal state update — TWO parallel buffers
+        image_data += obs_image_data                # inference-side
+        if obs_mm_train:
+            mm_train_buffer.append(obs_mm_train)    # training-side
+
+    return sample</code></pre>
+
+        <p>The <code>BaseInteractionEnv</code> interface is intentionally minimal: <code>reset()</code>, <code>step(response_text) → (observation, done, info)</code>, and <code>format_observation(observation) → message</code>. No assumptions about action grammars, no coupling to dataset format. <strong>"How the environment parses an action, executes a tool, returns an observation" is entirely the user's call.</strong> This is the decoupling the field needed to support Computer Use, embodied robotics, and tool-augmented reasoning under one framework.</p>
+
+        <h3>Two engineering tricks worth knowing</h3>
+
+        <p>Two implementation details from the slime team's writeup deserve highlighting because they capture exactly the kind of "look beneath the API" reasoning the engineering rewards.</p>
+
+        <h4>Dummy messages + delta tokens — bounded context growth</h4>
+
+        <p>The naive way to encode an observation back into the context is <code>tokenizer.apply_chat_template([obs_message], tools=...)</code>. The problem: chat templates auto-prepend a system prompt and tool-use instructions every time. If you do this each turn, the system prompt is duplicated into the context T times across T turns — quadratic context growth, partial waste of the token budget, and (even though these tokens are loss-masked) their presence shifts the actor's behavior distribution.</p>
+
+        <p>The trick: encode <em>twice</em>, take only the difference. Encode a fixed <code>DUMMY_MESSAGES</code> base alone to get the preamble token count; encode <code>DUMMY_MESSAGES + [obs_message]</code> together; slice off the preamble length. What you append is the clean observation delta only — system prompt and tool preamble appear exactly once across the whole trajectory.</p>
+
+<pre><code>dummy = apply_chat_template(DUMMY_MESSAGES, tools=tools, add_generation_prompt=False)
+full  = apply_chat_template(DUMMY_MESSAGES + [obs_msg], tools=tools, add_generation_prompt=True)
+
+trim = len(encode(dummy))
+obs_ids = encode(full)[trim:]   # delta tokens only</code></pre>
+
+        <p>Mathematically this is just set difference on token sequences; what's interesting is that the chat template API <em>doesn't expose</em> a primitive for "encode just this message under this preamble," so the user implements the difference operation manually. The trick is widely needed but rarely surfaced.</p>
+
+        <h4>Multimodal tensor merge — O(n²) → O(n)</h4>
+
+        <p>Each turn that adds an observation also produces a dict of tensors for the training side (vision features, audio features, whatever the VLM processor emits). The trainer wants one consolidated tensor per key over the whole trajectory. Naïvely concatenating each turn with <code>torch.cat</code> is O(n²): each call allocates a new output buffer and copies all existing data plus the new turn's increment.</p>
+
+        <p>The clean answer: buffer-then-merge. Append each turn's tensor dict to a Python list (O(1) per turn); at trajectory finalization, traverse the list once and call <code>torch.cat</code> exactly once per key. Total work drops from O(n²) to O(n), and you avoid the peak-memory transient where both the old and new concatenated tensors are simultaneously resident.</p>
+
+        <p>This too is a kind of math-as-engineering: the same input-output behavior, two different complexity profiles, distinguished only by where the allocation boundary sits. For a 32-turn rollout with 100K-token VLM context, the asymptotic difference is the difference between training and OOM.</p>
+
+        <aside class="note">
+          <strong>Empirical results.</strong> Training Qwen3-VL-2B-Instruct on the Geo3K multimodal dataset using this design: <em>raw reward rises and converges; repetition fraction drops; mean response length shortens.</em> Pushing <code>max_turns</code> from 3 to 20 and <code>rollout_max_response_len</code> from 4096 to 32000 keeps the same convergence pattern at higher throughput cost — the rollout-to-training time ratio rises (as expected for long-tail trajectories), but the policy still learns. The unified VLM/LLM rollout function held up under both regimes.
+        </aside>
+      </section>
+
+      <section id="miles-pipeline">
+        <h2>Engineering case study — Miles' DeepSeek-V3 RL pipeline</h2>
+
+        <p><a href="https://github.com/radixark/miles">Miles</a> is the most concrete case study of how the primitives above compose into a production pipeline. Built on slime, powered by Megatron-LM + SGLang, orchestrated by Ray. The repo's <code>scripts/run_deepseek.py</code> is a single Typer command that takes a DeepSeek-V3 model from HuggingFace and runs full GRPO training on AIME-2024 or GSM8K. Reading it teaches you what the actual engineering glue looks like.</p>
+
+        <figure>
+          <img src="diagrams/08-miles-architecture.svg" alt="Miles three-module architecture (Training, Data Buffer, Rollout) plus the 5-stage DeepSeek-V3 pipeline: download, FP8→BF16, HF→Megatron, rsync, ray job submit.">
+          <figcaption><span class="fig-label">Figure 8.</span> Left: the three-module decoupling — Data Buffer bridges Training (Megatron) and Rollout (SGLang). Right: the 5-stage pipeline from raw checkpoint to training run.</figcaption>
+        </figure>
+
+        <h3>The five-stage pipeline</h3>
+
+        <p>What makes <code>run_deepseek.py</code> instructive is that each stage tests for <em>already done</em> before re-running. The pipeline is resumable on every reboot — a property the field undervalues until it's debugging at 2am with a corrupted checkpoint.</p>
+
+        <ul>
+          <li><strong>① Download.</strong> <code>hf download deepseek-ai/DeepSeek-V3</code> for the model, <code>hf_download_dataset</code> for the training set (DAPO-math-17k + AIME-2024, or GSM8K). Skip if already present.</li>
+          <li><strong>② FP8 → BF16 cast.</strong> DeepSeek-V3 ships in FP8 on HuggingFace; training needs BF16 master weights (a QAT/master-weight prerequisite from the quantization section). <code>tools/fp8_cast_bf16.py</code> handles it. Skip if <code>model.safetensors.index.json</code> exists.</li>
+          <li><strong>③ HF → Megatron distributed format.</strong> Run <code>torchrun convert_hf_to_torch_dist.py</code> with the right PP/EP/TP sizes for the model. On multi-node this becomes <code>exec_command_all_ray_node(...)</code> — Ray fans the conversion command out across all nodes with <code>{{master_addr}}</code> / <code>{{node_rank}}</code> substitution. Skip if <code>latest_checkpointed_iteration.txt</code> reads <code>"release"</code>.</li>
+          <li><strong>④ Rsync to local node storage.</strong> Cross-node shared FS is too slow for the hot path. Every Ray node rsyncs the converted checkpoint to its local NVMe in parallel.</li>
+          <li><strong>⑤ Ray job submit.</strong> Builds the giant <code>train_args</code> string (rollout, optimizer, GRPO, wandb, perf, eval, SGLang, misc args), kills any stale processes, starts <code>ray start --head</code>, then <code>ray job submit -- python3 train.py</code> with the full runtime environment JSON.</li>
+        </ul>
+
+        <h3>The training main loop</h3>
+
+        <p>Once Ray has the job, <code>train.py</code> is a tight async loop. Read it as the runtime of all the primitives this survey covered:</p>
+
+<pre><code>async def train(args):
+    pgs = create_placement_groups(args)                # TP/PP/EP-aware GPU groups
+    init_tracking(args)
+    rollout_manager = create_rollout_manager(args, pgs["rollout"])    # SGLang
+    actor_model, critic_model = await create_training_models(args, pgs, ...)  # Megatron
+    await actor_model.update_weights()                 # initial sync → SGLang
+
+    for rollout_id in range(args.start_rollout_id, args.num_rollout):
+        rollout_data_ref = await rollout_manager.generate.remote(rollout_id)   # Phase A-B
+        await actor_model.train(rollout_id, rollout_data_ref)                  # Phase D
+        if rollout_id % args.save_interval == 0:
+            await actor_model.save_model(...)
+        await actor_model.update_weights()                                     # Phase E
+        if rollout_id % args.eval_interval == 0:
+            await rollout_manager.eval.remote(rollout_id)
+</code></pre>
+
+        <p>This is the call graph from Section "Reading real code," made concrete. Two Ray actor groups (training, rollout) bound to placement groups; an outer async loop alternating <code>generate</code>, <code>train</code>, <code>update_weights</code>. Every primitive — the hybrid engine, the memory choreography, the zero-copy weight sync, the four <code>update_weights_from_*</code> paths, the RadixAttention prefix cache — is invoked along this loop without the user-facing code ever spelling them out explicitly.</p>
+
+        <p>What's mathematically interesting is the layering. The top-level loop is sequential and easy to reason about as a fixed-point iteration on the policy parameters. The middle layer (Ray, placement groups) is concurrent but explicitly scoped. The bottom layer (CUDA kernels, NCCL collectives, ZMQ messages) is asynchronous but bounded by clean contracts. Each layer adds a strictly smaller amount of nondeterminism than the one beneath it — a kind of <em>algebraic abstraction ladder</em> that lets a theorist reason about convergence without unfolding the systems mess.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — Miles DeepSeek-V3 pipeline</div>
+          <ul>
+            <li><a href="https://github.com/radixark/miles" target="_blank">radixark/miles</a> — the repo</li>
+            <li><a href="https://github.com/radixark/miles/blob/main/scripts/run_deepseek.py" target="_blank"><code>scripts/run_deepseek.py</code></a> — the 5-stage entry point</li>
+            <li><a href="https://github.com/radixark/miles/blob/main/train.py" target="_blank"><code>train.py</code></a> — the async main loop</li>
+            <li><a href="https://github.com/radixark/miles/tree/main/tools" target="_blank"><code>tools/</code></a> — fp8_cast_bf16, convert_hf_to_torch_dist</li>
+            <li><a href="https://github.com/THUDM/slime" target="_blank">slime</a> — the lightweight RL framework Miles is built on top of</li>
+            <li><a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/slime/vlm-multi-turn/readme.md" target="_blank">SGLang RL team: VLM multi-turn writeup</a> — the canonical reference for the rollout design</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="recent">
+        <h2>Recent advances from the SGLang RL team</h2>
+
+        <p>The slime + Miles + SGLang community has shipped a cluster of advances in late 2025 / early 2026 that are worth knowing collectively because they extend the survey's six primitives along five different axes. I list them with one-paragraph reads.</p>
+
+        <h4>INT4 QAT full-flow training</h4>
+        <p>Inspired by Kimi K2-Thinking's <strong>W4A16 QAT</strong> recipe, slime now runs an end-to-end INT4 quantization-aware training pipeline. The training side keeps BF16 master weights but inserts <em>fake quantization</em> (quant-dequant) into the forward pass — the model "sees" INT4 noise and learns weights robust to it. The backward pass uses Straight-Through Estimator (STE): the round function's derivative is set to 1, letting gradient flow through the unquantized weights. At inference time, SGLang loads true W4A16 weights with the Marlin kernel. Net effect: a 1TB-class model (Kimi K2 scale) fits the rollout in a single H200 (141GB), eliminating cross-machine communication overhead. <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/slime/int4/readme.md" target="_blank">Technical writeup</a>.</p>
+
+        <h4>Unified VLM/LLM multi-turn</h4>
+        <p>The first-principles design described in the previous section. One rollout function, two domains, full decoupling between sampling logic and environment. <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/slime/vlm-multi-turn/readme.md" target="_blank">Blog</a>.</p>
+
+        <h4>Rollout Router Replay (R3) for MoE stability</h4>
+        <p>Already covered as Miles' signature contribution to the quantization section. Captures expert-routing decisions during SGLang inference, replays them during Megatron training. Makes MoE RL stable under low-precision routing.</p>
+
+        <h4>Full-flow FP8 training and sampling</h4>
+        <p>The follow-on to R3. <a href="https://lmsys.org/blog/2025-11-25-fp8-rl/">"Unified FP8: Moving Beyond Mixed Precision for Stable and Accelerated MoE RL"</a> walks through hardware foundations, scale selection, and MoE experiment results. The headline: FP8 inference + FP8 training + R3-style routing replay gives bit-identical numerics and ~2× rollout throughput on H100/H200.</p>
+
+        <h4>Speculative decoding in RL</h4>
+        <p>Standard practice for serving, novel in RL training. A small draft model proposes tokens; the policy verifies them in parallel. Net effect: 25%+ rollout speedup with no accuracy compromise. <a href="https://thudm.github.io/slime/advanced/speculative-decoding.html">slime docs</a>.</p>
+
+        <blockquote class="pull">
+          The cluster of advances above traces one through-line: <em>the bottleneck of RL training is the rollout, not the gradient update.</em> Every primitive optimizes rollout throughput or stability. The R3 / FP8 work makes the rollout faster <em>and</em> correct on MoE. The QAT work shrinks the rollout's memory. The multi-turn work expands what counts as a rollout. The speculative work decodes faster.
+        </blockquote>
+
+        <p>For a theorist this matters because the empirical claims in the field's papers (DeepSeek-R1, GLM-5.1, K2-Thinking, Doubao-1.5-pro) are produced under these specific infrastructure choices. If your work depends on understanding why those models behave as they do, the choices above are the assumption set you're implicitly invoking.</p>
+      </section>
+
       <section id="code">
         <h2>Reading real code: verl's <code>fit()</code> loop</h2>
 
@@ -1300,6 +1479,9 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
       <li><a href="#kernels">CUDA, Triton, TileLang</a></li>
       <li><a href="#megatron">Megatron-LM</a></li>
       <li><a href="#quantization">Quantization</a></li>
+      <li><a href="#multi-turn">Multi-turn agentic RL</a></li>
+      <li><a href="#miles-pipeline">Miles · DeepSeek-V3</a></li>
+      <li><a href="#recent">Recent advances</a></li>
       <li><a href="#code">Reading real code</a></li>
       <li><a href="#landscape">Framework landscape</a></li>
       <li><a href="#beyond">Beyond chat</a></li>

@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 660" font-family="system-ui, -apple-system, sans-serif">
+  <title>Miles three-module architecture and DeepSeek-V3 pipeline</title>
+  <desc>Miles decouples Training (Megatron), Data Buffer, and Rollout (SGLang). The 5-stage pipeline downloads, converts precision, converts to Megatron format, rsyncs, then submits the training job to Ray.</desc>
+
+  <defs>
+    <marker id="ar8" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#27262b"/>
+    </marker>
+    <marker id="ar8p" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7253ed"/>
+    </marker>
+  </defs>
+
+  <rect width="1100" height="660" fill="#ffffff"/>
+  <text x="550" y="38" text-anchor="middle" font-size="22" font-weight="600" fill="#27262b">Miles · three-module architecture · DeepSeek-V3 pipeline</text>
+  <text x="550" y="60" text-anchor="middle" font-size="13" fill="#5c5962">Decoupled training / data / rollout. Built on slime, powered by Megatron + SGLang, orchestrated by Ray.</text>
+
+  <!-- Left: Three-module arch -->
+  <text x="240" y="95" text-anchor="middle" font-size="12" font-weight="700" fill="#5c5962" letter-spacing="0.1em">THREE-MODULE ARCHITECTURE</text>
+
+  <!-- Data Buffer (center, top) -->
+  <rect x="120" y="120" width="240" height="80" rx="8" fill="#fffbeb" stroke="#d4a800" stroke-width="2"/>
+  <text x="240" y="150" text-anchor="middle" font-size="14" font-weight="600" fill="#a07c00">Data Buffer</text>
+  <text x="240" y="170" text-anchor="middle" font-size="11" fill="#5c5962">prompts · rollout data</text>
+  <text x="240" y="186" text-anchor="middle" font-size="11" fill="#5c5962">rewards · metadata</text>
+
+  <!-- Training (Megatron) — bottom left -->
+  <rect x="50" y="290" width="180" height="90" rx="8" fill="#fdfaff" stroke="#7253ed" stroke-width="2"/>
+  <text x="140" y="320" text-anchor="middle" font-size="13" font-weight="600" fill="#5f3ceb">Training</text>
+  <text x="140" y="338" text-anchor="middle" font-size="11" fill="#5c5962">Megatron-LM</text>
+  <text x="140" y="354" text-anchor="middle" font-size="10" fill="#5c5962" font-style="italic">policy update</text>
+  <text x="140" y="368" text-anchor="middle" font-size="10" fill="#5c5962" font-style="italic">PPO / GRPO / DPO</text>
+
+  <!-- Rollout (SGLang) — bottom right -->
+  <rect x="250" y="290" width="180" height="90" rx="8" fill="#fef9f4" stroke="#b85c00" stroke-width="2"/>
+  <text x="340" y="320" text-anchor="middle" font-size="13" font-weight="600" fill="#b85c00">Rollout</text>
+  <text x="340" y="338" text-anchor="middle" font-size="11" fill="#5c5962">SGLang</text>
+  <text x="340" y="354" text-anchor="middle" font-size="10" fill="#5c5962" font-style="italic">sample generation</text>
+  <text x="340" y="368" text-anchor="middle" font-size="10" fill="#5c5962" font-style="italic">reward / verifier</text>
+
+  <!-- Arrows between modules -->
+  <path d="M 200 200 Q 170 240 155 290" fill="none" stroke="#27262b" stroke-width="1.8" marker-end="url(#ar8)"/>
+  <text x="135" y="247" font-size="10" fill="#5c5962" font-style="italic">prompts</text>
+
+  <path d="M 280 200 Q 310 240 325 290" fill="none" stroke="#27262b" stroke-width="1.8" marker-end="url(#ar8)"/>
+  <text x="312" y="247" font-size="10" fill="#5c5962" font-style="italic">prompts</text>
+
+  <path d="M 325 290 Q 285 250 260 200" fill="none" stroke="#27262b" stroke-width="1.8" marker-end="url(#ar8)" stroke-dasharray="4,3"/>
+  <text x="362" y="247" font-size="10" fill="#5c5962" font-style="italic">samples</text>
+
+  <path d="M 220 380 L 250 380" fill="none" stroke="#7253ed" stroke-width="2" marker-end="url(#ar8p)"/>
+  <text x="240" y="372" text-anchor="middle" font-size="10" fill="#7253ed" font-weight="600">weights</text>
+
+  <!-- Caption -->
+  <text x="240" y="425" text-anchor="middle" font-size="11" fill="#5c5962" font-style="italic" font-weight="600">Why this works</text>
+  <text x="240" y="442" text-anchor="middle" font-size="10" fill="#5c5962">· Training &amp; rollout scale independently</text>
+  <text x="240" y="457" text-anchor="middle" font-size="10" fill="#5c5962">· Rollout optimized like vLLM</text>
+  <text x="240" y="472" text-anchor="middle" font-size="10" fill="#5c5962">· Supports async + colocated RL</text>
+
+  <!-- Divider -->
+  <line x1="490" y1="100" x2="490" y2="610" stroke="#e6e1e8" stroke-dasharray="3,4"/>
+
+  <!-- Right: 5-stage pipeline -->
+  <text x="790" y="95" text-anchor="middle" font-size="12" font-weight="700" fill="#5c5962" letter-spacing="0.1em">5-STAGE DEEPSEEK-V3 PIPELINE</text>
+
+  <!-- Stage 1 -->
+  <rect x="550" y="120" width="480" height="62" rx="6" fill="#fff" stroke="#7253ed" stroke-width="1.5"/>
+  <text x="572" y="140" font-size="13" font-weight="700" fill="#7253ed">①</text>
+  <text x="592" y="140" font-size="13" font-weight="600" fill="#27262b">Download model + dataset</text>
+  <text x="592" y="158" font-size="11" fill="#5c5962" font-family="SFMono-Regular, monospace">hf download deepseek-ai/DeepSeek-V3</text>
+  <text x="592" y="173" font-size="11" fill="#5c5962" font-family="SFMono-Regular, monospace">hf_download_dataset zhuzilin/dapo-math-17k</text>
+
+  <line x1="790" y1="182" x2="790" y2="200" stroke="#5c5962" stroke-width="1.5" marker-end="url(#ar8)"/>
+
+  <!-- Stage 2 -->
+  <rect x="550" y="200" width="480" height="62" rx="6" fill="#fff" stroke="#7253ed" stroke-width="1.5"/>
+  <text x="572" y="220" font-size="13" font-weight="700" fill="#7253ed">②</text>
+  <text x="592" y="220" font-size="13" font-weight="600" fill="#27262b">FP8 → BF16 precision cast</text>
+  <text x="592" y="238" font-size="11" fill="#5c5962" font-family="SFMono-Regular, monospace">tools/fp8_cast_bf16.py</text>
+  <text x="592" y="253" font-size="10" fill="#5c5962" font-style="italic">Skip if model.safetensors.index.json exists</text>
+
+  <line x1="790" y1="262" x2="790" y2="280" stroke="#5c5962" stroke-width="1.5" marker-end="url(#ar8)"/>
+
+  <!-- Stage 3 -->
+  <rect x="550" y="280" width="480" height="62" rx="6" fill="#fff" stroke="#7253ed" stroke-width="1.5"/>
+  <text x="572" y="300" font-size="13" font-weight="700" fill="#7253ed">③</text>
+  <text x="592" y="300" font-size="13" font-weight="600" fill="#27262b">HF → Megatron distributed format</text>
+  <text x="592" y="318" font-size="11" fill="#5c5962" font-family="SFMono-Regular, monospace">torchrun convert_hf_to_torch_dist.py</text>
+  <text x="592" y="333" font-size="10" fill="#5c5962" font-style="italic">Multi-node via Ray ·  PP/EP/TP per model</text>
+
+  <line x1="790" y1="342" x2="790" y2="360" stroke="#5c5962" stroke-width="1.5" marker-end="url(#ar8)"/>
+
+  <!-- Stage 4 -->
+  <rect x="550" y="360" width="480" height="62" rx="6" fill="#fff" stroke="#7253ed" stroke-width="1.5"/>
+  <text x="572" y="380" font-size="13" font-weight="700" fill="#7253ed">④</text>
+  <text x="592" y="380" font-size="13" font-weight="600" fill="#27262b">Rsync to local node storage</text>
+  <text x="592" y="398" font-size="11" fill="#5c5962" font-family="SFMono-Regular, monospace">exec_command_all_ray_node("rsync -a ...")</text>
+  <text x="592" y="413" font-size="10" fill="#5c5962" font-style="italic">All Ray nodes in parallel</text>
+
+  <line x1="790" y1="422" x2="790" y2="440" stroke="#5c5962" stroke-width="1.5" marker-end="url(#ar8)"/>
+
+  <!-- Stage 5 -->
+  <rect x="550" y="440" width="480" height="82" rx="6" fill="#fdfaff" stroke="#7253ed" stroke-width="2"/>
+  <text x="572" y="460" font-size="13" font-weight="700" fill="#7253ed">⑤</text>
+  <text x="592" y="460" font-size="13" font-weight="600" fill="#27262b">Ray job submit · train.py main loop</text>
+  <text x="592" y="478" font-size="11" fill="#5c5962" font-family="SFMono-Regular, monospace">ray job submit -- python3 train.py ...</text>
+  <text x="592" y="495" font-size="10" fill="#5c5962" font-style="italic">→ create_placement_groups · create_rollout_manager</text>
+  <text x="592" y="510" font-size="10" fill="#5c5962" font-style="italic">→ for rollout_id in range(num_rollout): generate → train → sync</text>
+
+  <!-- Bottom note -->
+  <rect x="550" y="540" width="480" height="50" rx="6" fill="#f0fdf9" stroke="#026e57"/>
+  <text x="790" y="560" text-anchor="middle" font-size="12" font-weight="600" fill="#026e57">Skip-conditions are the engineering grace.</text>
+  <text x="790" y="578" text-anchor="middle" font-size="11" fill="#5c5962" font-style="italic">Each stage tests for "already done" before re-running. Resumable on every reboot.</text>
+</svg>

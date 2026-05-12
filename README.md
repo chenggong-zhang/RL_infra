@@ -27,6 +27,9 @@ The article is structured as a single long-form blog post. Section headings:
 - **The layer beneath: CUDA, Triton, TileLang** — kernel-level DSLs
 - **The training backbone: Megatron-LM** — 5D parallelism (TP × PP × DP × EP × CP)
 - **Quantization and the numerical-alignment problem** — FP8, INT4, MXFP4; the MoE routing divergence
+- **Multi-turn agentic RL — unifying VLM and LLM from first principles** — the rollout loop, `BaseInteractionEnv`, the dummy-messages + delta tokens trick (bounded context growth), multimodal tensor merge (O(n²) → O(n))
+- **Engineering case study — Miles' DeepSeek-V3 RL pipeline** — the 3-module decoupling and the 5-stage pipeline (`run_deepseek.py` walkthrough)
+- **Recent advances from the SGLang RL team** — INT4 QAT (Kimi K2-Thinking style), unified VLM/LLM multi-turn, Rollout Router Replay, full-flow FP8, speculative decoding in RL
 - **Reading real code** — verl's `fit()` loop and AReaL's async pattern
 - **The framework landscape** — 9 frameworks on 5 axes
 - **Beyond chat** — multi-turn agents, embodied AI, world models, the TPU detour
@@ -36,9 +39,9 @@ The article is structured as a single long-form blog post. Section headings:
 
 ---
 
-## Six SVG diagrams
+## Eight SVG diagrams
 
-The survey ships six SVG diagrams that visualize the design principles. They live in [`diagrams/`](diagrams/).
+The survey ships eight SVG diagrams that visualize the design principles. They live in [`diagrams/`](diagrams/).
 
 | # | File | Section | What it visualizes |
 |---|------|---------|--------------------|
@@ -48,6 +51,8 @@ The survey ships six SVG diagrams that visualize the design principles. They liv
 | 4 | [`04-weight-update-paths.svg`](diagrams/04-weight-update-paths.svg) | Four update paths | Four transport topologies |
 | 5 | [`05-radix-tree-grpo.svg`](diagrams/05-radix-tree-grpo.svg) | RadixAttention × GRPO | Hash cache vs radix tree for group rollouts |
 | 6 | [`06-scaling-chain.svg`](diagrams/06-scaling-chain.svg) | The scaling chain | What breaks at 8 → 10K GPUs |
+| 7 | [`07-multi-turn-rollout.svg`](diagrams/07-multi-turn-rollout.svg) | Multi-turn agentic RL | The turn loop · loss-mask 1/0 split · sample ↔ weight sync |
+| 8 | [`08-miles-architecture.svg`](diagrams/08-miles-architecture.svg) | Miles · DeepSeek-V3 | Three-module decoupling + 5-stage pipeline |
 
 ---
 
