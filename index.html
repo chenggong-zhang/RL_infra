@@ -572,6 +572,7 @@
     <li><a href="#scaling" class="nav-link">Scaling chain</a></li>
     <li><a href="#pitfalls" class="nav-link">Pitfalls (踩坑录)</a></li>
     <li><a href="#checklist" class="nav-link">Researcher's checklist</a></li>
+    <li><a href="#reading-plan" class="nav-link">19-repo reading plan</a></li>
     <li><a href="#open" class="nav-link">Open questions</a></li>
     <li><a href="#reading" class="nav-link">Reading list</a></li>
   </ul>
@@ -586,11 +587,11 @@
         <h1>RL Infrastructure for the Mathematically Inclined</h1>
         <p class="subtitle">A field survey of reinforcement-learning post-training systems — six engineering primitives, three kernel-level DSLs, the training backbone, the quantization problem, three production case studies (Miles · DeepSeek V4 · slime OPD), six recurring design patterns, a researcher's checklist, and open questions at the systems–theory boundary. Written for mathematicians and RL theorists who want to read the source code of <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a>, <a href="https://github.com/triton-lang/triton">Triton</a> and recognize what's mathematically interesting about the engineering choices.</p>
         <div class="byline">
-          <span>~65 min read</span>
+          <span>~75 min read</span>
           <span>·</span>
           <span>20 repos surveyed · 8 diagrams · 12+ code excerpts</span>
           <span>·</span>
-          <span>6 design patterns · 9-question checklist · 7 open questions</span>
+          <span>6 design patterns · 9-question checklist · 19-repo reading plan</span>
         </div>
       </header>
 
@@ -1143,6 +1144,108 @@ obs_ids = encode(full)[trim:]   # delta tokens only</code></pre>
 
         <p>What's mathematically interesting is the layering. The top-level loop is sequential and easy to reason about as a fixed-point iteration on the policy parameters. The middle layer (Ray, placement groups) is concurrent but explicitly scoped. The bottom layer (CUDA kernels, NCCL collectives, ZMQ messages) is asynchronous but bounded by clean contracts. Each layer adds a strictly smaller amount of nondeterminism than the one beneath it — a kind of <em>algebraic abstraction ladder</em> that lets a theorist reason about convergence without unfolding the systems mess.</p>
 
+        <h3>Miles is not a trainer — it is a runtime phase machine</h3>
+
+        <p>If you read the source carefully, the most useful reframe is this: the top-level loop is not algorithm-driven, it is <em>phase-driven</em>. There is no PPO/GRPO logic in <code>train.py</code> at all. There is only a sequence of phases — rollout, training, sync, eval — and the code's job is to hand the GPU between them cleanly. The actual math (advantages, KL, importance weights) lives inside the actor, far below the top-level loop. From a theorist's angle this matters because it tells you where to look for bugs: a wrong policy gradient is a bug in the actor; a wrong rollout-train mismatch is a bug in the phase machine.</p>
+
+        <p>The phases are precise:</p>
+
+        <ul>
+          <li><strong>Rollout phase:</strong> SGLang owns weights, KV cache, CUDA graphs. The trainer's optimizer is offloaded to CPU.</li>
+          <li><strong>Training phase:</strong> The trainer owns weights, gradients, activations, optimizer state. SGLang's KV cache and CUDA graphs are released.</li>
+          <li><strong>Sync phase:</strong> The trainer's new weights are pushed into SGLang. Generation is paused; the cache is flushed; the weight version is bumped.</li>
+          <li><strong>Eval / save phase:</strong> Periodic side effects that don't affect the policy gradient loop.</li>
+        </ul>
+
+        <p>Two object models run in parallel. The mathematical model is <code>θ_t → sample τ ~ π_θ → compute reward and advantage → θ_{t+1} → install into rollout</code>. The engineering model is <code>GPU ownership, KV cache ownership, weight version, Ray actor liveness, NCCL group state, offload/onload state</code>. Miles' value is keeping these two models aligned — when the math says "the policy just updated," the engineering says "the inference engine now serves the new weights, and any prior in-flight requests have been retracted." If those two statements ever drift apart, the gradient becomes noise and the loss curve still looks fine.</p>
+
+        <h3>Six engineering invariants Miles maintains across the loop</h3>
+
+        <p>These are the invariants you can verify in the source code. They are also the right checklist if you are reading any other framework in this survey and want to know what to look for. Each one is one line of plain English, then one line of why it matters.</p>
+
+        <ol>
+          <li><strong>Logical rank order maps stably to physical GPU order.</strong> Ray bundles, Megatron ranks, and SGLang engine ranks must agree on which physical GPU is "rank 5." If they disagree, you get silent NCCL hangs or weights written into the wrong worker — symptoms that are hours to diagnose. Miles handles this in <code>placement_group.py</code> by reading back actual node IP and GPU IDs from each Ray bundle and sorting deterministically.</li>
+          <li><strong>GPU ownership switches explicitly, never by accident.</strong> Colocated mode never lets training and rollout both touch GPU memory at the same time. The transitions go through <code>rollout_manager.offload_*</code>, <code>actor_model.onload</code>, and SGLang's <code>release_memory_occupation</code> / <code>resume_memory_occupation</code>. The invariant — at any moment, exactly one engine has the live GPU memory — is what makes colocation safe.</li>
+          <li><strong>Weight version is monotonically increasing.</strong> Every sync bumps <code>weight_version</code> and propagates it to every SGLang engine. The trainer can later assert that the engine's reported version equals what it just sent. If they ever differ, a weight update silently failed somewhere and you want to know now, not after 10000 training steps.</li>
+          <li><strong>Weight updates pause generation and flush the cache first.</strong> Before a sync, Miles calls <code>pause_generation</code> on every engine and then <code>flush_cache</code>. The point is to make sure no in-flight request continues decoding with old prefix-cache KVs that belong to the old policy. This is the rule SGLang's own scheduler also enforces; Miles just makes it visible at the top level.</li>
+          <li><strong>Loss-relevant logprobs are recomputed on the trainer, not trusted from inference.</strong> Miles keeps the rollout logprobs (it needs them for TIS and mismatch checks) but the actual policy-gradient term uses logprobs computed by the training engine on the same tokens. This is the BERT-era numerical-drift discipline made concrete: the inference engine generates; the trainer scores.</li>
+          <li><strong>MoE routing is replayed, not re-derived.</strong> When R3 is on, SGLang returns the expert choices it made during generation; the trainer reuses those choices during the forward pass, regardless of what FP8 numerics would have decided locally. The mathematical statement is that the gradient is taken with respect to the routed graph the rollout used — which is the only way the gradient is a meaningful signal about that rollout's actions.</li>
+        </ol>
+
+        <p>Two more invariants Miles enforces when partial rollout is on: <em>tokens generated under an older weight version are loss-masked to zero by default</em> (so only fresh tokens contribute to the gradient), and <em>off-policy ratio is monitored as a first-class metric via TIS, ESS, and a "rollout-train mismatch" probe</em> (so staleness is something you see, not something you discover via mysterious eval degradation three days in).</p>
+
+        <h3>How a sample flows from rollout to gradient</h3>
+
+        <p>The full data path is worth tracing once, because it shows where the abstractions are doing real work and where they're just plumbing. A prompt enters the system, gets sampled N=8 times by SGLang (this is GRPO's group), each completion is scored, the survivors become a training batch. Concretely:</p>
+
+        <ol>
+          <li>The <code>RolloutManager</code> takes a prompt and submits N parallel generation requests to SGLang. Each request returns <code>tokens, logprobs, finish_reason</code> — and if R3 is on, also <code>routed_experts</code> (a tensor of shape [response_len, num_layers, top_k] recording which experts processed each token at each MoE layer).</li>
+          <li>The reward function scores each completion. For GRPO, the rewards within the N-completion group are then group-normalized: subtract the group mean (and optionally divide by group std). The result is each sample's advantage relative to its sibling samples from the same prompt.</li>
+          <li>Optionally, a <em>dynamic sampling filter</em> drops groups whose rewards are all equal (DAPO-style "if every sample got reward 1.0 or every sample got 0.0, the gradient is zero — don't bother training on it"). Miles uses <code>check_reward_nonzero_std</code> as the default filter.</li>
+          <li>Surviving samples are packed into a training batch. Every sample carries a <strong>loss mask</strong> — assistant tokens are 1, observation/system tokens are 0. If partial rollout is on, old-version tokens are also 0. The loss mask is a first-class field; the trainer does not "infer" which tokens to score.</li>
+          <li>The batch is split across data-parallel ranks. If <code>balance_data</code> is on, it splits to equalize <em>tokens per rank</em>, not samples per rank — a small detail that matters a lot when response lengths have long tails.</li>
+          <li>Each trainer rank recomputes logprobs on its slice and computes the policy-gradient loss. The recomputed logprobs are the ones that flow into the loss; the rollout logprobs only show up in TIS and in mismatch monitoring.</li>
+        </ol>
+
+        <p>The reason to walk through this is that every field in the training batch has a job. <code>tokens</code> and <code>response_lengths</code> are the raw text. <code>rewards</code> and <code>advantages</code> drive the loss. <code>loss_masks</code> control which positions count. <code>rollout_log_probs</code> enable TIS. <code>rollout_routed_experts</code> enable R3. <code>weight_versions</code> let the trainer detect stale samples. <code>teacher_log_probs</code> are reserved for OPD. The batch is a small algebra of fields, each one corresponding to a distinct correctness concern.</p>
+
+        <h3>Two paths for weight sync — and why the choice matters</h3>
+
+        <p>Miles picks between two weight-sync paths at config time, and the choice has both performance and reliability implications.</p>
+
+        <p><strong>Colocated path (<code>UpdateWeightFromTensor</code>):</strong> when the trainer and the SGLang engine share the same physical GPUs, the trainer assembles the new weights into one flattened bucket per layer, serializes the tensor descriptors (pointer + stride + offset + CUDA IPC handle, ~1KB total) using <code>MultiprocessingSerializer</code>, gathers them to the lead rank via Gloo, and hands them to SGLang via Ray IPC. SGLang reconstructs Python tensor objects that point to the same physical GPU memory the trainer just wrote. <em>Zero actual tensor data crosses any wire.</em> The reason this works is that two processes on the same host can share CUDA memory through IPC handles — the cost is sub-millisecond per update, regardless of model size.</p>
+
+        <p><strong>Distributed path (<code>UpdateWeightFromDistributed</code>):</strong> when the trainer and rollout live on different physical GPUs (or across nodes), Miles creates a NCCL group whose participants are <code>{trainer rank 0} ∪ {all rollout engine ranks}</code>. The trainer sends metadata (parameter names, shapes, dtypes) over Ray, and the actual tensor data over NCCL broadcast from rank 0. This is the classical "split the control plane and the data plane" pattern: small metadata flows through a flexible RPC layer; large tensors flow through dedicated high-bandwidth collectives. Miles also serializes the broadcasts behind a Ray lock — concurrent broadcasts can deadlock NCCL, and the lock is cheap insurance.</p>
+
+        <p>Both paths share a third invariant: <em>flush the cache after the update</em>. Old prefix-cache entries reference the old policy; serving them under the new policy is a silent correctness bug. SGLang's mixin handles this with <code>flush_cache_after_weight_update</code> at the end of every transport.</p>
+
+        <h3>Staleness corrections — what Miles measures during training</h3>
+
+        <p>Even on a colocated setup, the rollout policy and the trainer policy are not the same. The trainer is <em>one step ahead</em> — it generated the sample under θ<sub>t</sub> but is computing the loss against θ<sub>t+1</sub> after the parameter update. For PPO this is fine; for fully-async RL it can drift. Miles tracks staleness with three explicit quantities:</p>
+
+        <ul>
+          <li><strong>TIS (truncated importance sampling).</strong> Compute <code>ratio = exp(log_prob_train - log_prob_rollout)</code> per token; clip it into <code>[lo, hi]</code>; multiply into the policy-gradient term. This re-weights stale samples so the gradient is unbiased again, modulo the variance the truncation adds.</li>
+          <li><strong>ESS (effective sample size).</strong> <code>ESS = (Σ w)² / Σ w²</code> over the importance weights. A small ESS means most of your samples are effectively being ignored — useful as a single number to monitor over training.</li>
+          <li><strong>Rollout-train mismatch metric.</strong> The mean and max of <code>|log_prob_train - log_prob_rollout|</code> per token. If this drifts upward, the rollout has gotten too stale; you want to know before the loss diverges.</li>
+        </ul>
+
+        <p>The principle is the same one that runs through this whole survey: <em>the system tells you it is lying about being on-policy, and quantifies how much</em>. That is the right design for a system whose inputs are partially stale by construction.</p>
+
+        <h3>What Miles actually solves — seven brittle problems made systematic</h3>
+
+        <p>The most useful summary of Miles is not "it implements GRPO." It is that Miles takes seven specific failure modes that wreck large-scale MoE RL training and turns each one into an engineering invariant with a corresponding code path:</p>
+
+        <ol>
+          <li><strong>Train and rollout sharing GPUs without OOM</strong> → colocate + per-pool offload + SGLang memory-saver.</li>
+          <li><strong>Pushing new weights into rollout fast</strong> → colocated tensor bucket + distributed NCCL broadcast + P2P paths.</li>
+          <li><strong>GRPO rollouts not duplicating work</strong> → group sampling + dynamic filter + SGLang prefix cache.</li>
+          <li><strong>Long-tail rollouts not stalling training</strong> → partial rollout + buffer recycling + loss masking of old tokens.</li>
+          <li><strong>Async / off-policy not silently corrupting the gradient</strong> → rollout logprobs + TIS + ESS + mismatch metric.</li>
+          <li><strong>MoE under low precision not destabilizing</strong> → R3 routed-experts replay + unified precision pipeline.</li>
+          <li><strong>Multi-day jobs being recoverable</strong> → fault tolerance + weight-version checks + restartable rollout engines.</li>
+        </ol>
+
+        <p>Each one is small in code volume but large in production consequence. The seven together are why Miles is a useful case study and not just another RL framework: it is one of the cleanest places in the open-source RL ecosystem to see what "production-grade" actually means, at the line-of-code level.</p>
+
+        <h3>Recommended reading order for Miles' source</h3>
+
+        <p>If you want to walk the source yourself, this order goes from outside to inside, from runtime phases to algorithm internals. Each file builds on the last; jumping straight to the middle usually wastes a day.</p>
+
+        <ol>
+          <li><code>train.py</code> — establish the five phases (rollout, train, sync, save, eval). Skim, don't memorize.</li>
+          <li><code>miles/ray/placement_group.py</code> — see how colocate / split-colocate is actually expressed in Ray bundles.</li>
+          <li><code>miles/ray/rollout.py</code> — the <code>RolloutManager</code>, including reward normalization, DP split, and what fields end up in training data.</li>
+          <li><code>miles/rollout/sglang_rollout.py</code> — the default per-sample generation function; this is where dynamic sampling and partial rollout actually live.</li>
+          <li><code>miles/backends/sglang_utils/sglang_engine.py</code> — the HTTP wrapper around SGLang and the twelve control endpoints (memory, weights, generation pause).</li>
+          <li><code>miles/backends/megatron_utils/actor.py</code> — Megatron actor init, the train_actor flow (recompute logprob, R3 replay, advantage, train, backup).</li>
+          <li><code>miles/backends/megatron_utils/update_weight/update_weight_from_tensor.py</code> — the colocated path's flattened-bucket trick.</li>
+          <li><code>miles/backends/megatron_utils/update_weight/update_weight_from_distributed/broadcast.py</code> — the distributed NCCL path with the deadlock-prevention lock.</li>
+          <li><code>miles/backends/training_utils/loss.py</code> — the algorithm seam: response-aligned logprobs, all advantage estimators, TIS, ESS.</li>
+          <li><code>scripts/run_deepseek.py</code> — finally the production recipe, where all of the above gets wired up for an actual DeepSeek-V3 run.</li>
+        </ol>
+
+        <p>By the time you reach <code>run_deepseek.py</code>, you are reading it not as a script but as a witness: every flag in the giant <code>train_args</code> string lights up a specific invariant or path you have already seen. That recognition is the whole point of the exercise.</p>
+
         <div class="study">
           <div class="study-title">Study resources — Miles DeepSeek-V3 pipeline</div>
           <ul>
@@ -1616,6 +1719,58 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
         <p>None of this is to claim that papers should be ignored unless they answer all nine questions. It is to say that the empirical comparisons you make in your head while reading the field's papers should always include "and what is implicitly assumed about questions 1 through 6." The discipline of working through this checklist is what the survey's vocabulary is for.</p>
       </section>
 
+      <section id="reading-plan">
+        <h2>A 19-repo reading plan — how to do this yourself</h2>
+
+        <p>This survey distilled 19 source repos into a few thousand words. If you want to do the same exercise yourself — read the actual code, not just my summary — here is the order I would recommend, and the template I would use for each repo. The two together turn what looks like an overwhelming corpus into a manageable sequence of small case studies.</p>
+
+        <h3>Read in five groups, not in their listed order</h3>
+
+        <p>The natural impulse is to start with the most familiar repo on the list. That is the wrong move. The list groups by topic — image diffusion, RL framework, inference engine, kernel DSL — and reading them in topic order means you spend a week on image generation before you have any of the RL skeleton in your head. The better order is the one this survey is built on:</p>
+
+        <ol>
+          <li><strong>The RL skeleton itself.</strong> Start with <strong>Miles</strong>, <strong>slime</strong>, <strong>verl</strong>, <strong>SGLang</strong>, and <strong>Megatron-LM</strong> together. These five repos cover the full <em>generate → score → filter → train → sync</em> path. Miles and slime give you a clean five-phase loop in <code>train.py</code>. verl gives you the most complete PPO/GRPO driver. SGLang gives you the rollout-and-weight-sync substrate. Megatron-LM gives you the training backbone and, surprisingly, its own native RL path in <code>megatron/rl/</code>. By the end of group 1 you can read any RL framework's <code>train.py</code> in fifteen minutes.</li>
+          <li><strong>Comparison across RL framework designs.</strong> Then read <strong>AReaL</strong>, <strong>OpenRLHF</strong>, <strong>SkyRL</strong>, and <strong>RLinf</strong>. Now you're not learning the skeleton — you're learning the variations. AReaL shows fully-async; OpenRLHF shows the classical synchronous Ray + DeepSpeed + vLLM design; SkyRL specializes in long-horizon agents; RLinf adds the M2Flow scheduler for embodied and agentic workloads. The point of group 2 is to see where the same skeleton can bend.</li>
+          <li><strong>Inference and compiler substrate.</strong> Next read <strong>vLLM</strong>, <strong>TensorRT-LLM</strong>, <strong>TensorRT</strong>, <strong>Triton</strong>, <strong>TileLang</strong>. These are not RL frameworks. They are the layer beneath. The goal is to understand <em>why</em> prefix caches, paged attention, CUDA graphs, kernel DSLs, quantization, and MoE communication kernels determine rollout economics. After group 3, you will read RL papers differently — you'll see that "we used SGLang" or "we used vLLM" is a substantive experimental claim, not a deployment detail.</li>
+          <li><strong>Rollout targets beyond chat.</strong> Then <strong>FLUX</strong>, <strong>FLUX.2</strong>, <strong>Wan2.2</strong>. These are not RL frameworks either — they are the <em>targets</em> RL frameworks might want to fine-tune. FLUX.2's reference-token KV-cache trick and Wan2.2's video-diffusion MoE both are useful systems case studies in their own right. The point is to understand what changes when the target is not an autoregressive LLM.</li>
+          <li><strong>Failure modes and meta-reading.</strong> Finish with the <strong>Cambrian TPU blog</strong> and <strong>Chenyang Zhao's Awesome-ML-SYS-Tutorial</strong>. Cambrian tells you why almost none of the GPU-RL stack ports to TPUs. The tutorial tells you which papers' results to distrust until you have verified the infrastructure. These two are the reality check at the end of a long reading binge.</li>
+        </ol>
+
+        <p>Five groups, nineteen repos. If you spend a real week on group 1 and then a few days on each of groups 2 through 5, you finish with a working mental model of the field's plumbing. Without group 1, the others read like trivia. With group 1, they read like commentary on a structure you already understand.</p>
+
+        <h3>A ten-question template for each repo</h3>
+
+        <p>I have used the same template for every case study in this survey. It is short enough to apply in an evening, structured enough to make the reading comparable across repos. The questions are deliberately ordered from outside to inside, so you build context before you dive into specifics.</p>
+
+        <table>
+          <thead><tr><th>#</th><th>Question</th><th>Where to look</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td><strong>What is this repo, really?</strong> Is it a target model, a framework, a backbone, an inference engine, or a kernel substrate?</td><td>README + top-level package layout</td></tr>
+            <tr><td>2</td><td><strong>Directory map</strong> — what lives where? README, docs, examples, scripts, tests, src.</td><td>One-shot <code>ls -R</code> with note-taking</td></tr>
+            <tr><td>3</td><td><strong>Entry scripts</strong> — what's the training entry, the inference entry, the benchmark entry, the deployment entry?</td><td><code>scripts/</code> and the README's "Quick Start"</td></tr>
+            <tr><td>4</td><td><strong>Core objects</strong> — name the trainer, rollout manager, scheduler, engine, worker, cache, model runner.</td><td>The <code>__init__.py</code> exports of the top-level package</td></tr>
+            <tr><td>5</td><td><strong>One sample's path</strong> — trace a single prompt/request from input through rollout, reward, loss, update, sync.</td><td>The main loop file; trace the variable names</td></tr>
+            <tr><td>6</td><td><strong>Engineering invariants</strong> — memory ownership, weight freshness, cache invalidation, logprob recompute, precision consistency.</td><td>The asserts and concurrency contracts</td></tr>
+            <tr><td>7</td><td><strong>Parallelism and resources</strong> — TP/PP/DP/EP/CP, FSDP, DeepSpeed, Ray placement, NCCL/RDMA, offload.</td><td>The config files; the placement-group code</td></tr>
+            <tr><td>8</td><td><strong>Known failure modes</strong> — OOM, staleness, routing divergence, NCCL hangs, cache staleness, dynamic shapes, precision drift.</td><td>Issues, CHANGELOG, comments tagged "TODO" or "WARN"</td></tr>
+            <tr><td>9</td><td><strong>Mapping to this survey's primitives</strong> — which of the six engineering primitives does it implement, and which does it skip?</td><td>Cross-reference with the design patterns section above</td></tr>
+            <tr><td>10</td><td><strong>The ten files most worth reading</strong> — in walking order, outside to inside.</td><td>Your own notes from steps 3-6</td></tr>
+          </tbody>
+        </table>
+
+        <p>This template is what the Miles case study in this survey looks like under the hood. The deep dive into Miles is just questions 1-10 answered for one repo. Once you have the answers for one repo, the answers for the next repo are easier to find — you know what to look for.</p>
+
+        <blockquote class="pull">
+          The point of a template is not that it teaches you the answer. The point is that it makes the unknown answers visible. Two pages of "I don't know yet, but I know where to look" beats ten pages of disorganized notes from skimming.
+        </blockquote>
+
+        <h3>Why this matters more than any single answer</h3>
+
+        <p>The honest reason to learn this corpus is not that you will read all nineteen repos. The reason is that <em>you will have to read one of them</em>, sooner than you expect, because something in your own work depends on it. When that happens, knowing the five-group structure and the ten-question template is what turns "I have to read a giant unfamiliar codebase" into "I have a routine." A theorist who has practiced this routine is hard to surprise.</p>
+
+        <p>The corpus is a vocabulary, not a curriculum. The five groups are the rough order in which the vocabulary becomes useful. The ten questions are how you make any single new repo legible. Together they are the most portable thing in this survey — they outlast any specific framework or paper, because the structure of the field changes more slowly than its surface.</p>
+      </section>
+
       <section id="open">
         <h2>Open questions at the systems–theory boundary</h2>
 
@@ -1761,6 +1916,7 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
       <li><a href="#scaling">Scaling chain</a></li>
       <li><a href="#pitfalls">Pitfalls</a></li>
       <li><a href="#checklist">Researcher's checklist</a></li>
+      <li><a href="#reading-plan">19-repo reading plan</a></li>
       <li><a href="#open">Open questions</a></li>
       <li><a href="#reading">Reading list</a></li>
     </ul>
