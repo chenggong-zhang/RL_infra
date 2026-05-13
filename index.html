@@ -167,11 +167,19 @@
   }
   .toc-rail h4 {
     font-size: 11px; font-weight: 700;
-    text-transform: uppercase; letter-spacing: 0.08em;
-    color: var(--text-muted);
-    margin-bottom: 10px;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--purple);
+    margin-bottom: 8px;
+    margin-top: 22px;
+    padding-left: 8px;
+    border-left: 2px solid var(--purple-soft);
   }
-  .toc-rail ul { list-style: none; }
+  .toc-rail h4:first-child { margin-top: 0; }
+  .toc-rail ul {
+    list-style: none;
+    margin: 0 0 14px 6px;
+    padding-left: 0;
+  }
   .toc-rail a {
     display: block;
     padding: 3px 0;
@@ -179,8 +187,13 @@
     text-decoration: none;
     font-size: 12px;
     line-height: 1.5;
+    border-bottom: none;
   }
   .toc-rail a:hover { color: var(--purple); }
+  .toc-rail a.active {
+    color: var(--purple-dark);
+    font-weight: 600;
+  }
 
   article {
     font-family: var(--font-serif);
@@ -562,6 +575,8 @@
     <li><a href="#miles-pipeline" class="nav-link">Miles · DeepSeek-V3</a></li>
     <li><a href="#verl-pipeline" class="nav-link">verl · HybridFlow</a></li>
     <li><a href="#deepseek-v4" class="nav-link">DeepSeek V4 · OPD-heavy</a></li>
+    <li><a href="#sglang-internals" class="nav-link">SGLang · inference substrate</a></li>
+    <li><a href="#vllm-internals" class="nav-link">vLLM · block-paging contrast</a></li>
     <li><a href="#recent" class="nav-link">Recent advances</a></li>
   </ul>
 
@@ -587,13 +602,13 @@
       <header>
         <div class="eyebrow">An engineering survey · for the mathematically inclined</div>
         <h1>RL Infrastructure for the Mathematically Inclined</h1>
-        <p class="subtitle">A field survey of reinforcement-learning post-training systems — six engineering primitives, three kernel-level DSLs, the training backbone, the quantization problem, five production case studies (multi-turn agentic · slime · Miles · verl · DeepSeek V4), six recurring design patterns, a researcher's checklist, a 19-repo reading plan, and open questions at the systems–theory boundary. Written for mathematicians and RL theorists who want to read the source code of <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a>, <a href="https://github.com/triton-lang/triton">Triton</a> and recognize what's mathematically interesting about the engineering choices.</p>
+        <p class="subtitle">A field survey of reinforcement-learning post-training systems — six engineering primitives, three kernel-level DSLs, the training backbone, the quantization problem, seven production case studies (multi-turn agentic · slime · Miles · verl · DeepSeek V4 · SGLang internals · vLLM block-paging), six recurring design patterns, a researcher's checklist, a 19-repo reading plan, and open questions at the systems–theory boundary. Written for mathematicians and RL theorists who want to read the source code of <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/vllm-project/vllm">vLLM</a>, <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a>, <a href="https://github.com/triton-lang/triton">Triton</a> and recognize what's mathematically interesting about the engineering choices.</p>
         <div class="byline">
-          <span>~95 min read</span>
+          <span>~115 min read</span>
           <span>·</span>
-          <span>20 repos surveyed · 9 diagrams · 16+ code excerpts</span>
+          <span>20 repos surveyed · 11 diagrams · 18+ code excerpts</span>
           <span>·</span>
-          <span>5 case studies · 6 design patterns · 9-question checklist · 19-repo reading plan</span>
+          <span>7 case studies · 6 design patterns · 9-question checklist · 19-repo reading plan</span>
         </div>
       </header>
 
@@ -925,40 +940,130 @@ def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, ...):
 
         <p><a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a> is the training engine sitting under almost every RL framework in this survey. The repository contains two parts: <strong>Megatron Core</strong> (a composable library of GPU-optimized building blocks — kernels, parallelism strategies, mixed-precision support) and <strong>Megatron-LM</strong> proper (reference training scripts using the core). Performance numbers from NVIDIA's benchmarks: 462B-parameter models trained on 6144 H100 GPUs, reaching 47% Model FLOP Utilization. For comparison, naïve PyTorch DDP on a 70B model typically achieves 30-35% MFU.</p>
 
-        <h3>Five-dimensional parallelism</h3>
+        <p>From the survey's point of view, Megatron plays <em>two distinct roles</em> at once. As a <strong>substrate</strong>, it is the engine that Miles, slime, and verl wrap to do the actual gradient work — recomputing logprobs, computing the GRPO loss, running backward, stepping the optimizer, and materializing rollout weights. As a <strong>native RL framework</strong>, it ships its own complete first-party RL stack at <code>megatron/rl/</code>, with <code>train_rl.py</code>, <code>rl_utils.py</code>, <code>sequence_packing_utils.py</code>, and an SGLang-server bridge. Knowing both roles is what lets you read the verl/slime/Miles code without losing track of which abstraction owns which invariant.</p>
 
-        <p>The reason Megatron exists, and the reason every serious LLM training run uses it, is its parallelism. Modern Megatron supports five orthogonal dimensions:</p>
+        <figure>
+          <img src="diagrams/11-megatron-rl-role.svg" alt="Megatron-LM's dual role: substrate (recompute logprobs, compute GRPO loss, backward, materialize weights) versus native RL stack (train_rl.py, rl_utils.py, sequence_packing_utils.py, MegatronLocal, verify_model_weights_swap). Below: 5D parallelism strip — TP, PP, DP, EP, CP — each with its RL meaning. Bottom: communication intensity ordering.">
+          <figcaption><span class="fig-label">Figure 10.</span> Megatron's two roles. Left: the substrate role used by Miles, slime, and verl. Right: the native RL stack at <code>megatron/rl/</code>. Bottom: 5D parallelism, each axis with its concrete RL meaning.</figcaption>
+        </figure>
+
+        <h3>Role 1: substrate for Miles / slime / verl</h3>
+
+        <p>When a framework above wraps Megatron, it asks Megatron for four things, in this order:</p>
+
+        <ol>
+          <li><strong>Recompute logprobs</strong> for the rollout tokens. The inference engine produced its own logprobs but they cannot be trusted for the loss — different precision, different kernels, sometimes different operator order. The trainer must recompute them in the training precision, with the training kernels, on the training parallel layout. This is one forward pass per microbatch, no backward.</li>
+          <li><strong>Compute the loss</strong>. Given recomputed logprobs π<sub>θ</sub>, rollout logprobs π<sub>old</sub>, advantages Â, and a KL reference π<sub>ref</sub>, build the GRPO objective and a few diagnostic scalars. The next subsection has the explicit formula.</li>
+          <li><strong>Backward + optimizer step</strong>. Standard Megatron, but with a quirk: at RL scale, the parallelism layout chosen for backward (favoring DP for throughput) is usually not the same one that's fastest for the rollout forward (favoring TP for low latency). The framework above arbitrates.</li>
+          <li><strong>Materialize weights for rollout sync</strong>. After the optimizer step, the new policy has to flow back into SGLang. The trainer exposes a method (parameter iteration with DTensor → full_tensor() bucketing, or an offload-to-disk path) that yields named tensors in a form the inference engine can ingest. <a href="#weight-sync">Primitive ③</a> covers this.</li>
+        </ol>
+
+        <p>Three of the four jobs above are exactly what a normal pretraining loop does. The one that distinguishes RL is #1, the recompute. Every RL framework eats this cost because the alternative — trusting inference-engine logprobs — produces silent training-time drift that the gradient cannot detect.</p>
+
+        <h3>Role 2: Megatron's own RL stack</h3>
+
+        <p>The directory <code>megatron/rl/</code> is a complete RL framework in its own right, hidden inside what is nominally a pretraining library. The headline files are worth knowing by name:</p>
 
         <ul>
-          <li><strong>TP</strong> (Tensor Parallel) — split each layer's weight matrices across GPUs. Within-machine, NVLink-bound. Default for the highest-bandwidth domain.</li>
-          <li><strong>PP</strong> (Pipeline Parallel) — split layers across GPUs. Cross-machine, InfiniBand-bound. Sparse communication, tolerates slower links.</li>
-          <li><strong>DP</strong> (Data Parallel) — replicate the model, split the batch. Tolerant of slow communication. Outer loop of the parallelism nest.</li>
-          <li><strong>EP</strong> (Expert Parallel) — split MoE experts across GPUs. Necessary above ~30B-parameter MoE models. Required for DeepSeek-V3, Qwen3-MoE, GPT-OSS.</li>
-          <li><strong>CP</strong> (Context Parallel) — split the sequence dimension across GPUs. Needed for long-context training (32K+ tokens) and for video models (100K+ tokens).</li>
+          <li><strong><code>train_rl.py</code></strong> — the top-level entrypoint. Builds the model with the standard Megatron <code>pretrain()</code> harness, then swaps the forward-step function for an RL-aware one and the data iterator for a rollout-driven one. The training loop is <em>identical</em> to pretraining at the outer level; only the inner step differs.</li>
+          <li><strong><code>megatron/rl/rl_utils.py</code></strong> — the GRPO loss, the truncated-importance-sampling clip, the KL penalty, the entropy bonus, and the precision-mismatch diagnostics. This is the file to read if you want to see what a GRPO step <em>actually</em> computes, with all corrections inline rather than spread across a framework.</li>
+          <li><strong><code>megatron/rl/sequence_packing_utils.py</code></strong> — the packing logic that lets variable-length rollouts share a microbatch without attention leaking across sequence boundaries. Produces a <code>PackedSeqParams</code> object holding <code>cu_seqlens</code> (cumulative lengths) which the Transformer Engine attention kernels honor as a hard mask. The packing prevents O(n²) attention waste on the tail of short rollouts.</li>
+          <li><strong><code>megatron/rl/agent/</code> · <code>inference/</code> · <code>server/</code></strong> — the three modules that bridge Megatron to an external sampler. <code>server/</code> exposes a <code>MegatronLocal</code> handle that the SGLang RL backend uses for parameter transfer and <code>verify_model_weights_swap()</code> checks. <code>inference/</code> hosts the rollout client. <code>agent/</code> hosts the environment interface.</li>
+          <li><strong><code>verify_model_weights_swap()</code></strong> — a small but load-bearing invariant. After a sync, it asserts that the inference engine and trainer hold the same weights up to a tolerance, by sampling parameters and comparing reductions. Failures here are the canonical staleness bug. Without this check, a missed sync drifts silently until rewards crater.</li>
         </ul>
 
-        <p>The product space is enormous: TP × PP × DP × EP × CP. Choosing the right point in this grid for a given model and cluster is a small art. Megatron's defaults are good, but the framework above (verl, slime, etc.) typically overrides them for the RL-specific case where rollout and training have conflicting preferences.</p>
+        <h3>The GRPO loss as Megatron writes it</h3>
+
+        <p>GRPO drops PPO's critic and replaces it with a group-relative baseline: for a prompt, sample G completions, compute the reward for each, normalize within the group, and use the normalized reward as the advantage. The Megatron implementation builds the loss as:</p>
+
+<pre><code>L_GRPO = -E[ min( ρ · Â, clip(ρ, 1-ε, 1+ε) · Â ) ]   # truncated importance sampling
+       + β · KL( π_θ || π_ref )                       # reference penalty
+       - α · H( π_θ )                                 # entropy bonus
+
+where ρ = exp( π_θ(a|s) - π_old(a|s) ),
+      Â = group-normalized reward within G samples for the same prompt,
+      π_old = logprobs at sampling time (from the rollout engine, NOT trusted as numerics
+              but trusted as the policy that generated the action),
+      π_θ   = recomputed logprobs from the trainer in the training precision.</code></pre>
+
+        <p>The mathematically delicate term is ρ. In on-policy PPO/GRPO, ρ should be ≈ 1 because the same model generates and trains. In practice it is not, for three reasons: (a) partial rollouts replay older policy actions, (b) numerical drift between FP8 inference and BF16 training, (c) MoE routing divergence when low-precision routing flips top-k picks. Megatron's <code>rl_utils.py</code> exposes <strong>mismatch metrics</strong> that compute |ρ - 1| moments per batch — when those grow beyond a threshold, the training is no longer on-policy in the empirical sense and the gradient estimator's bias has eaten the trust region.</p>
 
         <blockquote class="pull">
-          The communication intensity decreases as you move right through TP → CP → EP → DP → PP. Place the densest communication on the fastest hardware (NVLink within a node) and the sparsest on the slowest (cross-rack InfiniBand). This is the structure principle of every distributed training topology.
+          The mismatch metric is the <em>empirical</em> answer to "is my training on-policy?". The math says ρ should be 1; the metric tells you what it actually is. Every production GRPO run watches this number.
         </blockquote>
 
-        <h3>Megatron's own RL module</h3>
+        <h3>Sequence packing — why attention leakage matters</h3>
 
-        <p>Less well-known: Megatron-LM ships its own RL training module at <code>megatron/rl/</code>. It includes <code>agent/</code>, <code>inference/</code>, <code>server/</code>, <code>rl_utils.py</code>, and <code>sequence_packing_utils.py</code> — an integrated RL framework, sitting alongside the verl / slime / Miles ecosystem. This is partly redundant with those frameworks but useful when you want first-party NVIDIA support and tight Megatron-Core integration. The <code>post_training/</code> directory handles quantization, distillation, and pruning, which the next section will cover.</p>
+        <p>Rollouts vary in length wildly: a math problem may finish in 200 tokens, a long-horizon code task in 8000. A naïve batch pads to the longest sequence and burns FLOPs on padding. Packing concatenates several rollouts end-to-end into a single packed sequence and tells the attention kernel where the boundaries are. Done wrong — without the boundary mask — tokens at position 250 in rollout B attend to tokens at position 200 in rollout A, and the gradient learns to mix unrelated trajectories. <code>PackedSeqParams</code> with <code>cu_seqlens = [0, 200, 4500, 4700, …]</code> is the data structure that Transformer Engine's flash attention uses to enforce the boundary. The packing transformation is <em>not</em> just a memory optimization; it is a correctness primitive. The bug it prevents (cross-sequence attention) is the kind that produces a coherent-looking loss curve and a quietly-broken policy.</p>
+
+        <h3>The four-layer Megatron ↔ SGLang interface</h3>
+
+        <p>When a framework above (slime, Miles) connects Megatron to SGLang, the interface decomposes into four layers, each enforcing one invariant:</p>
+
+        <ol>
+          <li><strong>Process layer.</strong> Ray spawns a Megatron worker group and an SGLang scheduler group. They live on the same GPUs (sleep-mode time-sharing) or different GPUs (disaggregated). Invariant: every Megatron rank knows which SGLang rank it talks to, and vice versa.</li>
+          <li><strong>Memory layer.</strong> <code>release_memory_occupation()</code> on SGLang frees the engine's KV cache before backward; <code>resume_memory_occupation()</code> reclaims it after. Invariant: at any instant, exactly one of {trainer activations, inference KV} occupies the shared GPU memory pool. <a href="#memory">Primitive ②</a> made this concrete.</li>
+          <li><strong>Weight layer.</strong> <code>update_weights_from_distributed()</code> (or its IPC / disk variant) streams parameters from trainer to engine, bucket by bucket, NCCL-overlapped. Invariant: <code>verify_model_weights_swap()</code> must pass before the next rollout begins.</li>
+          <li><strong>Token layer.</strong> SGLang generates, Megatron recomputes logprobs, the framework above stitches the tuples. Invariant: the <code>π_old</code> stored on disk for the loss is the engine's logprob; the <code>π_θ</code> used for the loss is always the recompute.</li>
+        </ol>
+
+        <p>Bugs at each layer have different symptoms: process-layer bugs hang; memory-layer bugs OOM; weight-layer bugs drift; token-layer bugs corrupt gradients. The right invariant to assert at each layer is what makes the four layers cleanly decomposable.</p>
+
+        <h3>5D parallelism in the RL setting</h3>
+
+        <p>The product space TP × PP × DP × EP × CP is huge. Below is how each axis interacts specifically with RL — what makes RL different from pretraining is that the <em>same model</em> has to run in both rollout and training modes, with different optimal layouts.</p>
+
+        <ul>
+          <li><strong>TP (Tensor Parallel)</strong> — split each layer's weight matrices across GPUs. Within-machine, NVLink-bound. RL setting: TP is the dimension most often shared between rollout and training (because the rollout engine is also TP-sharded). Sleep-mode hybrid engines (verl, slime) typically use <em>identical</em> TP for trainer and engine, which makes the weight handoff a no-op in layout.</li>
+          <li><strong>PP (Pipeline Parallel)</strong> — split layers across GPUs. Cross-machine, InfiniBand-bound. RL setting: PP is rarely matched between trainer and engine — SGLang prefers TP-only for low decode latency, while the trainer benefits from PP for the backward. The mismatch is handled at the weight-sync layer with explicit gather and scatter steps.</li>
+          <li><strong>DP (Data Parallel)</strong> — replicate the model, split the batch. RL setting: DP scales the trainer cheaply but does <em>nothing</em> for the rollout (the rollout is bottlenecked by single-sample latency, not per-batch throughput). High-DP layouts therefore over-provision the trainer relative to the engine, which is fine if rollout dominates wall time but wasteful otherwise.</li>
+          <li><strong>EP (Expert Parallel)</strong> — split MoE experts across GPUs. Required for DeepSeek-V3, Qwen3-MoE, GPT-OSS. RL setting: EP is where the R3 routing-replay invariant lives. The trainer's EP layout and the engine's EP layout must agree on which expert handles which token, or the gradient signal corrupts. Miles' contribution is the EP-aware replay.</li>
+          <li><strong>CP (Context Parallel)</strong> — split the sequence dimension across GPUs. RL setting: CP is what makes V4's million-token RL possible. The 2026 dynamic-CP work (1.48× on variable-length) is precisely the RL setting — rollouts have wildly variable lengths, so a static CP wastes capacity on short sequences.</li>
+        </ul>
+
+        <blockquote class="pull">
+          Communication intensity falls along TP &gt; CP &gt; EP &gt; DP &gt; PP. Place the densest communication on the fastest hardware (NVLink within a node) and the sparsest on the slowest (cross-rack InfiniBand). This is the structure principle of every distributed training topology — Megatron, vLLM, SGLang, DeepSpeed, all the same.
+        </blockquote>
+
+        <h3>Six engineering invariants Megatron enforces</h3>
+
+        <ol>
+          <li><strong>Logprob recompute</strong> — never use inference-engine logprobs for the loss; recompute them in the trainer's precision and kernels.</li>
+          <li><strong>Mismatch metrics</strong> — track |ρ - 1| moments per batch; if they grow, the training is no longer empirically on-policy.</li>
+          <li><strong>Sequence-packing boundary mask</strong> — <code>cu_seqlens</code> is mandatory whenever variable-length rollouts share a microbatch.</li>
+          <li><strong>Weight-swap verification</strong> — <code>verify_model_weights_swap()</code> must pass before each new rollout.</li>
+          <li><strong>EP routing agreement</strong> — trainer's expert assignment must match the engine's, either by shared routing or by R3 replay.</li>
+          <li><strong>Communication-overlap flags</strong> — <code>--overlap-grad-reduce</code>, <code>--overlap-param-gather</code>, <code>--tp-comm-overlap</code> are not optional at scale; they hide the all-reduce behind compute and are why 47% MFU is achievable.</li>
+        </ol>
 
         <h3>What's mathematically interesting</h3>
 
-        <p>The communication overlapping flags (<code>--overlap-grad-reduce</code>, <code>--overlap-param-gather</code>, <code>--tp-comm-overlap</code>) are an exercise in hiding latency behind compute — a kind of staggered evaluation. Pipeline parallelism's "1F1B" schedule (one forward, one backward, interleaved) recovers most of the bubble in a fully-synchronous pipeline; the math of why this works is straightforward but writing it down clarifies why Megatron's MFU stays high even with PP.</p>
+        <p>The communication overlapping flags are an exercise in hiding latency behind compute — a kind of staggered evaluation. Pipeline parallelism's "1F1B" schedule (one forward, one backward, interleaved) recovers most of the bubble in a fully-synchronous pipeline; the math of why this works is straightforward but writing it down clarifies why Megatron's MFU stays high even with PP.</p>
 
         <p>The dynamic context parallelism shipped in January 2026 (1.48× speedup for variable-length sequences) is a nice example of treating CP size as a runtime variable rather than a static config. The "right" CP size depends on the sequence length of the current batch — adapting it dynamically is essentially online load balancing.</p>
+
+        <p>The GRPO loss as written in <code>rl_utils.py</code> is the cleanest place in any open codebase to see all three "correction" terms (truncated importance sampling, KL, entropy) composed together with diagnostic metrics. Reading it answers a question that papers leave ambiguous: which corrections are mandatory and which are heuristics. The Megatron version's answer: the truncation clip is mandatory at scale (without it, off-policy ρ explodes); the KL is mandatory for reference anchoring (without it, the policy walks away from coherence); the entropy bonus is the tunable knob.</p>
+
+        <h3>Recommended reading order</h3>
+
+        <p>If you want to actually read the Megatron RL code rather than treat it as an opaque substrate, the cleanest path:</p>
+
+        <ol>
+          <li><code>megatron/rl/train_rl.py</code> — top-level entrypoint. See how it differs from <code>pretrain.py</code>: same outer loop, different forward-step function.</li>
+          <li><code>megatron/rl/rl_utils.py</code> — the GRPO loss with all corrections inline. The single best file in any codebase for the "what does GRPO actually compute" question.</li>
+          <li><code>megatron/rl/sequence_packing_utils.py</code> — the packing transformation. Short file, easy to misread; the point is the boundary mask, not the packing itself.</li>
+          <li><code>megatron/rl/server/</code> — the <code>MegatronLocal</code> bridge. Read it after you've read slime's or Miles's framework code so you know what's calling it.</li>
+          <li><code>megatron/post_training/</code> — the quantization paths covered in <a href="#quantization">the next section</a>. Read it after you've seen the FP8 / INT4 discussion below.</li>
+        </ol>
 
         <div class="study">
           <div class="study-title">Study resources — Megatron-LM</div>
           <ul>
             <li><a href="https://github.com/NVIDIA/Megatron-LM" target="_blank">NVIDIA/Megatron-LM</a> — repo root</li>
             <li><a href="https://docs.nvidia.com/megatron-core/developer-guide/latest/index.html" target="_blank">Megatron Core docs</a> — parallelism guide, mixed precision, quickstart</li>
-            <li><a href="https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/rl" target="_blank"><code>megatron/rl/</code></a> — Megatron's own RL module</li>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/rl" target="_blank"><code>megatron/rl/</code></a> — Megatron's own RL module (the native RL stack)</li>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/rl/rl_utils.py" target="_blank"><code>rl_utils.py</code></a> — the GRPO loss with all corrections</li>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/rl/sequence_packing_utils.py" target="_blank"><code>sequence_packing_utils.py</code></a> — the packing logic</li>
             <li><a href="https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/post_training" target="_blank"><code>megatron/post_training/</code></a> — quantization and distillation paths</li>
             <li><a href="https://arxiv.org/abs/1909.08053" target="_blank">Megatron-LM paper (arxiv 1909.08053)</a> — the original tensor-parallel architecture</li>
             <li><a href="https://github.com/NVIDIA-NeMo/Megatron-Bridge" target="_blank">Megatron-Bridge</a> — bidirectional HuggingFace ↔ Megatron checkpoint conversion</li>
@@ -1415,32 +1520,6 @@ obs_ids = encode(full)[trim:]   # delta tokens only</code></pre>
         </div>
       </section>
 
-      <section id="recent">
-        <h2>Recent advances from the SGLang RL team</h2>
-
-        <p>The slime + Miles + SGLang community has shipped a cluster of advances in late 2025 / early 2026 that are worth knowing collectively because they extend the survey's six primitives along five different axes. I list them with one-paragraph reads.</p>
-
-        <h4>INT4 QAT full-flow training</h4>
-        <p>Inspired by Kimi K2-Thinking's <strong>W4A16 QAT</strong> recipe, slime now runs an end-to-end INT4 quantization-aware training pipeline. The training side keeps BF16 master weights but inserts <em>fake quantization</em> (quant-dequant) into the forward pass — the model "sees" INT4 noise and learns weights robust to it. The backward pass uses Straight-Through Estimator (STE): the round function's derivative is set to 1, letting gradient flow through the unquantized weights. At inference time, SGLang loads true W4A16 weights with the Marlin kernel. Net effect: a 1TB-class model (Kimi K2 scale) fits the rollout in a single H200 (141GB), eliminating cross-machine communication overhead. <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/slime/int4/readme.md" target="_blank">Technical writeup</a>.</p>
-
-        <h4>Unified VLM/LLM multi-turn</h4>
-        <p>The first-principles design described in the previous section. One rollout function, two domains, full decoupling between sampling logic and environment. <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/slime/vlm-multi-turn/readme.md" target="_blank">Blog</a>.</p>
-
-        <h4>Rollout Router Replay (R3) for MoE stability</h4>
-        <p>Already covered as Miles' signature contribution to the quantization section. Captures expert-routing decisions during SGLang inference, replays them during Megatron training. Makes MoE RL stable under low-precision routing.</p>
-
-        <h4>Full-flow FP8 training and sampling</h4>
-        <p>The follow-on to R3. <a href="https://lmsys.org/blog/2025-11-25-fp8-rl/">"Unified FP8: Moving Beyond Mixed Precision for Stable and Accelerated MoE RL"</a> walks through hardware foundations, scale selection, and MoE experiment results. The headline: FP8 inference + FP8 training + R3-style routing replay gives bit-identical numerics and ~2× rollout throughput on H100/H200.</p>
-
-        <h4>Speculative decoding in RL</h4>
-        <p>Standard practice for serving, novel in RL training. A small draft model proposes tokens; the policy verifies them in parallel. Net effect: 25%+ rollout speedup with no accuracy compromise. <a href="https://thudm.github.io/slime/advanced/speculative-decoding.html">slime docs</a>.</p>
-
-        <blockquote class="pull">
-          The cluster of advances above traces one through-line: <em>the bottleneck of RL training is the rollout, not the gradient update.</em> Every primitive optimizes rollout throughput or stability. The R3 / FP8 work makes the rollout faster <em>and</em> correct on MoE. The QAT work shrinks the rollout's memory. The multi-turn work expands what counts as a rollout. The speculative work decodes faster.
-        </blockquote>
-
-        <p>For a theorist this matters because the empirical claims in the field's papers (DeepSeek-R1, GLM-5.1, K2-Thinking, Doubao-1.5-pro) are produced under these specific infrastructure choices. If your work depends on understanding why those models behave as they do, the choices above are the assumption set you're implicitly invoking.</p>
-      </section>
 
       <section id="verl-pipeline">
         <h2>Engineering case study — verl, the HybridFlow programming model</h2>
@@ -1745,6 +1824,220 @@ batch.batch["returns"] = ...</code></pre>
         </div>
       </section>
 
+      <section id="sglang-internals">
+        <h2>Engineering case study — SGLang, the inference substrate</h2>
+
+        <p>Every framework above (verl, slime, Miles) treats <a href="https://github.com/sgl-project/sglang">SGLang</a> as a black box: feed it prompts, get back tokens; push new weights, expect the next sample to use them. This case study opens the box. The point is to make every interaction the trainer has with SGLang legible — what API it calls, what invariant that API guarantees, and what bug appears when the invariant breaks. Once those are clear, the SGLang ↔ Megatron interface section of any RL framework reads as the small, declarative shim it actually is, rather than as opaque glue.</p>
+
+        <figure>
+          <img src="diagrams/10-sglang-internals.svg" alt="SGLang internals from the RL training perspective. Top: trainer issues five control commands (generate, update_weights_from_*, release/resume_memory_occupation, pause/continue, flush_cache). Middle: Scheduler with SchedulePolicy mixin and RadixCache + MemoryPool mixin; TpModelWorker bridge; ModelRunner with RoutedExpertsCapturer. Bottom: four output streams (tokens, logprobs, routed_experts, finish_reason) and six engineering invariants.">
+          <figcaption><span class="fig-label">Figure 11.</span> SGLang internals viewed from the trainer's seat. Top: the five control commands the trainer sends down. Middle: the Scheduler and ModelRunner stack. Bottom: the four output streams that flow back up, plus the six invariants the engine guarantees.</figcaption>
+        </figure>
+
+        <h3>The two-way contract</h3>
+
+        <p>From the trainer's perspective, SGLang exposes a <em>small</em> control-plane API and a <em>large</em> data-plane behavior. The control plane is the easy part to read; the data plane is where the engineering lives. The control commands the trainer issues, in approximately the order an RL step uses them:</p>
+
+        <ul>
+          <li><strong><code>generate(prompts, sampling_params)</code></strong> — the rollout call. Returns a stream of <code>(token_id, logprob, finish_reason)</code> per sample. The sampling params include <code>temperature</code>, <code>top_p</code>, <code>top_k</code>, <code>max_new_tokens</code>, and crucially a <code>return_logprob</code> flag.</li>
+          <li><strong><code>update_weights_from_*</code></strong> — one of four flavors: <code>_disk</code>, <code>_distributed</code>, <code>_tensor</code>, <code>_ipc</code>. <a href="#four-paths">Primitive ④</a> covered the four paths. The trainer picks one based on whether the engine shares GPUs (IPC), shares an NCCL group (distributed), shares a filesystem (disk), or shares neither (tensor over HTTP).</li>
+          <li><strong><code>release_memory_occupation()</code></strong> — tells the engine to free its KV cache and weight buffers <em>before</em> the trainer's backward pass needs the GPU. The engine asserts <code>is_fully_idle()</code> first: no in-flight generations, no pending requests. If the assert fails, the framework above hangs intentionally — better hang than corrupt.</li>
+          <li><strong><code>resume_memory_occupation()</code></strong> — the symmetric reclaim. Re-allocates the KV pool and (if weights were also released) re-uploads them via the appropriate <code>update_weights_from_*</code> path.</li>
+          <li><strong><code>pause_scheduler()</code> / <code>continue_scheduler()</code></strong> — soft-stop the scheduler without freeing memory. Cheaper than release/resume; used when the pause is brief (waiting for a sync barrier) and the cost of re-uploading weights would dominate.</li>
+          <li><strong><code>flush_cache()</code></strong> — invalidate the RadixCache after a weight update. New weights, new logprobs, so old KV entries are stale. The flush is the boundary between two policy versions.</li>
+        </ul>
+
+        <p>The data plane is what flows back up: <code>tokens</code> and their <code>logprobs</code> per sample (used as π<sub>old</sub> in the loss, never as π<sub>θ</sub>), <code>finish_reason</code> per sample (length cap, EOS, stop string), and — for MoE rollouts — <code>routed_experts</code> per token (the R3 record that lets the trainer replay routing).</p>
+
+        <h3>Scheduler — the central state machine</h3>
+
+        <p>SGLang's <code>Scheduler</code> is the loop that decides, every tick, which requests get tokens this step. It has two mixin behaviors that together implement everything interesting:</p>
+
+        <ul>
+          <li><strong><code>SchedulePolicy</code></strong> — picks which requests advance. The default is <strong>LPM (Longest Prefix Match)</strong>, which prefers requests whose prefixes are already cached. In an RL setting with group sampling (G samples per prompt), LPM is what makes the G samples share the prompt's KV automatically. There is also <strong>in-batch prefix caching</strong>: within one decode batch, requests that share a prefix with a request being processed <em>this tick</em> reuse the same KV blocks without going through the cache lookup. The two work together: LPM at request admission, in-batch at the tick level.</li>
+          <li><strong><code>RadixCache + MemoryPool</code></strong> — owns the KV cache as a radix tree (<a href="#radix-grpo">Primitive ⑤</a>) and the underlying physical block pool. The radix tree has <code>inc_lock_ref(node)</code> / <code>dec_lock_ref(node)</code> primitives — the lock ref is what prevents an in-use prefix from being evicted under cache pressure. Without it, a long-running rollout could lose its prefix in the middle of generation. With it, the prefix is pinned for the rollout's lifetime and unpinned on completion.</li>
+        </ul>
+
+        <p>The radix cache also has a <strong>namespace</strong> mechanism — the <code>extra_key</code> field on each prefix tree node. For multi-tenant RL (multiple training runs sharing one SGLang cluster), <code>extra_key</code> separates each run's tree, preventing cross-tenant prefix collisions. Within one RL run, <code>extra_key</code> can encode the policy version, which makes the <code>flush_cache</code> on weight update a pure namespace-rotation rather than a full eviction.</p>
+
+        <h3>TpModelWorker — the parallel bridge</h3>
+
+        <p>Between the single-threaded Scheduler and the TP-sharded GPU work sits <code>TpModelWorker</code>. It is the dispatch boundary: requests selected by the Scheduler are scattered to TP ranks; per-rank outputs are gathered back. The bridge owns the all-reduce barriers, the NCCL groups, and the lock-step invariant that all TP ranks see the same sequence of requests in the same order. A TP rank that drifts (e.g., because a kernel returned slightly different timings) causes the next all-reduce to hang. The Scheduler's strict ordering is what prevents this.</p>
+
+        <p>For RL, the TpModelWorker is also the layer where <code>update_weights_from_distributed</code> hooks in. The trainer's parameter stream arrives as NCCL all-gather operations across the cross-process group that spans trainer ranks and engine ranks. <code>TpModelWorker</code> consumes each parameter bucket as it arrives, writes it into the model's local shard, and proceeds. The bucket size is tuned so that NCCL overlap hides the all-gather latency behind the previous bucket's write.</p>
+
+        <h3>ModelRunner and RoutedExpertsCapturer</h3>
+
+        <p><code>ModelRunner</code> owns the actual forward pass: it allocates KV blocks, runs the attention kernel, runs the FFN (or the MoE routing + experts), and emits logits. For MoE models, <code>ModelRunner</code> embeds a <strong><code>RoutedExpertsCapturer</code></strong> — a small hook that records, per token, which top-k experts the gating selected. This record is the R3 ingredient. Without the capturer in the inference path, R3 cannot replay; the trainer would have to re-run routing in its own precision, which is exactly the precision-divergence problem Miles introduced R3 to solve.</p>
+
+        <p>The capturer is off by default (it has memory and bandwidth cost) and turned on by the framework above via a config flag when MoE-RL with low-precision inference is the workload. The capture format is a compact <code>(token_idx, expert_ids[k])</code> stream that the trainer reads alongside <code>(token, logprob)</code>.</p>
+
+        <h3>Sleep mode — the memory-choreography hookpoint</h3>
+
+        <p>SGLang's <em>sleep mode</em> is the engine's side of the hybrid-engine handshake. Three sleep levels, in increasing aggression:</p>
+
+        <ul>
+          <li><strong>Level 0</strong>: only the KV pool is dropped. The model weights and the CUDA graphs stay in VRAM. Recovery is fastest (just re-allocate the KV pool) but the freed memory is modest (KV is usually 20-40% of total).</li>
+          <li><strong>Level 1</strong>: KV pool + weights. The model itself leaves VRAM, offloaded to pinned host memory. Recovery requires re-uploading weights — but if the trainer is going to push <em>new</em> weights anyway after backward, this is essentially free. The frees are large (most of the engine's VRAM).</li>
+          <li><strong>Level 2</strong>: KV pool + weights + CUDA graphs. Even the captured CUDA graphs (which encode kernel launch sequences) are dropped. Recovery is slowest (re-trace + re-capture, hundreds of milliseconds) but the frees are maximal. Used when the trainer needs every byte it can get during backward.</li>
+        </ul>
+
+        <p>The <code>release_memory_occupation()</code> command takes a level argument and the framework above picks based on its backward-pass memory profile. verl's <code>sleep_level=1</code> default is the right choice for most setups; <code>sleep_level=2</code> is only worth it for models that wouldn't otherwise fit.</p>
+
+        <h3>The four <code>update_weights_from_*</code> paths from SGLang's side</h3>
+
+        <p><a href="#four-paths">Primitive ④</a> covered these from the trainer's perspective. From SGLang's side, each path becomes a method on the engine with different memory-and-latency tradeoffs:</p>
+
+        <table>
+          <thead><tr><th>Path</th><th>What SGLang does</th><th>Latency</th><th>Memory overhead</th></tr></thead>
+          <tbody>
+            <tr><td><code>_disk</code></td><td>Read each shard from a shared filesystem; load into the local model.</td><td>Slowest (seconds-to-minutes)</td><td>Low (streaming)</td></tr>
+            <tr><td><code>_distributed</code></td><td>Receive each parameter bucket via NCCL all-gather; write into local shard.</td><td>Fast (ms-to-sec)</td><td>Bucket-sized buffer</td></tr>
+            <tr><td><code>_tensor</code></td><td>Receive each parameter over HTTP / gRPC; write into local shard.</td><td>Slow (network-bound)</td><td>Per-tensor buffer</td></tr>
+            <tr><td><code>_ipc</code></td><td>Map the trainer's CUDA tensor by IPC handle; copy device-to-device.</td><td>Fastest (μs-to-ms)</td><td>Zero-copy if same-rank</td></tr>
+          </tbody>
+        </table>
+
+        <p>The <em>same verb</em> "update weights" has four implementations differing only in transport. This is the canonical example of <a href="#patterns">pattern 1, the functor</a>: one operation lifted across four topologies.</p>
+
+        <h3>Six engineering invariants SGLang enforces</h3>
+
+        <ol>
+          <li><strong>Idle-before-release</strong> — <code>release_memory_occupation()</code> asserts <code>is_fully_idle()</code> before freeing. No in-flight generations.</li>
+          <li><strong>Lock-ref for in-use prefixes</strong> — every active rollout pins its prefix with <code>inc_lock_ref</code>; the radix tree's evictor skips locked nodes.</li>
+          <li><strong>TP lock-step</strong> — all TP ranks see the same request stream in the same order, or NCCL hangs by design.</li>
+          <li><strong>Flush on weight update</strong> — every <code>update_weights_from_*</code> is followed by <code>flush_cache()</code>; new weights ≠ old KV.</li>
+          <li><strong>RoutedExpertsCapturer for MoE-RL</strong> — when MoE inference runs in low precision, the routed-expert record must be emitted, or R3 has nothing to replay.</li>
+          <li><strong>Logprob is engine logprob, not trainer logprob</strong> — the data plane returns the engine's logprob as π<sub>old</sub>. The trainer's recompute is the one that goes into the loss as π<sub>θ</sub>.</li>
+        </ol>
+
+        <h3>What's interesting about SGLang as a case study</h3>
+
+        <p>SGLang's design choice is to <em>be the inference engine that knows it's being driven by a trainer</em>. vLLM, by contrast, was designed first as a serving engine and then bolted RL hooks onto an existing scheduler. The two engines have converged in their RL surface (both expose <code>sleep</code>, <code>wake</code>, <code>update_weights</code>, <code>reset_prefix_cache</code>), but the internals diverge: SGLang's radix tree vs vLLM's block-hash map, SGLang's mixin Scheduler vs vLLM's EngineCore. The next case study walks through vLLM's choices.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — SGLang internals</div>
+          <ul>
+            <li><a href="https://github.com/sgl-project/sglang" target="_blank">sgl-project/sglang</a> — repo root</li>
+            <li><a href="https://github.com/sgl-project/sglang/tree/main/python/sglang/srt/managers" target="_blank"><code>srt/managers/</code></a> — Scheduler, SchedulePolicy, MemoryPool</li>
+            <li><a href="https://github.com/sgl-project/sglang/tree/main/python/sglang/srt/mem_cache" target="_blank"><code>srt/mem_cache/</code></a> — RadixCache and the lock-ref primitives</li>
+            <li><a href="https://github.com/sgl-project/sglang/tree/main/python/sglang/srt/model_executor" target="_blank"><code>srt/model_executor/</code></a> — ModelRunner and the RoutedExpertsCapturer hook</li>
+            <li><a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial" target="_blank">Awesome-ML-SYS-Tutorial</a> — the canonical RL-side reference for SGLang internals</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="vllm-internals">
+        <h2>Engineering case study — vLLM, the block-paging contrast</h2>
+
+        <p><a href="https://github.com/vllm-project/vllm">vLLM</a> is SGLang's primary competitor and the engine of choice in roughly half of all RL-framework configurations (OpenRLHF defaults to vLLM; verl supports both; SkyRL supports vLLM via an abstraction). Reading vLLM after SGLang is the cleanest way to see <em>which design choices are essential to "be an inference engine"</em> and which are stylistic. They converge on the same RL hooks but reach them by different internal paths. The most consequential divergence is the KV cache representation: SGLang uses a radix tree; vLLM uses block-paging with a block-hash map. The two structures are isomorphic in expressivity but very different to maintain.</p>
+
+        <h3>PagedAttention and block-paging</h3>
+
+        <p>vLLM's foundational paper is <a href="https://arxiv.org/abs/2309.06180">PagedAttention</a> (the eponymous SOSP 2023 paper). The idea is virtual memory for KV cache: instead of allocating one contiguous tensor per sequence, allocate fixed-size <em>blocks</em> (typically 16 tokens each) from a global pool. A sequence is a list of block pointers; the attention kernel knows how to traverse the block list per request. The win is that KV memory fragmentation drops from ~60% in a contiguous-allocation engine to near zero — block boundaries align to allocation boundaries.</p>
+
+        <p>The data structure that owns this in vLLM v1 is <strong><code>BlockPool</code></strong>: a fixed-size array of blocks with reference counts. Allocation is <code>O(1)</code> from a free list; deallocation is <code>O(1)</code> by ref-count decrement. The block-hash design is what makes prefix caching work: <strong><code>BlockHashToBlockMap</code></strong> hashes the (parent_hash, token_ids[0:block_size]) tuple to find existing blocks. A new sequence whose first 64 tokens match an existing prefix hits four blocks of the prefix's hashes and shares them.</p>
+
+        <p>The contrast with SGLang's radix tree is the central diagram of inference-engine literature: <em>both structures answer the question "which blocks already hold this prefix?" but with different update semantics.</em> Radix tree is the right answer when prefixes are long and overlapping; block-hash is the right answer when prefixes are bursty and block-aligned. In RL, group sampling with G samples per prompt is exactly the bursty case — every sample shares the same prompt prefix, all of length divisible by 16 after tokenization. Both structures handle it well; the differences appear in edge cases like cache rotation under partial-rollout resumption.</p>
+
+        <h3>EngineCore and the inner loop</h3>
+
+        <p>vLLM's <strong><code>EngineCore</code></strong> is the equivalent of SGLang's Scheduler. The inner loop, simplified:</p>
+
+<pre><code>while True:
+    requests = scheduler.schedule()          # pick which requests get tokens this step
+    if not requests:
+        wait_or_yield()
+        continue
+    token_progress = model_executor.run(requests)
+    scheduler.update(token_progress)         # advance state, free finished blocks
+    output_processor.emit(token_progress)    # stream tokens out</code></pre>
+
+        <p>The Scheduler is <strong>token-progress-based</strong> rather than request-based. Each tick, the scheduler asks "how many tokens of forward progress are budgeted?" and packs as many requests as fit in that budget. This is unlike SGLang's request-list scheduling and is what lets vLLM keep continuous batching very full even when request lengths are uneven.</p>
+
+        <p>The <code>KVCacheManager.allocate_slots()</code> method is where the block-paging lives. It has a five-zone layout for a given request: <em>(1) cached prefix blocks</em> (already in BlockPool, ref-count++), <em>(2) prefix blocks to allocate</em> (new blocks for the rest of the prompt), <em>(3) decode blocks</em> (for generation, allocated lazily as decoding proceeds), <em>(4) speculation blocks</em> (when speculative decoding is enabled), <em>(5) encoder blocks</em> (for VLM image features). The five zones share one <code>BlockPool</code> with a unified ref-count protocol — when a request finishes, every block it touched gets a decrement, and any block whose count reaches zero returns to the free list.</p>
+
+        <h3>Sleep / wake — vLLM's hybrid-engine hooks</h3>
+
+        <p>vLLM acquired <code>sleep</code> / <code>wake</code> hooks later than SGLang did, but they now match in API. The implementation differs: vLLM uses a custom <strong><code>CuMemAllocator</code></strong> that wraps CUDA's virtual-memory APIs, letting the GPU allocator release physical memory while keeping virtual addresses reserved. On wake, the same virtual addresses get new physical pages backed — no relocation, no pointer fixups in the model. SGLang's release goes through PyTorch's caching allocator and re-binds on resume; the net behavior is the same but the bookkeeping is different. Both engines support sleep level 0/1/2 with the same semantics covered in the SGLang section.</p>
+
+        <h3>RLHF-specific hooks</h3>
+
+        <p>Three vLLM API methods exist primarily for RL workloads:</p>
+
+        <ul>
+          <li><strong><code>reset_prefix_cache()</code></strong> — invalidate the BlockHashToBlockMap. Called after every weight update for the same reason SGLang flushes its RadixCache: new weights, new logprobs, old KV is stale.</li>
+          <li><strong><code>reset_encoder_cache()</code></strong> — invalidate the VLM image-feature cache. For multimodal RL where the policy changes the vision encoder, the cached features become stale alongside the LM weights.</li>
+          <li><strong><code>pause_scheduler(mode)</code></strong> — soft-pause without freeing memory. Two modes: <code>'idle'</code> (let in-flight finish, refuse new) and <code>'flush'</code> (drop in-flight, immediate pause). The flush mode is what the trainer uses when a sync barrier needs to be hit on a deadline and finishing the in-flight tail would overshoot.</li>
+        </ul>
+
+        <p>vLLM also supports the four <code>update_weights_from_*</code> paths (disk, distributed, tensor, ipc) under the same names as SGLang — the convergence on this verb is no accident, both engines adopted it because the trainer doesn't want to know which engine it's driving.</p>
+
+        <h3>Where vLLM and SGLang diverge for RL</h3>
+
+        <p>For a theorist deciding which engine to drive, the operational differences cluster into four areas:</p>
+
+        <ol>
+          <li><strong>Prefix cache structure.</strong> vLLM's block-hash is faster to update under bursty group-sampling workloads (constant-time per block); SGLang's radix tree is more compact under deeply-shared prefix trees with many branching points.</li>
+          <li><strong>Scheduler granularity.</strong> vLLM schedules by token budget per tick, SGLang by request list. Token-budget scheduling produces flatter latency profiles under load; request-list scheduling is more predictable per-request.</li>
+          <li><strong>MoE routing capture.</strong> SGLang has the first-party <code>RoutedExpertsCapturer</code> for R3; vLLM exposes a hook but requires the framework above to wire it. Miles ships an internal vLLM fork that includes the equivalent; OpenRLHF currently does not.</li>
+          <li><strong>Multimodal.</strong> vLLM's encoder cache (<code>reset_encoder_cache</code>) is a more mature surface than SGLang's; SGLang's lead is in language-only workloads.</li>
+        </ol>
+
+        <h3>Seven engineering invariants vLLM enforces</h3>
+
+        <ol>
+          <li><strong>Block ref-count balance</strong> — every block allocated must eventually be freed; the free list must be consistent at all times. A leak shows up as gradual VRAM growth across requests.</li>
+          <li><strong>Hash collision handling</strong> — if two distinct prefixes hash to the same key, the BlockHashToBlockMap stores both and the lookup probes; collisions are rare but the structure is robust to them.</li>
+          <li><strong>Token-budget admission</strong> — every tick budgets a token count and never overshoots; the scheduler refuses requests that would exceed the budget rather than queuing them silently.</li>
+          <li><strong>Encoder-cache invalidation</strong> — for VLM RL, <code>reset_encoder_cache</code> must be called alongside <code>reset_prefix_cache</code> on every weight update.</li>
+          <li><strong>Pause modes are exclusive</strong> — only one of <code>idle</code> / <code>flush</code> is active at a time; the trainer commits before issuing.</li>
+          <li><strong>Virtual address stability across sleep/wake</strong> — <code>CuMemAllocator</code> guarantees the same virtual addresses after wake, so the model's parameter pointers don't move.</li>
+          <li><strong>Engine logprob, not trainer logprob</strong> — same invariant as SGLang: the engine returns its logprob as π<sub>old</sub>, never to be used as π<sub>θ</sub>.</li>
+        </ol>
+
+        <h3>What's interesting about vLLM as a case study</h3>
+
+        <p>vLLM's bet is that virtual-memory primitives — paging, ref-counts, hash maps — are the right granularity for the engine's bookkeeping. SGLang's bet is that radix trees and locks are. Both bets work in production; the choice has more to do with which research group you're collaborating with than with any objective superiority. For a theorist, the value of reading <em>both</em> case studies side by side is that it inoculates against the temptation to treat the inference engine as a single opaque thing — there are at least two coherent designs for the same problem, with different operational tradeoffs.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — vLLM internals</div>
+          <ul>
+            <li><a href="https://github.com/vllm-project/vllm" target="_blank">vllm-project/vllm</a> — repo root</li>
+            <li><a href="https://arxiv.org/abs/2309.06180" target="_blank">PagedAttention paper (SOSP 2023)</a> — the foundational design</li>
+            <li><a href="https://github.com/vllm-project/vllm/tree/main/vllm/v1" target="_blank"><code>vllm/v1/</code></a> — the v1 architecture (EngineCore, BlockPool, KVCacheManager)</li>
+            <li><a href="https://docs.vllm.ai/en/latest/serving/distributed_serving.html" target="_blank">vLLM distributed serving docs</a> — TP/PP configuration, the engine's parallel layout</li>
+            <li><a href="https://docs.vllm.ai/en/latest/usage/rlhf.html" target="_blank">vLLM RLHF docs</a> — the <code>sleep</code>, <code>wake</code>, <code>update_weights</code>, <code>reset_prefix_cache</code> APIs</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="recent">
+        <h2>Recent advances from the SGLang RL team</h2>
+
+        <p>The slime + Miles + SGLang community has shipped a cluster of advances in late 2025 / early 2026 that are worth knowing collectively because they extend the survey's six primitives along five different axes. I list them with one-paragraph reads.</p>
+
+        <h4>INT4 QAT full-flow training</h4>
+        <p>Inspired by Kimi K2-Thinking's <strong>W4A16 QAT</strong> recipe, slime now runs an end-to-end INT4 quantization-aware training pipeline. The training side keeps BF16 master weights but inserts <em>fake quantization</em> (quant-dequant) into the forward pass — the model "sees" INT4 noise and learns weights robust to it. The backward pass uses Straight-Through Estimator (STE): the round function's derivative is set to 1, letting gradient flow through the unquantized weights. At inference time, SGLang loads true W4A16 weights with the Marlin kernel. Net effect: a 1TB-class model (Kimi K2 scale) fits the rollout in a single H200 (141GB), eliminating cross-machine communication overhead. <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/slime/int4/readme.md" target="_blank">Technical writeup</a>.</p>
+
+        <h4>Unified VLM/LLM multi-turn</h4>
+        <p>The first-principles design described in the previous section. One rollout function, two domains, full decoupling between sampling logic and environment. <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/slime/vlm-multi-turn/readme.md" target="_blank">Blog</a>.</p>
+
+        <h4>Rollout Router Replay (R3) for MoE stability</h4>
+        <p>Already covered as Miles' signature contribution to the quantization section. Captures expert-routing decisions during SGLang inference, replays them during Megatron training. Makes MoE RL stable under low-precision routing.</p>
+
+        <h4>Full-flow FP8 training and sampling</h4>
+        <p>The follow-on to R3. <a href="https://lmsys.org/blog/2025-11-25-fp8-rl/">"Unified FP8: Moving Beyond Mixed Precision for Stable and Accelerated MoE RL"</a> walks through hardware foundations, scale selection, and MoE experiment results. The headline: FP8 inference + FP8 training + R3-style routing replay gives bit-identical numerics and ~2× rollout throughput on H100/H200.</p>
+
+        <h4>Speculative decoding in RL</h4>
+        <p>Standard practice for serving, novel in RL training. A small draft model proposes tokens; the policy verifies them in parallel. Net effect: 25%+ rollout speedup with no accuracy compromise. <a href="https://thudm.github.io/slime/advanced/speculative-decoding.html">slime docs</a>.</p>
+
+        <blockquote class="pull">
+          The cluster of advances above traces one through-line: <em>the bottleneck of RL training is the rollout, not the gradient update.</em> Every primitive optimizes rollout throughput or stability. The R3 / FP8 work makes the rollout faster <em>and</em> correct on MoE. The QAT work shrinks the rollout's memory. The multi-turn work expands what counts as a rollout. The speculative work decodes faster.
+        </blockquote>
+
+        <p>For a theorist this matters because the empirical claims in the field's papers (DeepSeek-R1, GLM-5.1, K2-Thinking, Doubao-1.5-pro) are produced under these specific infrastructure choices. If your work depends on understanding why those models behave as they do, the choices above are the assumption set you're implicitly invoking.</p>
+      </section>
       <section id="patterns">
         <h2>Engineering design patterns — the algebraic view</h2>
 
@@ -2261,29 +2554,56 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
   </main>
 
   <aside class="toc-rail">
-    <h4>On this page</h4>
+    <h4>① Foundations</h4>
     <ul>
       <li><a href="#why">Why this matters</a></li>
-      <li><a href="#how-to-read">How to read this</a></li>
+      <li><a href="#how-to-read">How to read this survey</a></li>
       <li><a href="#skeleton">The skeleton</a></li>
       <li><a href="#tension">The central tension</a></li>
-      <li><a href="#primitives">Six primitives</a></li>
-      <li><a href="#kernels">CUDA, Triton, TileLang</a></li>
+    </ul>
+
+    <h4>② Six primitives</h4>
+    <ul>
+      <li><a href="#hybrid-engine">① Hybrid engine (训推一体)</a></li>
+      <li><a href="#memory">② Memory choreography</a></li>
+      <li><a href="#weight-sync">③ Zero-copy weight sync</a></li>
+      <li><a href="#four-paths">④ Four update paths</a></li>
+      <li><a href="#radix-grpo">⑤ RadixAttention × GRPO</a></li>
+      <li><a href="#async">⑥ Async &amp; staleness</a></li>
+    </ul>
+
+    <h4>③ Layer beneath</h4>
+    <ul>
+      <li><a href="#kernels">CUDA · Triton · TileLang</a></li>
       <li><a href="#megatron">Megatron-LM</a></li>
       <li><a href="#quantization">Quantization</a></li>
+    </ul>
+
+    <h4>④ Case studies</h4>
+    <ul>
       <li><a href="#multi-turn">Multi-turn agentic RL</a></li>
       <li><a href="#slime-pipeline">slime · upstream framework</a></li>
       <li><a href="#miles-pipeline">Miles · DeepSeek-V3</a></li>
       <li><a href="#verl-pipeline">verl · HybridFlow</a></li>
       <li><a href="#deepseek-v4">DeepSeek V4 · OPD</a></li>
+      <li><a href="#sglang-internals">SGLang internals</a></li>
+      <li><a href="#vllm-internals">vLLM · block-paging</a></li>
       <li><a href="#recent">Recent advances</a></li>
+    </ul>
+
+    <h4>⑤ Putting it together</h4>
+    <ul>
       <li><a href="#patterns">Design patterns</a></li>
       <li><a href="#code">Reading real code</a></li>
       <li><a href="#landscape">Framework landscape</a></li>
       <li><a href="#beyond">Beyond chat</a></li>
       <li><a href="#scaling">Scaling chain</a></li>
-      <li><a href="#pitfalls">Pitfalls</a></li>
+      <li><a href="#pitfalls">Pitfalls (踩坑录)</a></li>
       <li><a href="#checklist">Researcher's checklist</a></li>
+    </ul>
+
+    <h4>⑥ Going further</h4>
+    <ul>
       <li><a href="#reading-plan">19-repo reading plan</a></li>
       <li><a href="#open">Open questions</a></li>
       <li><a href="#reading">Reading list</a></li>
@@ -2292,7 +2612,8 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
 </div>
 
 <script>
-const navLinks = document.querySelectorAll('.nav-link');
+// Active-link tracking spans both sidebars: left nav (.nav-link) and right toc-rail (.toc-rail a)
+const navLinks = document.querySelectorAll('.nav-link, .toc-rail a');
 const sections = document.querySelectorAll('article section, article > header');
 
 const observer = new IntersectionObserver(entries => {
