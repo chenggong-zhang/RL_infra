@@ -26,3 +26,4 @@ vendor/
 # Misc
 Thumbs.db
 node_modules/
+_external_repos/

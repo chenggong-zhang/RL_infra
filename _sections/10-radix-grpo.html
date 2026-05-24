@@ -1,0 +1,30 @@
+
+
+      <section id="radix-grpo">
+        <h3>⑤ RadixAttention × GRPO — algebraic composition</h3>
+
+        <p>This is the example I would lead with if I were trying to convince a mathematician that engineering can be beautiful. <a href="https://arxiv.org/abs/2402.03300">GRPO</a> generates N completions per prompt and normalizes rewards within the group as a baseline; the algorithmic motivation is variance reduction. The system-level consequence is that all N completions share the prompt prefix.</p>
+
+        <p>RadixAttention exploits this. The shared prefix is a single node in a radix tree; each completion branches off as a child. Reference counting (<code>inc_lock_ref</code> / <code>dec_lock_ref</code>) means a node with <code>lock_ref &gt; 0</code> cannot be evicted. Use-after-free is structurally unrepresentable.</p>
+
+        <figure>
+          <img src="diagrams/05-radix-tree-grpo.svg" alt="Without prefix cache: 4 separate prefills of the prompt P. With RadixAttention: one shared prefix node with lock_ref=4, four tail completions branching from it.">
+          <figcaption><span class="fig-label">Figure 5.</span> Without prefix cache: 4× prefill cost, 4× KV memory. With RadixAttention: 1× prefill, 1× shared KV, near-free decode tails.</figcaption>
+        </figure>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/mem_cache/radix_cache.py" target="_blank"><span class="file-path">python/sglang/srt/mem_cache/radix_cache.py</span><span class="file-meta">· the six methods of the prefix tree</span></a>
+<pre class="with-source"><code>class RadixCache(BasePrefixCache, KVCacheEventMixin):
+    def match_prefix(self, params: MatchPrefixParams) -> MatchResult: ...
+    def insert(self, params: InsertParams) -> InsertResult: ...
+    def inc_lock_ref(self, node: TreeNode) -> IncLockRefResult: ...
+    def dec_lock_ref(self, ...) -> DecLockRefResult: ...
+    def evict(self, params: EvictParams) -> EvictResult: ...
+    @property
+    def evictable_size(self): ...</code></pre>
+
+        <blockquote class="pull">
+          Neither was designed for the other. GRPO chose group sampling for variance reduction. RadixAttention chose a tree for cache reuse. Their composition multiplies savings — and reference counting means cache lifetime is automatic.
+        </blockquote>
+
+        <p>This kind of accidental-but-elegant composition recurs throughout the field. A mathematician will recognize the structure: the algorithm exposes a sharing pattern (here, a common prefix); the data structure exposes a sharing mechanism (here, a radix tree); their composition is the categorical product. The right notation makes the saving obvious — the wrong notation makes the saving impossible to express.</p>
+      </section>

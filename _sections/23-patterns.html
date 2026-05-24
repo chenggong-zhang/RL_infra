@@ -1,0 +1,52 @@
+
+      <section id="patterns">
+        <h2>Engineering design patterns — the algebraic view</h2>
+
+        <p>Six patterns recur across every framework in the survey. Once you see them named, the rest of the page reads as variations on a small set of themes. I lay them out here as a synthesis of what the previous sections have already shown. The sixth pattern is the one V4 just demonstrated above — I add it explicitly at the end.</p>
+
+        <h3>1. Functor — one verb, many topologies</h3>
+
+        <p>The four <code>update_weights_from_*</code> methods are the canonical example. There is one operation ("write the new policy into the inference engine") lifted across four different categories of physical configuration (same process / shared disk / NCCL group / CUDA IPC). The interface is fixed; the implementation per category is what differs. The same pattern appears in SkyRL's three-backend abstraction (vLLM / SGLang / OpenAI API) and in verl's training-backend choice (FSDP / FSDP2 / Megatron).</p>
+
+        <p>The mathematical statement: an operation lifted to a category of topologies, with a consistency obligation downstream (the <code>flush_cache_after_weight_update</code> contract). For a theorist, this is the cleanest example of "the abstraction does mathematical work" in the survey — the verb is the same, the meaning is preserved, but the cost varies by category.</p>
+
+        <h3>2. Categorical product — multiplicative composition</h3>
+
+        <p>RadixAttention × GRPO is the example I lead with elsewhere because it's the most beautiful. An algorithmic choice (group sampling, for variance reduction) exposes a sharing pattern (a common prefix). A data structure (the prefix tree) exposes a sharing mechanism (reference-counted nodes). Their composition multiplies savings — 4× prefill cost becomes 1× plus tails — and reference counting makes cache lifetime automatic.</p>
+
+        <p>The pattern recurs elsewhere. The hybrid engine × Megatron 5D parallelism: colocation chooses one GPU per role at a time, while Megatron handles the parallelism within a role; their composition is what makes 462B-parameter training feasible. R3 routing replay × FP8 inference: routing replay ensures expert selection is identical, FP8 makes it economical; together they make MoE RL stable. Whenever you see "the system advantage is doing the heavy lifting," you're looking at a categorical product.</p>
+
+        <h3>3. Mutual exclusion as serialization</h3>
+
+        <p>The hybrid engine (训推一体) is the central instance. The GPU is in exactly one of two states at any moment (training-mode or inference-mode); transitions are explicit; concurrency contracts are checked structurally with <code>assert is_fully_idle()</code>. This is the engineering version of a state machine with two states and well-defined transitions — but its real significance is that <em>shared state with mutable ownership has no race conditions when ownership is exclusive</em>. Concurrent programming's worst class of bugs is structurally unavailable.</p>
+
+        <p>The same pattern shows up in subtler places. RadixAttention's <code>inc_lock_ref</code> / <code>dec_lock_ref</code> establishes mutual exclusion between active readers and the eviction policy — a node with <code>lock_ref &gt; 0</code> simply cannot be evicted. Use-after-free is unrepresentable. The structural argument is the same; the state machine is just per-node instead of global.</p>
+
+        <h3>4. Identity invariant under reparameterization</h3>
+
+        <p>This is the deepest pattern, and Miles' R3 is the canonical case. The mathematical statement: <em>routing(x, θ, fp8) ≡ routing(x, θ, bf16)</em>, enforced by replay rather than by hoping numerics agree. Two computations that should give the same answer but might not, made to give the same answer by recording one and replaying the other.</p>
+
+        <p>The QAT pipeline does the same thing differently — fake quantization in the forward pass establishes <em>loss(θ, bf16) ≈ loss(θ, int4)</em> by inserting the int4 noise into the training distribution. STE (Straight-Through Estimator) makes the backward pass behave as if int4 weren't there. Both are identity invariants under a reparameterization (precision regime, in this case) maintained by explicit engineering rather than mathematical equality.</p>
+
+        <p>For a theorist this is the most interesting pattern because it appears whenever an engineering shortcut (lower precision, async update, partial rollout) creates a mathematical inconsistency that has to be closed by another mechanism. The shortcut + the fix together are the contribution; neither alone is.</p>
+
+        <h3>5. Buffer-then-fold — bounding asymptotic complexity</h3>
+
+        <p>The multimodal tensor merge in multi-turn rollout (Section above) is the clean example. Naïve concatenation per turn: O(n²). Buffer-then-fold: O(n). The same input-output behavior; two different complexity profiles distinguished only by where the allocation boundary sits.</p>
+
+        <p>The pattern recurs in AReaL's <code>_PendingWeightUpdateBucket</code> (queue NCCL broadcasts in memory-bounded buckets, fire them at the end), in verl's <code>DataProto.union</code> (merge fields lazily, materialize the full batch once at dispatch time), and in slime's bucket-based weight sync (avoid OOM by streaming updates in slices). The unifying claim: do not perform an O(n) operation inside an O(n) loop unless you must.</p>
+
+        <h3>6. Persistent log + replay — correctness under preemption</h3>
+
+        <p>The pattern V4 demonstrates with the token-granular Write-Ahead Log. The setup: a long-running stateful computation (a rollout, an agent session, a database transaction) can be interrupted at any moment. The naive recovery — restart from the most recent persistent checkpoint — has subtle correctness pitfalls. Restarting an in-flight LLM generation, as we saw, introduces length bias: shorter responses are over-represented in the survivor population, distorting the empirical distribution of trajectories the policy gradient sees.</p>
+
+        <p>The pattern's claim: <em>maintain an append-only log of every operation; on resumption, replay the log to reconstruct the pre-interruption state</em>. The result is that the post-interruption execution is indistinguishable from a no-interruption execution at the observable boundary (the sampled trajectory distribution in V4's case; the database state in a transactional setting). Token-granular WAL is the LLM-rollout instance; command-granular trajectory logs are DSec's agentic-sandbox instance; the same correctness argument applies in both.</p>
+
+        <p>Mathematically, the pattern is a fixed-point claim: the function from input prompt to output trajectory is the same with or without preemption, when preemption is bracketed by WAL persistence + replay. This is a stronger guarantee than "results are <em>approximately</em> the same" — it's that they're <em>distributionally identical</em>. For a probabilist, the recognition is that recovery policies are part of the data-generating process, and the wrong recovery policy is a hidden experimental variable.</p>
+
+        <h3>The synthesis</h3>
+
+        <p>Once you have these six patterns, reading a new RL framework becomes pattern-matching. The first time you see RLinf's M2Flow scheduler, you ask: "what's the functor here, and what's the consistency obligation downstream?" The first time you see cosmos-rl's async reward microservice, you ask: "what's the mutual exclusion contract, and what's the buffer-then-fold strategy?" The first time you see a fault-tolerant rollout pipeline, you ask: "what's logged, what's replayed, and what's the distributional-equivalence claim?" The first time you read a new framework's <code>train.py</code>, the six patterns are the lens.</p>
+
+        <p>This is why the survey insists on names. Naming the patterns turns "what's going on in this code" into "which of the six patterns is this." The latter is a search; the former is reading.</p>
+      </section>

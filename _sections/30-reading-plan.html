@@ -1,0 +1,53 @@
+
+
+      <section id="reading-plan">
+        <h2>A 19-repo reading plan — how to do this yourself</h2>
+
+        <p>This survey distilled 19 source repos into a few thousand words. If you want to do the same exercise yourself — read the actual code, not just my summary — here is the order I would recommend, and the template I would use for each repo. The two together turn what looks like an overwhelming corpus into a manageable sequence of small case studies.</p>
+
+        <h3>Read in five groups, not in their listed order</h3>
+
+        <p>The natural impulse is to start with the most familiar repo on the list. That is the wrong move. The list groups by topic — image diffusion, RL framework, inference engine, kernel DSL — and reading them in topic order means you spend a week on image generation before you have any of the RL skeleton in your head. The better order is the one this survey is built on:</p>
+
+        <ol>
+          <li><strong>The RL skeleton itself.</strong> Start with <strong>slime</strong>, <strong>Miles</strong>, <strong>verl</strong>, <strong>SGLang</strong>, and <strong>Megatron-LM</strong> together. These five repos cover the full <em>generate → score → filter → train → sync</em> path. Three of them have full case studies above as a head start: <a href="#slime-pipeline">slime</a> is the clean upstream framework, <a href="#miles-pipeline">Miles</a> is its production-hardened fork, <a href="#verl-pipeline">verl</a> is the alternative framework abstraction (HybridFlow). SGLang gives you the rollout-and-weight-sync substrate; Megatron-LM gives you the training backbone and, surprisingly, its own native RL path in <code>megatron/rl/</code>. Read the case studies first, then dive into the source of one of these five. By the end of group 1 you can read any RL framework's <code>train.py</code> in fifteen minutes.</li>
+          <li><strong>Comparison across RL framework designs.</strong> Then read <strong>AReaL</strong>, <strong>OpenRLHF</strong>, <strong>SkyRL</strong>, and <strong>RLinf</strong>. Now you're not learning the skeleton — you're learning the variations. AReaL shows fully-async; OpenRLHF shows the classical synchronous Ray + DeepSpeed + vLLM design; SkyRL specializes in long-horizon agents; RLinf adds the M2Flow scheduler for embodied and agentic workloads. The point of group 2 is to see where the same skeleton can bend.</li>
+          <li><strong>Inference and compiler substrate.</strong> Next read <strong>vLLM</strong>, <strong>TensorRT-LLM</strong>, <strong>TensorRT</strong>, <strong>Triton</strong>, <strong>TileLang</strong>. These are not RL frameworks. They are the layer beneath. The goal is to understand <em>why</em> prefix caches, paged attention, CUDA graphs, kernel DSLs, quantization, and MoE communication kernels determine rollout economics. After group 3, you will read RL papers differently — you'll see that "we used SGLang" or "we used vLLM" is a substantive experimental claim, not a deployment detail.</li>
+          <li><strong>Rollout targets beyond chat.</strong> Then <strong>FLUX</strong>, <strong>FLUX.2</strong>, <strong>Wan2.2</strong>. These are not RL frameworks either — they are the <em>targets</em> RL frameworks might want to fine-tune. FLUX.2's reference-token KV-cache trick and Wan2.2's video-diffusion MoE both are useful systems case studies in their own right. The point is to understand what changes when the target is not an autoregressive LLM.</li>
+          <li><strong>Failure modes and meta-reading.</strong> Finish with the <strong>Cambrian TPU blog</strong> and <strong>Chenyang Zhao's Awesome-ML-SYS-Tutorial</strong>. Cambrian tells you why almost none of the GPU-RL stack ports to TPUs. The tutorial tells you which papers' results to distrust until you have verified the infrastructure. These two are the reality check at the end of a long reading binge.</li>
+        </ol>
+
+        <p>Five groups, nineteen repos. If you spend a real week on group 1 and then a few days on each of groups 2 through 5, you finish with a working mental model of the field's plumbing. Without group 1, the others read like trivia. With group 1, they read like commentary on a structure you already understand.</p>
+
+        <h3>A ten-question template for each repo</h3>
+
+        <p>I have used the same template for every case study in this survey. It is short enough to apply in an evening, structured enough to make the reading comparable across repos. The questions are deliberately ordered from outside to inside, so you build context before you dive into specifics.</p>
+
+        <table>
+          <thead><tr><th>#</th><th>Question</th><th>Where to look</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td><strong>What is this repo, really?</strong> Is it a target model, a framework, a backbone, an inference engine, or a kernel substrate?</td><td>README + top-level package layout</td></tr>
+            <tr><td>2</td><td><strong>Directory map</strong> — what lives where? README, docs, examples, scripts, tests, src.</td><td>One-shot <code>ls -R</code> with note-taking</td></tr>
+            <tr><td>3</td><td><strong>Entry scripts</strong> — what's the training entry, the inference entry, the benchmark entry, the deployment entry?</td><td><code>scripts/</code> and the README's "Quick Start"</td></tr>
+            <tr><td>4</td><td><strong>Core objects</strong> — name the trainer, rollout manager, scheduler, engine, worker, cache, model runner.</td><td>The <code>__init__.py</code> exports of the top-level package</td></tr>
+            <tr><td>5</td><td><strong>One sample's path</strong> — trace a single prompt/request from input through rollout, reward, loss, update, sync.</td><td>The main loop file; trace the variable names</td></tr>
+            <tr><td>6</td><td><strong>Engineering invariants</strong> — memory ownership, weight freshness, cache invalidation, logprob recompute, precision consistency.</td><td>The asserts and concurrency contracts</td></tr>
+            <tr><td>7</td><td><strong>Parallelism and resources</strong> — TP/PP/DP/EP/CP, FSDP, DeepSpeed, Ray placement, NCCL/RDMA, offload.</td><td>The config files; the placement-group code</td></tr>
+            <tr><td>8</td><td><strong>Known failure modes</strong> — OOM, staleness, routing divergence, NCCL hangs, cache staleness, dynamic shapes, precision drift.</td><td>Issues, CHANGELOG, comments tagged "TODO" or "WARN"</td></tr>
+            <tr><td>9</td><td><strong>Mapping to this survey's primitives</strong> — which of the six engineering primitives does it implement, and which does it skip?</td><td>Cross-reference with the design patterns section above</td></tr>
+            <tr><td>10</td><td><strong>The ten files most worth reading</strong> — in walking order, outside to inside.</td><td>Your own notes from steps 3-6</td></tr>
+          </tbody>
+        </table>
+
+        <p>This template is what the Miles case study in this survey looks like under the hood. The deep dive into Miles is just questions 1-10 answered for one repo. Once you have the answers for one repo, the answers for the next repo are easier to find — you know what to look for.</p>
+
+        <blockquote class="pull">
+          The point of a template is not that it teaches you the answer. The point is that it makes the unknown answers visible. Two pages of "I don't know yet, but I know where to look" beats ten pages of disorganized notes from skimming.
+        </blockquote>
+
+        <h3>Why this matters more than any single answer</h3>
+
+        <p>The honest reason to learn this corpus is not that you will read all nineteen repos. The reason is that <em>you will have to read one of them</em>, sooner than you expect, because something in your own work depends on it. When that happens, knowing the five-group structure and the ten-question template is what turns "I have to read a giant unfamiliar codebase" into "I have a routine." A theorist who has practiced this routine is hard to surprise.</p>
+
+        <p>The corpus is a vocabulary, not a curriculum. The five groups are the rough order in which the vocabulary becomes useful. The ten questions are how you make any single new repo legible. Together they are the most portable thing in this survey — they outlast any specific framework or paper, because the structure of the field changes more slowly than its surface.</p>
+      </section>

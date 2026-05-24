@@ -1,0 +1,25 @@
+
+
+      <section id="beyond">
+        <h2>Beyond chat LLMs</h2>
+
+        <p>All nine frameworks above were designed for chat LLMs. The 2026 frontier is wider — multi-turn agents that call tools, vision-language-action policies for robots, diffusion world models that generate video. These targets push different requirements onto the framework, and frameworks that can't accommodate them get left behind.</p>
+
+        <h3>Multi-turn agents</h3>
+
+        <p>Single-turn RL: one prompt → one completion → one reward. Easy. Multi-turn RL: the model emits a tool call, gets a tool response, emits another action, gets another response — across 10+ turns. Reward arrives at the end (task success) or per-turn (intermediate signals). The rollout is a <em>trajectory</em>, not a completion. New systems requirements: KV cache reuse across turns (SGLang's <code>open_session()</code>), variable-length trajectories (mandates partial rollout), and a clean environment abstraction so the agent can call real tools. SkyRL with <code>skyrl-gym</code> + <code>skyrl-agent</code> (which trained the <a href="https://arxiv.org/abs/2511.16108">SA-SWE-32B SWE-bench model</a>) and SLIME with its concrete examples (<code>tau-bench</code>, <code>retool</code>, <code>search-r1</code>) are the leaders.</p>
+
+        <h3>Embodied AI and VLA</h3>
+
+        <p>Vision-Language-Action models (π₀ / π₀.₅ from Physical Intelligence, OpenVLA, NVIDIA GR00T-N1.5) take an image plus a language instruction and output continuous action sequences for robots. The action space is no longer discrete tokens but continuous joint angles. RL algorithms shift to SAC, DAPO, SAC-Flow (a flow-matching policy variant). The simulator-in-the-loop becomes a non-negotiable part of the framework — RLinf abstracts ManiSkill, IsaacLab, Habitat, LIBERO, RoboTwin, CALVIN, MetaWorld behind a single <code>envs/</code> wrapper.</p>
+
+        <h3>World foundation models and diffusion</h3>
+
+        <p>Cosmos-Predict, SANA, Stable Diffusion 3, Wan2.2 (Alibaba's 27B-total/14B-active MoE video model), FLUX/FLUX.2 (Black Forest Labs) — these are diffusion-based generators. Each "rollout" is 50+ denoising steps, not one autoregressive pass; cost-per-sample dominates everything. Long-context handling becomes critical (video tokens reach 100K+), which is why cosmos-rl needs 6D parallelism. The algorithm shifts too: PPO/GRPO doesn't directly apply to diffusion models. Cosmos-rl's <strong>DDRL</strong> (Data-Regularized DRL) replaces the KL term with reward maximization plus standard diffusion training loss. RLinf as of Feb 2026 supports RL fine-tuning of VLA on Wan world models — closing the loop where Wan simulates rollouts for embodied agents.</p>
+
+        <h3>The TPU detour</h3>
+
+        <p>If you're forced onto Google TPUs, almost none of this works. The <a href="https://cambrian-mllm.github.io/blog/tpu-training-experiments.html">Cambrian-MLLM TPU training blog</a> documents two years of training multimodal models on TPUs and reaches three uncomfortable conclusions. First, "dynamic shapes are the enemy" — every shape change triggers XLA recompilation. Variable-length generation as we know it on GPU is essentially banned. Second, "arbitrary SPMD sharding proved impractical" — Ray-based hybrid placement doesn't translate. Third, silent library incompatibilities hide everywhere: <code>F.scaled_dot_product_attention</code> and <code>torch.utils.checkpoint</code> fail without errors on TorchXLA.</p>
+
+        <p>The conclusion: a TPU-native RL framework would look fundamentally different. Static graph compilation, fixed shape contracts, no Ray, no SGLang. No one has built this yet. vLLM has plugin support for TPUs in inference, but the full RL-on-TPU story is open. <strong>This is a real research gap.</strong></p>
+      </section>

@@ -1,0 +1,23 @@
+
+
+      <section id="tension">
+        <h2>The central tension: two halves that fight</h2>
+
+        <p>Pretraining an LLM is a static dataset plus a training loop. Inference is a model plus a request stream. Both are well-understood; the right tools are Megatron-LM and vLLM (or SGLang) respectively. RL post-training is both at once, and the two halves want opposite things from the same hardware.</p>
+
+        <table>
+          <thead>
+            <tr><th>Concern</th><th>Training prefers</th><th>Rollout prefers</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Parallelism</td><td>High TP / PP — split the model</td><td>High DP — split the batch</td></tr>
+            <tr><td>Memory</td><td>Optimizer states + gradients + activations</td><td>Weights + KV cache + CUDA graphs</td></tr>
+            <tr><td>Throughput unit</td><td>Tokens/step (compute-bound)</td><td>Trajectories/sec (memory-bound)</td></tr>
+            <tr><td>Goal</td><td>Update one global policy</td><td>Generate N independent samples</td></tr>
+          </tbody>
+        </table>
+
+        <p>If you give half your fleet to training and half to inference and let them run in parallel, the on-policy constraint forces them to alternate anyway — half the fleet is always idle. If you force identical parallelism on both, one side bottlenecks. If you give them different parallelism, every phase transition requires resharding the model. Every engineering primitive that follows is a way out of this trap.</p>
+
+        <p>This is, mathematically, a resource-conflict problem with a Pareto frontier. The pragmatic solution — colocate both halves on the same GPUs and serialize them in time — turns the conflict into a sequencing problem. That sequencing problem is what the next six sections solve.</p>
+      </section>

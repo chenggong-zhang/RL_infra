@@ -1,0 +1,19 @@
+
+
+      <section id="async">
+        <h3>⑥ Async training and the staleness tradeoff</h3>
+
+        <p>Strict on-policy RL says: wait for every trajectory to finish under policy θ<sub>t</sub> before running the gradient step. In practice this is fatal at scale. If 10% of prompts produce long-context trajectories (2K tokens of decode) and 90% are short (512 tokens), the short ones finish in ~2s but the long ones take ~20s. 90% of GPUs idle for 18s every iteration. Over 1000 iterations: ~5 GPU-hours per GPU wasted.</p>
+
+        <p>The pragmatic solution is <strong>partial rollout</strong>: train on the 128 trajectories that finished, let the rest continue under (now stale) θ<sub>t</sub>. Throughput rises 2–4×; the off-policy ratio rises with it. There are two paths to bounding the resulting bias.</p>
+
+        <p><strong>Mathematical correction.</strong> Miles applies Truncated Importance Sampling (TIS) and Masked Importance Sampling (MIS): the gradient update of a sample generated under θ<sub>t-k</sub> is reweighted by the importance ratio π<sub>θ<sub>t</sub></sub>(a|s) / π<sub>θ<sub>t-k</sub></sub>(a|s), with truncation or masking to control variance. The estimator becomes unbiased again at the cost of variance the truncation introduces — a classical Radon-Nikodym story.</p>
+
+        <p><strong>Operational correction.</strong> Kimi K1.5 bounds staleness instead: context-length checkpointing, dynamic batch reordering, prefix-maximizing scheduling. The off-policy ratio never grows large enough to require explicit correction, but the bound is enforced operationally rather than mathematically.</p>
+
+        <p>The architectural extreme is AReaL's fully-async design: NCCL broadcasts are launched with <code>async_op=True</code>, bucketed by memory budget. The trainer never blocks on weight sync. The off-policy bias is whatever falls out of how long inference takes to catch up — call it "implicit staleness." AReaL bets that with the right bucketing, the implicit staleness stays small enough to skip explicit corrections. They claim 2.77× speedup over synchronous baselines.</p>
+
+        <aside class="note">
+          <strong>For RL theorists.</strong> The mathematically clean version of all this is to write the loss as an off-policy estimator from the start and let the implementation's staleness manifest as a known parameter. The mathematically dirty version — which is what every framework ships — is to write the loss as if on-policy and treat staleness as an empirical hyperparameter you tune to taste. Miles' TIS/MIS sits between the two; you might find it the most honest design.
+        </aside>
+      </section>

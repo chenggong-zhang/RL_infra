@@ -1,0 +1,51 @@
+
+
+      <section id="quantization">
+        <h2>Quantization and the numerical-alignment problem</h2>
+
+        <p>If you're reading the Miles paper or the DeepSeek-V3 technical report and wondering why so much engineering effort goes into <em>making FP8 training work correctly</em>, this section is for you. Quantization is where the abstract algorithm meets the concrete number system, and getting it wrong silently corrupts the policy.</p>
+
+        <h3>The numerical formats</h3>
+
+        <p>Three families are worth knowing:</p>
+
+        <ul>
+          <li><strong>FP8</strong> (E4M3 and E5M2) — IEEE-754-style 8-bit floats with two variants: E4M3 has 4 exponent bits and 3 mantissa bits (used for forward activations, weights); E5M2 has 5/2 (used for gradients, with their wider dynamic range). H100-and-newer hardware has native FP8 tensor cores. The two variants exist because forward and backward have different statistical profiles.</li>
+          <li><strong>INT4 / INT8</strong> — fixed-point integers. INT4 weight-only quantization (W4A16) is the workhorse for inference of large models (Llama-70B fits on a single H100 at INT4). Quantization-aware training in INT4 is hard; post-training quantization with GPTQ / AWQ is more common.</li>
+          <li><strong>MXFP4 / MXFP8 / NVFP4</strong> — block-scaled formats. Each block of 16 or 32 values shares a single scale; the per-value representation is small (4 or 8 bits) but the dynamic range is large. NVFP4 is NVIDIA Blackwell-specific (the B200 and beyond); MXFP4 is the OCP standard.</li>
+        </ul>
+
+        <h3>QAT vs PTQ</h3>
+
+        <p>Two strategies for converting a model to a lower-precision format:</p>
+
+        <ul>
+          <li><strong>Quantization-Aware Training (QAT)</strong> — simulate the quantization during training, so the optimizer learns weights that are robust to the lower precision. Expensive but produces the highest-quality models. Miles' INT4-QAT pipeline is the most aggressive example in this survey.</li>
+          <li><strong>Post-Training Quantization (PTQ)</strong> — train in full precision, quantize at the end. Algorithms include GPTQ (one-shot, second-order weight rounding), AWQ (activation-aware weight quantization), GGUF (llama.cpp's format), and ModelOpt (NVIDIA's toolkit). Cheap but lossy.</li>
+        </ul>
+
+        <p>For RL specifically, the question is whether the inference engine can be in a lower precision than the trainer without breaking learning. The answer turns out to be "yes, but only with care."</p>
+
+        <h3>The MoE routing divergence problem</h3>
+
+        <p>This is the deep reason Miles exists. In a Mixture-of-Experts model, each token is routed to k experts based on the output of a small gating network. The gating decision is a top-k over k experts' affinity scores. Under floating-point arithmetic, the affinity scores are computed in a specific precision. If the inference engine computes them in FP8 and the trainer in BF16, two scores that are equal in BF16 can be unequal in FP8 (or vice versa), <em>and the top-k decision can flip</em>. The token routes to a different expert at inference than it did at training time. The gradient signal becomes random noise with respect to which expert actually generated the token.</p>
+
+        <p>This is the "BERT-era unsolved bug" that Chenyang's tutorial flags — the existence of a numerical-precision-induced routing divergence has been known for years. The brute-force fix is to make inference and training share the same precision and the same kernels for the routing computation. That's what Miles' <strong>Unified FP8 Pipeline</strong> does. The cleverer fix is to <em>replay</em> the routing decision: record which experts inference picked, force training to use the same picks. This is <strong>R3 — Rollout Routing Replay</strong>, Miles' signature contribution. It guarantees the routing is identical regardless of precision.</p>
+
+        <blockquote class="pull">
+          The mathematical invariant: routing(x, θ, fp8) ≡ routing(x, θ, bf16) by replay, not by approximation. Without it, every gradient update in an MoE model is partially noise.
+        </blockquote>
+
+        <p>For non-MoE models the problem is milder but still present: numerical drift in logprobs accumulates batch-to-batch. The safe practice (every framework in this survey follows it) is to <em>never</em> use the inference engine's logprobs for loss computation. Always recompute logprobs with the training engine, even at the cost of an extra forward pass. The inference engine generates the tokens; the trainer recomputes their probabilities.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — quantization</div>
+          <ul>
+            <li><a href="https://arxiv.org/abs/2210.17323" target="_blank">GPTQ paper</a> · <a href="https://arxiv.org/abs/2306.00978" target="_blank">AWQ paper</a> — the standard PTQ algorithms</li>
+            <li><a href="https://github.com/NVIDIA/TensorRT-Model-Optimizer" target="_blank">NVIDIA ModelOpt</a> — production toolkit for FP8/INT4/MXFP4 conversion</li>
+            <li><a href="https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf" target="_blank">OCP MX format spec</a> — the standard behind MXFP4 / MXFP8</li>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/post_training" target="_blank">Megatron's <code>post_training/</code></a> — checkpointing and conversion paths</li>
+            <li><a href="https://github.com/radixark/miles/tree/main/docs" target="_blank">Miles docs</a> — R3 + unified FP8 pipeline writeups (the canonical RL-quantization references)</li>
+          </ul>
+        </div>
+      </section>

@@ -1,0 +1,20 @@
+
+
+      <section id="why">
+        <h2>Preface: what this survey is for</h2>
+
+        <p>This survey is written for theorists, mathematicians, and algorithm researchers who want to understand modern RL post-training infrastructure without becoming infrastructure engineers overnight. The goal is not to teach every production detail of Ray, Megatron, SGLang, vLLM, CUDA kernels, or checkpoint formats. The goal is to give you the concepts you need while you read: enough systems literacy to recognize when an engineering choice changes the statistical object being optimized.</p>
+
+        <p>A useful way to read the field is to separate the <strong>surface</strong> from the <strong>underneath</strong>. The surface is what a theorist usually sees: things such as the algorithm design, the loss, the reward model, the KL term, the group size, the benchmark curve, and the running speed. The underneath is the machinery that produced those objects, such as rollout engines, weight updates, prefix caches, sequence packing, placement, log-prob recomputation, and scheduler decisions.</p>
+
+        <p>This survey is not about all of the underneath. The boundary is relevance to the surface. If an infrastructure detail can change something like the reported reward curve, the interpretation of the loss, the comparison between two algorithms, or the reproducibility of a result, we will uncover it carefully. If a detail mainly explains operational work, such as how a cluster is deployed, how logs are routed, how containers are built, or how files are arranged on disk, we will usually skip it or summarize it in one sentence. The aim is not to descend as far down the stack as possible; the aim is to uncover the machinery that directly shapes the quantities theorists already care about.</p>
+
+        <p>This surface-underneath split is the reason infrastructure cannot be treated as neutral implementation detail. A paper may report a clean surface claim — a reward curve, an algorithm comparison, a stability improvement — while the result depends on underneath choices that are not obvious from the theorem statement or the main experiment table. For example, "we use GRPO with group size 8" names the algorithmic surface, but it may hide rollout, filtering, caching, and log-prob recomputation decisions. "Training is done on a 128-H100 cluster" names the scale, but it may hide placement, parallelism, and weight-sync choices.</p>
+
+        <blockquote class="pull">
+          A large number of RL conclusions derived from papers are based on RL infrastructure that may be extremely flawed.
+          <cite>— paraphrasing Chenyang Zhao, whose <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial">Awesome-ML-SYS-Tutorial</a> is the most-cited source in this survey</cite>
+        </blockquote>
+
+        <p>The intended outcome is modest but useful: after reading, you should be able to open a framework like <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/THUDM/slime">slime</a>, <a href="https://github.com/radixark/miles">Miles</a>, or <a href="https://github.com/sgl-project/sglang">SGLang</a> and ask better questions. Where is the old policy defined? Which engine produced these logprobs? When are weights synced? What cache state survived the update? Which samples are off-policy, and how is that measured? Those questions are the bridge from theory to infrastructure.</p>
+      </section>

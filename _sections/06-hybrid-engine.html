@@ -1,0 +1,11 @@
+
+
+      <section id="hybrid-engine">
+        <h3>① The hybrid engine — 训推一体</h3>
+
+        <p>The answer to the opposing-preferences problem is a pattern called <strong>训推一体</strong> ("integrated train-inference"), formalized in <a href="https://arxiv.org/abs/2409.19256">verl's HybridFlow paper</a>. Put both halves on the same GPUs; run them serially; swap memory between phases.</p>
+
+        <p>Mathematically, this is mutual exclusion: at any moment the GPU is in exactly one of two states (training-mode or inference-mode), and a controlled transition between them happens once per cycle. The cost is the transition itself. The benefit is that every GPU is doing useful work at all times — peak utilization moves from 45-55% (disaggregated) to 85-90% (colocated). Every modern framework — Miles, SLIME, verl, SkyRL, RLinf, cosmos-rl — uses some form of this pattern. The disagreement is on <em>how</em> to make the transition cheap.</p>
+
+        <p>Up to about 64 GPUs, full colocation (all roles share one resource pool) wins. Above that, <em>split colocation</em> (actor+ref on one pool, critic+reward on another) wins, because the parallelism preferences of the four roles start to diverge. Pure disaggregation only becomes economic above ~1024 GPUs, when rollout volume can amortize a separate inference cluster.</p>
+      </section>

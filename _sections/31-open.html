@@ -1,0 +1,39 @@
+
+
+      <section id="open">
+        <h2>Open questions at the systems–theory boundary</h2>
+
+        <p>A short list of unresolved questions where a mathematically-minded RL person could plausibly contribute. These are not "research suggestions" so much as the cluster of problems the survey's content gestures at without solving.</p>
+
+        <h4>TPU-native RL infrastructure</h4>
+
+        <p>The Cambrian-MLLM blog establishes that almost none of the GPU-RL stack ports to TPUs cleanly. Static shapes, XLA compilation, the absence of NCCL, the awkwardness of Ray on TPU pods — all of these forbid the patterns the survey covers. The question is whether a different set of patterns can deliver the same outcome on TPU hardware: tile-based parallelism, AOT-compiled rollout pipelines, JAX-native weight sync. No framework today fills this gap. Building one is at least a year of senior engineering, but the design space is genuinely open.</p>
+
+        <h4>Formal verification of weight-sync correctness</h4>
+
+        <p>TileLang's Z3 theorem-prover integration into the TVM arithmetic analyzer is the first credible attempt to bring SMT-style verification into the GPU DSL. The weight-sync contract — that the inference engine's Python tensors point to the same physical memory the trainer wrote, with no aliasing or stride mismatches — is the kind of contract that would benefit from a machine-checked proof. Current implementations rely on careful code review plus runtime asserts. A formal treatment is missing.</p>
+
+        <h4>Tight off-policy bounds under partial rollout</h4>
+
+        <p>TIS and MIS truncate or mask importance weights to control variance, but the bias-variance tradeoff is hand-tuned. The theoretical question: under what conditions on the staleness distribution does partial rollout converge to the same fixed point as strict on-policy training, with how much added variance? Miles' TIS/MIS implementation is a starting point; a tight analysis would let frameworks set the truncation threshold automatically rather than as a hyperparameter.</p>
+
+        <h4>MoE routing under quantization — beyond R3</h4>
+
+        <p>R3 (Rollout Routing Replay) is a fix, not a theorem. The deeper question: <em>under what conditions on the routing computation does a precision-induced top-k flip materially affect downstream learning</em>? If the answer is "always," R3 is permanent. If the answer is "only when the expert affinities are within ε of each other," there might be a quantization scheme that preserves routing without explicit replay. This is the kind of question a numerical analyst could answer.</p>
+
+        <h4>Theoretical basis for DDRL</h4>
+
+        <p>cosmos-rl's Data-Regularized DRL replaces the KL term in standard PPO with a reward maximization objective plus the standard diffusion training loss. The empirical results are good; the theoretical basis is light. What's the corresponding policy-improvement guarantee? Under what conditions does the diffusion loss act as an implicit KL regularizer? The video-generation RL frontier needs this analysis to mature.</p>
+
+        <h4>Multi-agent RL as a category of interacting policies</h4>
+
+        <p>RLinf's multi-agent support (rStar2, WideSeek-R1) and the broader multi-agent RL literature lack a clean systems abstraction. The category-theoretic framing — agents as objects, message-passing as morphisms — is intuitive but doesn't yet correspond to a framework primitive. A mathematically clean abstraction here would have systems consequences.</p>
+
+        <h4>The diffusion–autoregressive bridge</h4>
+
+        <p>cosmos-rl supports both diffusion world models (Cosmos-Predict, SANA, SD3) and autoregressive LLMs (Qwen, LLaMA, DeepSeek) — but they go through fundamentally different inference paths (the <code>diffusers</code> backend vs vLLM). The two paradigms increasingly need to interact: video generation conditioned on language, robot policies that output both continuous actions and language explanations. A unified RL framework that treats both as first-class is an open systems problem.</p>
+
+        <blockquote class="pull">
+          Each of these is a real research direction, not a textbook exercise. The field's progress is increasingly going to depend on people who can think across the systems–theory boundary — which is the audience this survey is written for.
+        </blockquote>
+      </section>

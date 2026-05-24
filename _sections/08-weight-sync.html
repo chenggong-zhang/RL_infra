@@ -1,0 +1,15 @@
+
+
+      <section id="weight-sync">
+        <h3>③ Zero-copy weight synchronization</h3>
+
+        <p>After each training step the trainer has a new policy θ<sub>t+1</sub>; the inference engine still has θ<sub>t</sub>. Naively, you serialize the new weights, send them, deserialize. On a 70B model that's tens of milliseconds per parameter, with thousands of parameters per layer — minutes per training step, untenable.</p>
+
+        <p>The trick is to never move the tensor data. The trainer process has the new weights in GPU memory; the inference process is either on the same host or shares a NCCL group with the trainer. The trainer sends only a <strong>handle tuple</strong> — pointer, stride, offset, CUDA IPC descriptor — under a kilobyte. The inference process reconstructs a Python tensor object that points to the same physical GPU memory.</p>
+
+        <p>What's mathematically interesting here is that the abstraction is functorial: a Python <code>Tensor</code> is a thin wrapper around an underlying memory descriptor, and reconstructing the wrapper is independent of moving the bytes. The trainer and inference engine end up with two different objects denoting the same memory. The synchronization cost goes from O(parameters × byte_throughput) to O(parameters × pointer_size). Sub-millisecond instead of minutes.</p>
+
+        <aside class="note warn">
+          <strong>Pitfall.</strong> verl's implementation requires <code>monkey_patch_torch_reductions()</code> to register the CUDA IPC handle deserializer. Missing this causes intermittent segfaults on the SGLang side, not deterministic ones — exactly the kind of bug a mathematician would call a "leaky abstraction." The handle tuple appears to be opaque, but its semantics depend on a global registration step. Read the integration code line by line.
+        </aside>
+      </section>

@@ -1,0 +1,456 @@
+
+
+      <section id="skeleton">
+        <h2>The skeleton: a five-stage cycle on three pillars</h2>
+
+        <p>The simplest useful map is a loop, not a full architecture diagram. One RL update usually needs five conceptual actions: generate samples, score them, decide which tokens or samples matter, train the policy, and make the rollout engine use the new policy. This is a map, not a law. Real systems overlap stages, combine stages, skip explicit filtering, or run the next rollout before the current training step has finished. Still, the map is useful because every codebase has to answer the same questions: where did this data come from, what metadata was attached to it, what loss consumed it, and when did the inference engine receive the updated weights?</p>
+
+        <figure>
+          <img src="diagrams/01-rollout-cycle.svg" alt="The universal rollout cycle: Generate → Score → Filter → Train → Sync weights → repeat.">
+          <figcaption><span class="fig-label">Figure 1.</span> The minimal rollout-training loop. Some engineering primitives make a stage cheaper; others preserve the meaning of the data as it moves through the loop.</figcaption>
+        </figure>
+
+        <p>Before reading the code names below, it helps to know what each file represents. In <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/train.py#L67-L98">Miles <code>train.py</code></a>, you are looking at the top-level driver loop: the file that says when rollout happens, when training happens, and when weights are updated. In <a href="https://github.com/verl-project/verl/blob/7dc39fec1c37da4098b50e68840e78906b69f16a/verl/protocol.py#L318-L328">verl <code>protocol.py</code></a>, you are looking at the data envelope that carries tensors, non-tensor metadata, and metrics between workers. In <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/miles/utils/types.py#L10-L29">Miles <code>Sample</code></a> and <a href="https://github.com/THUDM/slime/blob/6961f5970e9dbb4716a10ba4a54a28fa3876d274/slime/utils/types.py#L9-L27">slime <code>Sample</code></a>, you are looking at the schema of one rollout example. In <a href="https://github.com/sgl-project/sglang/blob/cadfa2d025d3e251352a115291621c8214c733e5/python/sglang/srt/entrypoints/EngineBase.py#L7-L52">SGLang <code>EngineBase</code></a>, you are looking at the control API of the inference engine: generate, flush cache, and update weights.</p>
+
+        <h4>Stage 1: generate samples</h4>
+
+        <p>For Stage 1, I will use one example and follow it carefully: <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/train.py#L67-L98">Miles <code>train.py</code></a>. This file is the top-level driver. It does not define the model architecture, the reward function, or the loss. Its job is to decide when distributed components run. The relevant loop says exactly three things: ask the rollout side to generate data, train on the returned data, then update the rollout weights.</p>
+
+<pre><code class="language-python"># Miles: train.py
+for rollout_id in range(args.start_rollout_id, args.num_rollout):
+    rollout_data_ref = await <span class="code-hl">rollout_manager.generate.remote(rollout_id)</span>
+
+    if args.use_critic:
+        critic_task = await eager_create_task(
+            critic_model.train(rollout_id, rollout_data_ref)
+        )
+        if rollout_id >= args.num_critic_only_steps:
+            await <span class="code-hl">actor_model.train(rollout_id, rollout_data_ref)</span>
+        await critic_task
+    else:
+        await <span class="code-hl">actor_model.train(rollout_id, rollout_data_ref)</span>
+
+    await <span class="code-hl">actor_model.update_weights()</span></code></pre>
+
+        <p>There are two direct observations from this snippet. First, <code>rollout_manager.generate.remote(...)</code> runs before <code>actor_model.train(...)</code>, so the training step consumes data produced by rollout. Second, <code>actor_model.update_weights()</code> runs after training, so the rollout side must be refreshed before the next generated batch is truly from the updated policy. This is the minimal generate-train-sync loop in code.</p>
+
+        <p>Now we need to ask what <code>rollout_manager</code> is. It is not a local Python helper. Miles creates it as a Ray actor in <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/miles/ray/placement_group.py#L176-L195"><code>miles/ray/placement_group.py</code></a>.</p>
+
+        <div class="primer-box">
+          <p><strong>A minimal Ray primer.</strong> Ray is a Python framework for running work across many processes and machines. A Ray <a href="https://docs.ray.io/en/latest/ray-core/actors.html">actor</a> is a stateful worker process: it can hold its own fields, own resources, and receive method calls from the driver. A call like <code>rollout_manager.generate.remote(...)</code> is therefore not a normal Python call. It submits a method call to the actor and immediately gives the driver an <em>object reference</em>, a handle to a result that may still be computing elsewhere. Later, the program can wait for or pass around that reference. For this section, the key point is simple: when you see <code>.remote()</code>, the work is being sent to another Ray worker instead of being executed as an ordinary local Python function.</p>
+        </div>
+
+<pre><code class="language-python"># Miles: miles/ray/placement_group.py
+def create_rollout_manager(args, pg):
+    rollout_manager = <span class="code-hl">RolloutManager.options(</span>
+        num_cpus=1,
+        num_gpus=0,
+        **(compute_ray_pin_head_options() if args.pin_rollout_manager_to_head else {})
+    )<span class="code-hl">.remote(args, pg)</span>
+
+    if args.offload_rollout:
+        ray.get(rollout_manager.offload.remote())
+
+    return rollout_manager, num_rollout_per_epoch</code></pre>
+
+        <p>This code proves that <code>rollout_manager.generate.remote(...)</code> is a remote call to a Ray actor. The <code>.remote(...)</code> boundary moves rollout coordination out of the local training driver process. Ray schedules the <code>RolloutManager</code> actor, and that actor then coordinates rollout-side engines and resources. The exact lifetime of Ray object references is not the point here; the point is that the driver is coordinating remote work rather than executing generation locally. In other words, <code>generate</code> is already a distributed-systems operation, not just a decoding function.</p>
+
+        <p>Inside that actor, <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/miles/ray/rollout.py#L448-L458"><code>RolloutManager.generate</code></a> is the Stage 1 entry point:</p>
+
+        <pre><code class="language-python"># Miles: miles/ray/rollout.py
+def generate(self, rollout_id):
+    start_time = time.time()
+    self.rollout_id = rollout_id
+    self.health_monitoring_resume()
+
+    data, metrics = <span class="code-hl">self._get_rollout_data(rollout_id=rollout_id)</span>
+    self._save_debug_rollout_data(data, rollout_id=rollout_id, evaluation=False)
+    _log_rollout_data(rollout_id, self.args, data, metrics, time.time() - start_time)
+
+    data = <span class="code-hl">self._convert_samples_to_train_data(data)</span>
+    return <span class="code-hl">self._split_train_data_by_dp(data, self.train_parallel_config["dp_size"])</span></code></pre>
+
+        <p>This code directly supports a more precise claim: in Miles, "generate samples" means more than decoding. <code>_get_rollout_data</code> obtains samples; <code>_save_debug_rollout_data</code> and <code>_log_rollout_data</code> record what happened; <code>_convert_samples_to_train_data</code> turns samples into trainer input; <code>_split_train_data_by_dp</code> partitions the batch for data-parallel training. If any of these steps changes, the object consumed by the loss may change too.</p>
+
+        <p>The helper <code>_get_rollout_data</code> shows where generated samples enter the system:</p>
+
+        <pre><code class="language-python"># Miles: miles/ray/rollout.py
+def _get_rollout_data(self, rollout_id):
+    if self.use_experimental_refactor:
+        data = <span class="code-hl">call_rollout_function(</span>
+            self.generate_rollout, RolloutFnTrainInput(rollout_id=rollout_id)
+        )
+    else:
+        data = <span class="code-hl">call_rollout_fn(</span>
+            self.generate_rollout,
+            self.args,
+            rollout_id,
+            self.data_source,
+            evaluation=False,
+        )
+
+    metrics = <span class="code-hl">data.metrics</span>
+    data = <span class="code-hl">data.samples</span>
+
+    while isinstance(data[0], list):
+        data = <span class="code-hl">list(itertools.chain.from_iterable(data))</span>
+
+    if not self.args.disable_rollout_trim_samples:
+        global_batch_size = self.args.global_batch_size
+        if len(data) % global_batch_size != 0:
+            trim_len = (len(data) // global_batch_size) * global_batch_size
+            data = <span class="code-hl">data[:trim_len]</span></code></pre>
+
+        <p>This snippet supports two concrete claims. The returned object is expected to have <code>metrics</code> and <code>samples</code>, so rollout is already a structured interface. Also, if the rollout function returns grouped samples, Miles flattens them; if the number of samples is incompatible with the global batch size, Miles trims them. So "which samples were generated" and "which samples reach training" are not identical questions.</p>
+
+        <p>The source code also tells us what a generated sample is. In Miles, the relevant definition is the <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/miles/utils/types.py#L9-L31"><code>Sample</code></a> dataclass:</p>
+
+        <pre><code class="language-python"># Miles: miles/utils/types.py
+@dataclass
+class Sample:
+    """The sample generated"""
+
+    group_index: int | None = None
+    index: int | None = None
+
+    # prompt
+    prompt: str | list[dict[str, str]] = ""
+    <span class="code-hl">tokens: list[int]</span> = field(default_factory=list)
+    multimodal_inputs: dict[str, Any] = None
+    multimodal_train_inputs: dict[str, Any] = None
+
+    # response
+    response: str = ""
+    <span class="code-hl">response_length: int</span> = 0
+    label: str | None = None
+    <span class="code-hl">reward</span>: float | dict[str, Any] | None = None
+    <span class="code-hl">loss_mask</span>: list[int] | None = None
+    <span class="code-hl">weight_versions</span>: list[str] = field(default_factory=list)
+    <span class="code-hl">rollout_log_probs</span>: list[float] | None = None
+    <span class="code-hl">rollout_routed_experts</span>: numpy.ndarray | None = None
+    remove_sample: bool = False</code></pre>
+
+        <p>For a theorist, the important point is not the field list itself, but the statistical meaning carried by the fields. <code>tokens</code> and <code>response_length</code> define the trajectory segment that training will see. <code>reward</code> attaches a scalar or structured learning signal to that trajectory. <code>loss_mask</code> decides which response tokens contribute to the policy loss. When populated, <code>weight_versions</code> records which policy version produced the sample, which matters when rollout and training are not perfectly synchronized. <code>rollout_log_probs</code> supports off-policy correction or consistency checks; <code>rollout_routed_experts</code> supports MoE routing replay. So Stage 1 is already fixing part of the empirical object that the later loss will optimize.</p>
+
+        <p>So far, the code has shown that generation is remote from the training driver: <code>train.py</code> sends a request to <code>RolloutManager</code>, and <code>RolloutManager.generate</code> turns generated samples into train data. One question remains: what is actually doing the inference on the rollout side? In Miles, the answer is not "another local Python function." In the normal internal-engine path, the rollout side starts SGLang inference servers. The chain begins in <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/miles/ray/rollout.py#L1002-L1080"><code>start_rollout_servers</code></a>, which creates <code>ServerGroup</code> objects and starts their engines:</p>
+
+        <pre><code class="language-python"># Miles: miles/ray/rollout.py
+# excerpt from start_rollout_servers
+def start_rollout_servers(args, pg):
+    config = <span class="code-hl">_resolve_sglang_config(args)</span>
+    servers = {}
+
+    for model_cfg in config.models:
+        router_ip, router_port = _start_router(args, has_pd_disaggregation=has_pd)
+        server_groups = []
+        all_init_handles = []
+
+        for group_cfg in model_cfg.server_groups:
+            group = <span class="code-hl">ServerGroup(</span>
+                args=args,
+                pg=pg,
+                num_gpus_per_engine=group_cfg.num_gpus_per_engine,
+                worker_type=group_cfg.worker_type,
+                router_ip=router_ip,
+                router_port=router_port,
+            )
+            handles, port_cursors = <span class="code-hl">group.start_engines(port_cursors)</span>
+            all_init_handles.extend(handles)
+            server_groups.append(group)
+
+        if all_init_handles:
+            ray.get(all_init_handles)
+
+        servers[model_cfg.name] = RolloutServer(
+            server_groups=server_groups,
+            router_ip=router_ip,
+            router_port=router_port,
+            model_name=model_cfg.name,
+            update_weights=model_cfg.update_weights,
+        )</code></pre>
+
+        <p>Only two lines matter for the argument. <code>_resolve_sglang_config(args)</code> constructs the SGLang rollout configuration, either from a config file or from command-line arguments. <code>group.start_engines(...)</code> is the step that actually starts the engines for each server group. The other lines mostly package those engines into routers and bookkeeping objects. The missing piece is what <code>group.start_engines</code> starts. In the same file, <code>ServerGroup.start_engines</code> creates Ray actors whose class is <code>SGLangEngine</code>:</p>
+
+        <pre><code class="language-python"># Miles: miles/ray/rollout.py
+# excerpt from ServerGroup.start_engines
+def start_engines(self, port_cursors=None):
+    RolloutRayActor = <span class="code-hl">ray.remote(SGLangEngine)</span>
+
+    rollout_engine = <span class="code-hl">RolloutRayActor.options(</span>
+        num_cpus=num_cpus,
+        num_gpus=num_gpus,
+        scheduling_strategy=scheduling_strategy,
+        runtime_env={"env_vars": env_vars},
+    ).remote(
+        self.args,
+        rank=global_rank,
+        worker_type=self.worker_type,
+        base_gpu_id=base_gpu_id,
+        sglang_overrides=self.sglang_overrides,
+        num_gpus_per_engine=self.num_gpus_per_engine,
+    )
+
+    init_handles = [
+        <span class="code-hl">engine.init.remote(**(addr_and_ports[rank]))</span>
+        for rank, engine in rollout_engines
+    ]</code></pre>
+
+        <p>And <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/miles/backends/sglang_utils/sglang_engine.py#L213-L215"><code>SGLangEngine._init_normal</code></a> launches an SGLang HTTP server process:</p>
+
+        <pre><code class="language-python"># Miles: miles/backends/sglang_utils/sglang_engine.py
+def _init_normal(self, server_args_dict):
+    logger.info(f"Launch HttpServerEngineAdapter at: {self.server_host}:{self.server_port}")
+    self.process = <span class="code-hl">launch_server_process(ServerArgs(**server_args_dict))</span></code></pre>
+
+        <p>Now the full Stage 1 claim is visible from code. Miles does not call a local model to get a string. The training driver calls a remote rollout manager; the rollout manager runs a rollout function, collects <code>Sample</code> objects, reshapes them into train data, partitions them for data parallelism, and, in the internal-engine path, uses SGLang engines underneath to do inference. That is why generation is the first infrastructure boundary in the RL loop.</p>
+
+        <p>This Miles example gives us a pattern to recognize elsewhere: generation is a boundary between the training controller and a rollout/inference subsystem. Different frameworks draw that boundary with different abstractions. In verl, the boundary is less visible from one short driver loop because the control flow is wrapped in Ray worker groups, and the data moving across roles is packaged as <code>DataProto</code>. The underlying question is the same: which worker generated the responses, what metadata traveled with them, and how were they returned to the trainer? SGLang and vLLM sit one level lower. They usually do not define the RL algorithm or the reward pipeline; they provide the fast inference engine that an RL framework calls when it needs samples. Miles is a good first example because all three layers are easy to separate: the training driver asks for rollout, the rollout manager owns the inference engines, and the generated samples are converted into training data before the loss sees them.</p>
+
+        <h4>Stage 2: score the outputs</h4>
+
+        <p>After generation, many RL training pipelines need to attach a training signal to the generated responses. Sometimes that signal comes from a learned reward model, sometimes from a hand-written scoring function in Python, sometimes from a verifier, and sometimes from an external service. This section is not about which reward is philosophically or statistically best. It is about a more infrastructural question: once a score exists, where is it stored, and how does the trainer know which response, mask, prompt, and metadata that score belongs to?</p>
+
+        <p>We use verl's PPO trainer as the main example because PPO-style RLHF training uses reward scores as part of the training signal, and verl shows the relevant plumbing in one trainer loop. We can see the generated answers put back into the batch, the batch sent to the reward code, and the returned reward scores put back into that same batch.</p>
+
+        <div class="primer-box">
+          <h5>Small primer: what verl means by <code>DataProto</code></h5>
+          <p>verl moves training data around in a container called <code>DataProto</code>. For this section, the important point is simple: tensor fields such as prompts, responses, masks, and reward scores live in <code>batch</code>; non-tensor per-example fields such as data source, reward-model hints, and example ids live in <code>non_tensor_batch</code>; global bookkeeping lives in <code>meta_info</code>. So when reward is added to a <code>DataProto</code>, it is being added to the same structured object that later training code will consume.</p>
+        </div>
+
+        <pre><code class="language-python"># verl: verl/protocol.py
+class DataProto:
+    """
+    A DataProto is a data structure that aims to provide a standard protocol for data exchange between functions.
+    """
+
+    <span class="code-hl">batch: TensorDict = None</span>
+    <span class="code-hl">non_tensor_batch: dict = field(default_factory=dict)</span>
+    <span class="code-hl">meta_info: dict = field(default_factory=dict)</span></code></pre>
+
+        <p>The first scoring-related detail appears even before generation. In verl's PPO trainer, <a href="https://github.com/verl-project/verl/blob/7dc39fec1c37da4098b50e68840e78906b69f16a/verl/trainer/ppo/ray_trainer.py#L526-L540"><code>_get_gen_batch</code></a> creates the batch that will be sent to rollout. It removes non-tensor fields that generation does not need, but it deliberately preserves the fields that reward computation may need later:</p>
+
+        <pre><code class="language-python"># verl: verl/trainer/ppo/ray_trainer.py
+def _get_gen_batch(self, batch: DataProto) -&gt; DataProto:
+    <span class="code-hl">reward_keys = set({"data_source", "reward_model", "extra_info", "uid"})</span> &amp; batch.non_tensor_batch.keys()
+
+    batch_keys_to_pop = []
+    non_tensor_batch_keys_to_pop = set(batch.non_tensor_batch.keys()) - reward_keys
+    gen_batch = batch.pop(
+        batch_keys=batch_keys_to_pop,
+        non_tensor_batch_keys=list(non_tensor_batch_keys_to_pop),
+    )
+
+    # For agent loop, we need reward model keys to compute score.
+    <span class="code-hl">gen_batch.non_tensor_batch.update(batch.non_tensor_batch)</span>
+
+    return gen_batch</code></pre>
+
+        <p>This is a useful place to slow down. Fields such as <code>data_source</code>, <code>reward_model</code>, <code>extra_info</code>, and <code>uid</code> are not model inputs in the usual mathematical sense. They are infrastructure metadata. They can tell the reward side which dataset an example came from, which scoring rule or reward model to use, what auxiliary information is needed for verification, and which generated responses came from the same original prompt. Without these fields, the system might still generate text, but it may not have enough context to score that text correctly.</p>
+
+        <p>After rollout returns, the generated output is not handled as a separate loose object. The trainer repeats the original batch to match the number of sampled responses, joins the generated fields back into it, computes a response mask if needed, and only then runs reward. The snippet below follows the ordinary sampled-rollout path; REMAX adds a greedy baseline branch, but the same merge-and-score pattern is still present.</p>
+
+        <pre><code class="language-python"># verl: verl/trainer/ppo/ray_trainer.py
+gen_batch = self._get_gen_batch(batch)
+rollout_n = self.config.actor_rollout_ref.rollout.n
+gen_batch_output = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
+combined_gen_batch = gen_batch_output
+num_sampled_prompts = len(gen_batch_output)
+
+with marked_timer("gen", timing_raw, color="red"):
+    combined_gen_output = <span class="code-hl">self.async_rollout_manager.generate_sequences(combined_gen_batch)</span>
+
+gen_batch_output = combined_gen_output.slice(0, num_sampled_prompts)
+
+# repeat to align with repeated responses in rollout
+batch = <span class="code-hl">batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)</span>
+batch = <span class="code-hl">batch.union(gen_batch_output)</span>
+
+if "response_mask" not in batch.batch.keys():
+    batch.batch["response_mask"] = <span class="code-hl">compute_response_mask(batch)</span>
+
+with marked_timer("reward", timing_raw, color="yellow"):
+    # compute reward model score
+    if self.use_rm and "rm_scores" not in batch.batch.keys():
+        batch_reward = self._compute_reward_colocate(batch)
+        batch = <span class="code-hl">batch.union(batch_reward)</span>
+
+    reward_tensor, reward_extra_infos_dict = <span class="code-hl">extract_reward(batch)</span></code></pre>
+
+        <p>This code is the central Stage 2 example, so it is worth reading it slowly. <code>generate_sequences</code> returns the rollout result, including generated responses and rollout-side fields. Then <code>batch.repeat(...)</code> expands the original prompt batch so that it has one row for each sampled response. This matters when <code>rollout_n &gt; 1</code>: one prompt may produce several answers, and the trainer needs each answer to sit next to the prompt, id, and metadata it came from. After that, <code>batch.union(gen_batch_output)</code> adds the generated response fields into the repeated batch.</p>
+
+        <p>At this point, the object being scored is no longer just a list of generated strings. After <code>repeat</code> and <code>union(gen_batch_output)</code>, each row of the batch represents one prompt-response pair, together with the mask, id, and metadata needed to interpret it. If the batch does not yet contain reward-model scores (<code>"rm_scores" not in batch.batch.keys()</code>), the PPO trainer sends the whole batch to the reward side. The returned object is merged back into the same rows (<code>batch.union(batch_reward)</code>). So the reward score is stored next to the exact response it scores, and the later loss code can read the response tokens, response mask, and reward score as aligned fields of one batch.</p>
+
+        <p>The word <code>union</code> can be misleading if read mathematically. In verl, <a href="https://github.com/verl-project/verl/blob/7dc39fec1c37da4098b50e68840e78906b69f16a/verl/protocol.py#L781-L798"><code>DataProto.union</code></a> is a controlled field merge across the tensor, non-tensor, and meta-information parts of the object:</p>
+
+        <pre><code class="language-python"># verl: verl/protocol.py
+def union(self, other: "DataProto") -&gt; "DataProto":
+    self.batch = <span class="code-hl">union_tensor_dict(self.batch, other.batch)</span>
+    self.non_tensor_batch = <span class="code-hl">union_numpy_dict(self.non_tensor_batch, other.non_tensor_batch)</span>
+    self.meta_info = <span class="code-hl">union_two_dict(self.meta_info, other.meta_info)</span>
+    return self</code></pre>
+
+        <p>Now we can inspect what the reward computation itself returns. The trainer does not compute reward inline; it delegates to a <code>RewardLoopManager</code>:</p>
+
+        <pre><code class="language-python"># verl: verl/trainer/ppo/ray_trainer.py
+def _compute_reward_colocate(self, batch: DataProto) -&gt; tuple[torch.Tensor, dict[str, Any]] | torch.Tensor:
+    assert self.reward_loop_manager is not None, "RewardLoopManager is None"
+    batch_reward = <span class="code-hl">self.reward_loop_manager.compute_rm_score(batch)</span>
+    return batch_reward</code></pre>
+
+        <p>Inside <a href="https://github.com/verl-project/verl/blob/7dc39fec1c37da4098b50e68840e78906b69f16a/verl/experimental/reward_loop/reward_loop.py#L323-L352"><code>RewardLoopManager.compute_rm_score</code></a>, verl chunks the batch across reward workers, makes remote score calls, collects scalar reward scores, assembles them into an <code>rm_scores</code> tensor, and returns a new <code>DataProto</code> containing that tensor. This is the reward-side counterpart of the earlier batch merge:</p>
+
+        <pre><code class="language-python"># verl: verl/experimental/reward_loop/reward_loop.py
+def compute_rm_score(self, data: DataProto) -&gt; DataProto:
+    chunks = data.chunk(len(self.reward_loop_workers))
+    outputs = ray.get(
+        [
+            <span class="code-hl">worker.compute_score_batch.remote(chunk)</span>
+            for worker, chunk in zip(self.reward_loop_workers, chunks, strict=True)
+        ]
+    )
+    outputs_flat = [item for sublist in outputs for item in sublist]
+
+    scores = [item["reward_score"] for item in outputs_flat]
+    rm_scores = <span class="code-hl">self.reward_manager_cls.assemble_rm_scores(data, scores)</span>
+    batch = TensorDict({<span class="code-hl">"rm_scores": rm_scores</span>}, batch_size=len(data))
+
+    reward_extra_infos = [output.get("reward_extra_info", {}) for output in outputs_flat]
+    reward_extra_keys = list(reward_extra_infos[0].keys())
+    non_tensor_batch = {}
+    for key in reward_extra_keys:
+        non_tensor_batch[key] = np.array([info[key] for info in reward_extra_infos])
+
+    return <span class="code-hl">DataProto(batch=batch, non_tensor_batch=non_tensor_batch, meta_info={"reward_extra_keys": reward_extra_keys})</span></code></pre>
+
+        <p>The next detail explains why <code>rm_scores</code> is a tensor rather than a plain Python list. At this point, <code>scores</code> is one scalar reward per generated answer. But <code>data.batch["responses"]</code> is a token matrix: one row per generated answer, one column per response-token position. The default reward manager converts the scalar list into an <code>rm_scores</code> tensor with the same shape as <code>responses</code>. Most positions are zero; each scalar reward is written at the last valid token position of its own response:</p>
+
+        <pre><code class="language-python"># verl: verl/experimental/reward_loop/reward_manager/base.py
+@classmethod
+def assemble_rm_scores(cls, data: DataProto, scores: list[float]) -&gt; torch.Tensor:
+    prompt_length = data.batch["prompts"].size(1)
+    valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1)
+    rm_scores = <span class="code-hl">torch.zeros_like(data.batch["responses"], dtype=torch.float32)</span>
+    <span class="code-hl">rm_scores[torch.arange(rm_scores.size(0), device=rm_scores.device), valid_response_length - 1]</span> = (
+        rm_scores.new_tensor(scores)
+    )
+    return rm_scores</code></pre>
+
+        <p>This does not mean verl has changed the task reward into a dense per-token reward. In this default path, the score still starts as one scalar per generated answer. The token-shaped <code>rm_scores</code> tensor is the storage format that lets later token-level training code keep that scalar aligned with the response it belongs to.</p>
+
+        <p>Finally, <a href="https://github.com/verl-project/verl/blob/7dc39fec1c37da4098b50e68840e78906b69f16a/verl/trainer/ppo/reward.py#L160-L167"><code>extract_reward</code></a> shows what the trainer reads after scoring is complete:</p>
+
+        <pre><code class="language-python"># verl: verl/trainer/ppo/reward.py
+def extract_reward(batch: DataProto):
+    reward_tensor = <span class="code-hl">batch.batch["rm_scores"]</span>
+    reward_extra_keys = batch.meta_info.get("reward_extra_keys", [])
+    reward_extra_infos_dict = {key: batch.non_tensor_batch[key] for key in reward_extra_keys}
+    return <span class="code-hl">reward_tensor, reward_extra_infos_dict</span></code></pre>
+
+        <p>This is the point where the reward field becomes an explicit input to the rest of training. <code>reward_tensor</code> is the tensor the trainer will use as the reward signal. <code>reward_extra_infos_dict</code> is different: it collects optional extra fields returned by the reward side, such as diagnostic information, sub-scores, or metadata for logging and analysis. The main reward used for optimization and the auxiliary information used to understand the scoring process travel together, but they are read as different objects.</p>
+
+        <p>Other codebases draw the boundary differently. verl makes reward visible as a field inside a batch object. Miles and slime first make it visible inside each generated <code>Sample</code>. A <code>Sample</code> is not only the text response; it is the small record that keeps the response, reward, mask, rollout logprobs, and related metadata together before training data is assembled:</p>
+
+        <pre><code class="language-python"># slime: slime/utils/types.py
+@dataclass
+class Sample:
+    group_index: int | None = None
+    index: int | None = None
+
+    prompt: str | list[dict[str, str]] = ""
+    tokens: list[int] = field(default_factory=list)
+
+    response: str = ""
+    response_length: int = 0
+    label: str | None = None
+    <span class="code-hl">reward: float | dict[str, Any] | None = None</span>
+    <span class="code-hl">loss_mask: list[int] | None = None</span>
+    weight_versions: list[str] = field(default_factory=list)
+    <span class="code-hl">rollout_log_probs: list[float] | None = None</span>
+    <span class="code-hl">rollout_routed_experts: list[list[int]] | None = None</span>
+    remove_sample: bool = False
+    teacher_log_probs: list[float] | None = None</code></pre>
+
+        <p>Miles has nearly the same sample-level shape. The type of <code>rollout_routed_experts</code> differs, but the important fields are again the response tokens, reward, mask, rollout logprobs, and rollout-side metadata:</p>
+
+        <pre><code class="language-python"># Miles: miles/utils/types.py
+@dataclass
+class Sample:
+    prompt: str | list[dict[str, str]] = ""
+    tokens: list[int] = field(default_factory=list)
+
+    response: str = ""
+    response_length: int = 0
+    label: str | None = None
+    <span class="code-hl">reward: float | dict[str, Any] | None = None</span>
+    <span class="code-hl">loss_mask: list[int] | None = None</span>
+    weight_versions: list[str] = field(default_factory=list)
+    <span class="code-hl">rollout_log_probs: list[float] | None = None</span>
+    <span class="code-hl">rollout_routed_experts: numpy.ndarray | None = None</span>
+    remove_sample: bool = False</code></pre>
+
+        <p>slime then makes the next conversion step explicit. Its rollout manager takes a list of <code>Sample</code> objects, post-processes their rewards, and builds the dictionary that the training side will consume. This is the sample-level version of the same alignment work we saw in verl:</p>
+
+        <pre><code class="language-python"># slime: slime/ray/rollout.py
+def _convert_samples_to_train_data(self, samples: list[Sample] | list[list[Sample]]):
+    raw_rewards, rewards = <span class="code-hl">self._post_process_rewards(samples)</span>
+
+    train_data = {
+        <span class="code-hl">"tokens": [sample.tokens for sample in samples]</span>,
+        "response_lengths": [sample.response_length for sample in samples],
+        <span class="code-hl">"rewards": rewards</span>,
+        <span class="code-hl">"raw_reward": raw_rewards</span>,
+        "truncated": [1 if sample.status == Sample.Status.TRUNCATED else 0 for sample in samples],
+        "sample_indices": [sample.index for sample in samples],
+    }
+
+    loss_masks = []
+    for sample in samples:
+        if sample.loss_mask is None:
+            sample.loss_mask = [1] * sample.response_length
+        assert len(sample.loss_mask) == sample.response_length
+        if sample.remove_sample:
+            sample.loss_mask = [0] * sample.response_length
+        loss_masks.append(sample.loss_mask)
+    train_data[<span class="code-hl">"loss_masks"</span>] = loss_masks
+
+    if samples[0].rollout_log_probs is not None:
+        train_data[<span class="code-hl">"rollout_log_probs"</span>] = [sample.rollout_log_probs for sample in samples]
+
+    if samples[0].rollout_routed_experts is not None:
+        train_data[<span class="code-hl">"rollout_routed_experts"</span>] = [sample.rollout_routed_experts for sample in samples]
+
+    return train_data</code></pre>
+
+        <p>The comparison gives us a clean reading rule. In verl, the batch object is the main contract: generation adds response fields, reward adds <code>rm_scores</code>, and later training reads from the same <code>DataProto</code>. In slime and Miles, the sample object is the first contract: each <code>Sample</code> carries its own reward and alignment fields, and slime's <code>_convert_samples_to_train_data</code> shows how those per-sample fields become training arrays such as <code>tokens</code>, <code>rewards</code>, <code>loss_masks</code>, and <code>rollout_log_probs</code>. The shared principle is not that every framework uses the same container. The shared principle is that reward only becomes useful for training after it is kept aligned with the response tokens and the fields that say how those tokens should be interpreted.</p>
+
+        <h4>Stage 3: filter, mask, or select what counts</h4>
+
+        <p>The word "filter" should be read broadly. Some systems really do drop samples. Others keep the sample but mask out tokens, truncate long completions, mark invalid turns, or compute advantages so that some responses matter more than others. This is why the diagram says "filter," but the text should not imply that every framework has a separate filtering module.</p>
+
+        <p>The concrete code often shows up as masks and per-token fields. In Miles and slime, <code>loss_mask</code> records which response tokens should enter the loss; Miles also checks that <code>loss_mask</code> and <code>rollout_log_probs</code> have the expected response length in its <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/miles/utils/types.py#L149-L172"><code>Sample</code> validation logic</a>. In verl, the batch carries attention masks and response masks, then later gains old logprobs, reference logprobs, values, advantages, and returns. For a theorist, this stage is where a surface phrase like "we train on generated completions" becomes precise: which generated tokens, under which mask, with which logprob, and with which reward?</p>
+
+        <h4>Stage 4: train the policy</h4>
+
+        <p>Training is the part that looks most familiar from the outside: compute logprobs, compute a PPO/GRPO-like loss, take optimizer steps. The infrastructure detail is that the trainer is usually not consuming raw text. It consumes the structured object produced by the earlier stages. In Miles, the driver passes <code>rollout_data_ref</code> from generation directly into <code>actor_model.train</code>. In verl, the <a href="https://github.com/verl-project/verl/blob/7dc39fec1c37da4098b50e68840e78906b69f16a/verl/trainer/ppo/ray_trainer.py#L1206-L1281">trainer helper methods</a> compute old logprobs, reference logprobs, values, and actor updates on a <code>DataProto</code> batch. Megatron-LM's native RL path is lower-level: it exposes GRPO-style loss and sequence-packing utilities closer to the tensor computation.</p>
+
+        <p>The commonality is that training needs the same semantic ingredients: prompts, responses, masks, rewards, old policy logprobs, and sometimes reference policy logprobs or routing metadata. The difference is where the framework chooses to hide that complexity. verl hides much of it behind <code>DataProto</code> and Ray worker groups. Miles and slime make the sample fields more explicit. Megatron-LM exposes more of the tensor-level training machinery.</p>
+
+        <h4>Stage 5: sync the new policy back to rollout</h4>
+
+        <p>After training, the rollout engine is stale. If generation continues using old weights, the next batch was not produced by the current policy. Updating rollout weights is therefore not just copying tensors; it is a consistency protocol. The easiest concrete example is slime's <a href="https://github.com/THUDM/slime/blob/6961f5970e9dbb4716a10ba4a54a28fa3876d274/slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py#L90-L148">distributed weight update path</a>. This file is not the training loss; it is the bridge from the training model to the rollout engines. It pauses generation, flushes the rollout engine cache, transfers non-expert and expert weights, optionally handles quantization post-processing, and then resumes generation. Miles has the same family of mechanisms, including async and P2P transfer paths.</p>
+
+        <p>SGLang exposes why this protocol exists. Its <a href="https://github.com/sgl-project/sglang/blob/cadfa2d025d3e251352a115291621c8214c733e5/python/sglang/srt/entrypoints/EngineBase.py#L7-L52">engine interface</a> puts <code>generate</code>, <code>flush_cache</code>, and <code>update_weights_from_tensor</code> in the same control surface. Those methods belong together. If weights change but old prefix/KV cache entries survive, the engine may reuse state computed under the wrong policy. If generation is in flight while weights are updated, the sample may mix assumptions from two policy versions. Some frameworks update every rollout; async frameworks may update every few rollouts and then measure or correct policy staleness. That difference is not a cosmetic implementation choice. It changes how we interpret the data in the loss.</p>
+
+        <h4>The three large components</h4>
+
+        <p>Around the loop usually live three large components: a <strong>training engine</strong> that holds the optimizer and computes gradients; an <strong>inference engine</strong> that generates rollouts; and an <strong>orchestrator</strong> that places work across GPUs, starts remote actors, moves data, and decides when stages wait for each other. This is the useful "three pillars" view.</p>
+
+        <figure>
+          <img src="diagrams/02-three-pillars.svg" alt="Three pillars: training engine (Megatron, FSDP, DeepSpeed), inference engine (SGLang, vLLM, TRT-LLM), orchestrator (Ray, custom NCCL, torchrun).">
+          <figcaption><span class="fig-label">Figure 2.</span> A common decomposition: training engine, inference engine, and orchestrator. It is a useful reading map, but real frameworks also depend on data schemas, cache state, and weight-update protocols that cross these boundaries.</figcaption>
+        </figure>
+
+        <p>Miles and slime are close to the textbook version of this decomposition: Megatron-style training, SGLang rollout, and Ray orchestration. verl is similar at the level of roles, but its abstractions are different: the driver coordinates Ray worker groups and passes <code>DataProto</code> through rollout, reward, logprob computation, and actor update. OpenRLHF also uses Ray actors and vLLM synchronization. AReaL has rollout controllers and workflow APIs for more general environments. cosmos-rl adds reward services and non-text rollout schemas for video and embodied tasks. These systems rhyme, but they are not identical.</p>
+
+        <p>The main correction to the simple picture is that the interfaces are not magically stable. They are contracts that have to be maintained. A sample schema must preserve the fields the loss expects. A weight-sync protocol must keep caches consistent with weights. An orchestrator must know whether train and rollout are colocated, separated, or overlapped asynchronously. The modern stack is powerful because these pieces can be separated; it is fragile because the meaning of an RL update depends on the assumptions that cross the separation.</p>
+      </section>

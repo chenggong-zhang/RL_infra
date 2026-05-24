@@ -1,0 +1,70 @@
+
+
+      <section id="kernels">
+        <h2>The layer beneath: CUDA, Triton, and TileLang</h2>
+
+        <p>So far the survey has stayed at the framework level. But the throughput of all the primitives above depends on the speed of the underlying kernels — attention, GEMM, normalization, softmax. A 2× speedup on an attention kernel is a 2× speedup on rollout, which is 2× on the whole RL loop. Below PyTorch, there is a hierarchy of languages for writing GPU kernels. Theorists tend to underestimate how much of the field's progress lives at this layer.</p>
+
+        <h3>CUDA Python — the bottom of the stack</h3>
+
+        <p><a href="https://github.com/nvidia/cuda-python">NVIDIA/cuda-python</a> is the metapackage that exposes CUDA from Python. It has multiple subpackages: <code>cuda.bindings</code> (low-level bindings to the CUDA driver, runtime, NVRTC, NVVM), <code>cuda.core</code> (Pythonic access to CUDA Runtime and JIT compilation), <code>numba.cuda</code> (a SIMT DSL that compiles a restricted subset of Python to CUDA kernels), and newer DSLs <code>cuda.tile</code> (NumPy-like syntax for the CUDA Tile programming model) and <code>cuda.coop</code> (block-wide and warp-wide primitives). If you need to write a kernel from scratch in Python with full control, this is the layer.</p>
+
+        <p>The reason this exists, beyond pedagogy, is that PyTorch's abstractions occasionally aren't enough. When you need NVSHMEM for one-sided RDMA, or NVML for fine-grained device queries, or a custom reduction over a non-standard layout, you reach for <code>cuda.bindings</code>. For RL infra specifically, NCCL group management and CUDA IPC (Section ③) live here.</p>
+
+        <h3>Triton — the Python DSL that became universal</h3>
+
+        <p><a href="https://github.com/triton-lang/triton">Triton</a> is the Python DSL for writing GPU kernels that became the de facto standard the moment FlashAttention shipped in it. The pitch from the original <a href="http://www.eecs.harvard.edu/~htk/publication/2019-mapl-tillet-kung-cox.pdf">MAPL 2019 paper</a> is simple: write code that's higher-productivity than CUDA but more flexible than fixed-shape DSLs, with autotuning across block sizes. The compiler handles memory coalescing, shared-memory allocation, and tensor-core dispatch.</p>
+
+<a class="source-badge" href="https://github.com/triton-lang/triton/blob/main/python/tutorials/01-vector-add.py" target="_blank"><span class="file-path">python/tutorials/01-vector-add.py</span><span class="file-meta">· the canonical hello-world</span></a>
+<pre class="with-source"><code>@triton.jit
+def add_kernel(x_ptr,        # *Pointer* to first input vector.
+               y_ptr,        # *Pointer* to second input vector.
+               output_ptr,   # *Pointer* to output vector.
+               n_elements,
+               BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets &lt; n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    y = tl.load(y_ptr + offsets, mask=mask)
+    tl.add(x_ptr + offsets, y, mask=mask)</code></pre>
+
+        <p>What's worth noticing: the indexing is at the <em>block</em> level, not the <em>thread</em> level. <code>tl.arange(0, BLOCK_SIZE)</code> denotes a whole block of indices; <code>mask</code> handles out-of-bounds without manual loops. This is the "tiled" model — write block-wise math, the compiler vectorizes within the block. vLLM's PagedAttention, SGLang's attention kernels, the FlashAttention family, and most of the actually-fast layers in production frameworks are Triton kernels.</p>
+
+        <h3>TileLang — the new DSL with theorem-prover integration</h3>
+
+        <p><a href="https://github.com/tile-ai/tilelang">TileLang</a> (open-sourced Jan 2025) is a newer Python DSL on top of TVM. Its pitch is similar to Triton's — productivity above CUDA, flexibility above fixed DSLs — but the design choices differ. TileLang exposes more explicit memory tier control (shared, fragment, register) and integrates the <a href="https://github.com/Z3Prover/z3">Z3 theorem prover</a> into TVM's arith analyzer for SMT-based symbolic reasoning and automatic correctness verification. Backends include NVIDIA via CUTLASS CuTe DSL, AMD MI300X (with async copy), Apple Metal, Huawei AscendC, and WebGPU.</p>
+
+<a class="source-badge" href="https://github.com/tile-ai/tilelang/blob/main/examples/deepseek_mla/example_mla_decode.py" target="_blank"><span class="file-path">examples/deepseek_mla/example_mla_decode.py</span><span class="file-meta">· FlashMLA in ~80 lines</span></a>
+<pre class="with-source"><code>@tilelang.jit(out_idx=[4], pass_configs={...})
+def flashattn(batch, heads, kv_head_num, seqlen_kv, dim, pe_dim, ...):
+    @T.prim_func
+    def main_split(Q, Q_pe, KV, K_pe, Output):
+        with T.Kernel(batch, heads // min(block_H, kv_group_num), num_split, threads=256) as (bid, hid, bz):
+            Q_shared = T.alloc_shared([block_H, dim], dtype)
+            S_shared = T.alloc_shared([block_H, block_N], dtype)
+            KV_shared = T.alloc_shared([block_N, dim], dtype)
+            acc_s = T.alloc_fragment([block_H, block_N], accum_dtype)
+            acc_o = T.alloc_fragment([block_H, dim], accum_dtype)
+            scores_max = T.alloc_fragment([block_H], accum_dtype)
+            logsum = T.alloc_fragment([block_H], accum_dtype)
+            # ... ~50 lines of tiled FlashAttention math ...</code></pre>
+
+        <p>The TileLang authors claim performance parity with hand-written FlashMLA on H100 in 80 lines of Python. The Z3 integration is the unusual choice — it lets the compiler prove arithmetic invariants symbolically (e.g., that an index expression stays in bounds for all parameter values, that a tiling is a valid partition). For a mathematician, this is the most interesting compiler design move in the GPU DSL space.</p>
+
+        <h3>Which one to learn?</h3>
+
+        <p>If you only learn one, learn Triton — it's where the field's research code lives. If you care about correctness verification or AMD/Apple/Huawei portability, look at TileLang. Reach for raw <code>cuda.bindings</code> only when you need a CUDA capability the DSLs don't expose (NVSHMEM, certain NCCL primitives, CUDA IPC manipulation). The framework-level RL code (Section ③) lives entirely in pure PyTorch + cuda-python bindings; the inference engines underneath (SGLang, vLLM) are where Triton kernels do the heavy lifting.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — kernel DSLs</div>
+          <ul>
+            <li><a href="https://triton-lang.org/" target="_blank">triton-lang.org</a> — tutorials (vector add, fused softmax, matmul, FlashAttention)</li>
+            <li><a href="https://github.com/srush/Triton-Puzzles" target="_blank">srush/Triton-Puzzles</a> — Sasha Rush's puzzles, runnable without a GPU</li>
+            <li><a href="https://github.com/tile-ai/tilelang-puzzles" target="_blank">tile-ai/tilelang-puzzles</a> — 10 progressively harder puzzles for TileLang</li>
+            <li><a href="https://github.com/tile-ai/tilelang/tree/main/examples/deepseek_mla" target="_blank">tilelang/examples/deepseek_mla</a> — MLA decode reference implementation</li>
+            <li><a href="https://nvidia.github.io/cuda-python/cuda-core/latest/" target="_blank">cuda.core docs</a> · <a href="https://docs.nvidia.com/cuda/cutile-python/" target="_blank">cuda.tile docs</a></li>
+          </ul>
+        </div>
+      </section>

@@ -1,0 +1,29 @@
+
+
+      <section id="pitfalls">
+        <h2>Pitfalls — 踩坑录, lessons paid in pain</h2>
+
+        <p>Chenyang's tutorial catalogs the production failure modes the field has paid years of debugging on. Six are worth knowing for anyone trying to interpret RL results:</p>
+
+        <h4>1. Training-inference numerical drift</h4>
+        <p>Inference kernels fuse operations to maximize throughput; the fusion depends on batch shape. Same model, same input, different batch size = slightly different logits. Invisible at the token level, fatal at the logprob level. <em>Never trust inference-engine logprobs for loss computation.</em></p>
+
+        <h4>2. Handle-tuple deserialization segfaults</h4>
+        <p>verl's <code>update_weights_from_tensor</code> requires <code>monkey_patch_torch_reductions()</code> to register CUDA IPC handle deserializers. Missing this call: silent segfault, intermittent.</p>
+
+        <h4>3. NCCL hangs under mixed inference backends</h4>
+        <p>OpenRLHF + SGLang integration: silent deadlocks, no error, the run just stalls. Mixing distributed backends (DeepSpeed + Ray + SGLang's own dist) creates fragile NCCL group management.</p>
+
+        <h4>4. Memory choreography under colocate</h4>
+        <p>Megatron's CPU offload is imperfect — KV cache and model parameters contend for the same address ranges. slime's bucket-based weight update exists specifically to avoid OOM on large MoE models. <em>Test the memory hand-off at full scale early.</em></p>
+
+        <h4>5. Off-policy ratio drift</h4>
+        <p>Without explicit IS correction or operational staleness bounds, the off-policy ratio grows monotonically until the policy is training on data from a fundamentally different policy. <em>Training curve looks fine. Eval curve mysteriously degrades.</em> Monitor off-policy ratio as a first-class metric.</p>
+
+        <h4>6. Mixing precisions across train and infer</h4>
+        <p>BF16 training + FP8 inference + FP32 optimizer state = three numerical regimes interacting via weight sync. MoE routing diverges between regimes (the problem R3 solves). <em>If you can't make precision uniform, instrument routing decisions per-expert. The bug is invisible at the loss level.</em></p>
+
+        <aside class="note">
+          <strong>The common thread.</strong> Each pitfall produces results that look fine on the loss curve and fail silently on the policy. For a theorist this is the worst possible class of bug — the empirical signal you'd normally trust to validate a theorem is the exact signal these bugs leave intact. The discipline this demands — instrumenting routing, monitoring staleness, recomputing logprobs on the training engine — is what separates production RL from research toys.
+        </aside>
+      </section>

@@ -1,0 +1,104 @@
+
+
+      <section id="sglang-internals">
+        <h2>Engineering case study — SGLang, the inference substrate</h2>
+
+        <p>Every framework above (verl, slime, Miles) treats <a href="https://github.com/sgl-project/sglang">SGLang</a> as a black box: feed it prompts, get back tokens; push new weights, expect the next sample to use them. This case study opens the box. The point is to make every interaction the trainer has with SGLang legible — what API it calls, what invariant that API guarantees, and what bug appears when the invariant breaks. Once those are clear, the SGLang ↔ Megatron interface section of any RL framework reads as the small, declarative shim it actually is, rather than as opaque glue.</p>
+
+        <figure>
+          <img src="diagrams/10-sglang-internals.svg" alt="SGLang internals from the RL training perspective. Top: trainer issues five control commands (generate, update_weights_from_*, release/resume_memory_occupation, pause/continue, flush_cache). Middle: Scheduler with SchedulePolicy mixin and RadixCache + MemoryPool mixin; TpModelWorker bridge; ModelRunner with RoutedExpertsCapturer. Bottom: four output streams (tokens, logprobs, routed_experts, finish_reason) and six engineering invariants.">
+          <figcaption><span class="fig-label">Figure 11.</span> SGLang internals viewed from the trainer's seat. Top: the five control commands the trainer sends down. Middle: the Scheduler and ModelRunner stack. Bottom: the four output streams that flow back up, plus the six invariants the engine guarantees.</figcaption>
+        </figure>
+
+        <h3>The two-way contract</h3>
+
+        <p>From the trainer's perspective, SGLang exposes a <em>small</em> control-plane API and a <em>large</em> data-plane behavior. The control plane is the easy part to read; the data plane is where the engineering lives. The control commands the trainer issues, in approximately the order an RL step uses them:</p>
+
+        <ul>
+          <li><strong><code>generate(prompts, sampling_params)</code></strong> — the rollout call. Returns a stream of <code>(token_id, logprob, finish_reason)</code> per sample. The sampling params include <code>temperature</code>, <code>top_p</code>, <code>top_k</code>, <code>max_new_tokens</code>, and crucially a <code>return_logprob</code> flag.</li>
+          <li><strong><code>update_weights_from_*</code></strong> — one of four flavors: <code>_disk</code>, <code>_distributed</code>, <code>_tensor</code>, <code>_ipc</code>. <a href="#four-paths">Primitive ④</a> covered the four paths. The trainer picks one based on whether the engine shares GPUs (IPC), shares an NCCL group (distributed), shares a filesystem (disk), or shares neither (tensor over HTTP).</li>
+          <li><strong><code>release_memory_occupation()</code></strong> — tells the engine to free its KV cache and weight buffers <em>before</em> the trainer's backward pass needs the GPU. The engine asserts <code>is_fully_idle()</code> first: no in-flight generations, no pending requests. If the assert fails, the framework above hangs intentionally — better hang than corrupt.</li>
+          <li><strong><code>resume_memory_occupation()</code></strong> — the symmetric reclaim. Re-allocates the KV pool and (if weights were also released) re-uploads them via the appropriate <code>update_weights_from_*</code> path.</li>
+          <li><strong><code>pause_scheduler()</code> / <code>continue_scheduler()</code></strong> — soft-stop the scheduler without freeing memory. Cheaper than release/resume; used when the pause is brief (waiting for a sync barrier) and the cost of re-uploading weights would dominate.</li>
+          <li><strong><code>flush_cache()</code></strong> — invalidate the RadixCache after a weight update. New weights, new logprobs, so old KV entries are stale. The flush is the boundary between two policy versions.</li>
+        </ul>
+
+        <p>The data plane is what flows back up: <code>tokens</code> and their <code>logprobs</code> per sample (used as π<sub>old</sub> in the loss, never as π<sub>θ</sub>), <code>finish_reason</code> per sample (length cap, EOS, stop string), and — for MoE rollouts — <code>routed_experts</code> per token (the R3 record that lets the trainer replay routing).</p>
+
+        <h3>Scheduler — the central state machine</h3>
+
+        <p>SGLang's <code>Scheduler</code> is the loop that decides, every tick, which requests get tokens this step. It has two mixin behaviors that together implement everything interesting:</p>
+
+        <ul>
+          <li><strong><code>SchedulePolicy</code></strong> — picks which requests advance. The default is <strong>LPM (Longest Prefix Match)</strong>, which prefers requests whose prefixes are already cached. In an RL setting with group sampling (G samples per prompt), LPM is what makes the G samples share the prompt's KV automatically. There is also <strong>in-batch prefix caching</strong>: within one decode batch, requests that share a prefix with a request being processed <em>this tick</em> reuse the same KV blocks without going through the cache lookup. The two work together: LPM at request admission, in-batch at the tick level.</li>
+          <li><strong><code>RadixCache + MemoryPool</code></strong> — owns the KV cache as a radix tree (<a href="#radix-grpo">Primitive ⑤</a>) and the underlying physical block pool. The radix tree has <code>inc_lock_ref(node)</code> / <code>dec_lock_ref(node)</code> primitives — the lock ref is what prevents an in-use prefix from being evicted under cache pressure. Without it, a long-running rollout could lose its prefix in the middle of generation. With it, the prefix is pinned for the rollout's lifetime and unpinned on completion.</li>
+        </ul>
+
+        <p>The radix cache also has a <strong>namespace</strong> mechanism — the <code>extra_key</code> field on each prefix tree node. For multi-tenant RL (multiple training runs sharing one SGLang cluster), <code>extra_key</code> separates each run's tree, preventing cross-tenant prefix collisions. Within one RL run, <code>extra_key</code> can encode the policy version, which makes the <code>flush_cache</code> on weight update a pure namespace-rotation rather than a full eviction.</p>
+
+        <h3>TpModelWorker — the parallel bridge</h3>
+
+        <p>Between the single-threaded Scheduler and the TP-sharded GPU work sits <code>TpModelWorker</code>. It is the dispatch boundary: requests selected by the Scheduler are scattered to TP ranks; per-rank outputs are gathered back. The bridge owns the all-reduce barriers, the NCCL groups, and the lock-step invariant that all TP ranks see the same sequence of requests in the same order. A TP rank that drifts (e.g., because a kernel returned slightly different timings) causes the next all-reduce to hang. The Scheduler's strict ordering is what prevents this.</p>
+
+        <p>For RL, the TpModelWorker is also the layer where <code>update_weights_from_distributed</code> hooks in. The trainer's parameter stream arrives as NCCL all-gather operations across the cross-process group that spans trainer ranks and engine ranks. <code>TpModelWorker</code> consumes each parameter bucket as it arrives, writes it into the model's local shard, and proceeds. The bucket size is tuned so that NCCL overlap hides the all-gather latency behind the previous bucket's write.</p>
+
+        <h3>ModelRunner and RoutedExpertsCapturer</h3>
+
+        <p><code>ModelRunner</code> owns the actual forward pass: it allocates KV blocks, runs the attention kernel, runs the FFN (or the MoE routing + experts), and emits logits. For MoE models, <code>ModelRunner</code> embeds a <strong><code>RoutedExpertsCapturer</code></strong> — a small hook that records, per token, which top-k experts the gating selected. This record is the R3 ingredient. Without the capturer in the inference path, R3 cannot replay; the trainer would have to re-run routing in its own precision, which is exactly the precision-divergence problem Miles introduced R3 to solve.</p>
+
+        <p>The capturer is off by default (it has memory and bandwidth cost) and turned on by the framework above via a config flag when MoE-RL with low-precision inference is the workload. The capture format is a compact <code>(token_idx, expert_ids[k])</code> stream that the trainer reads alongside <code>(token, logprob)</code>.</p>
+
+        <h3>Sleep mode — the memory-choreography hookpoint</h3>
+
+        <p>SGLang's <em>sleep mode</em> is the engine's side of the hybrid-engine handshake. Three sleep levels, in increasing aggression:</p>
+
+        <ul>
+          <li><strong>Level 0</strong>: only the KV pool is dropped. The model weights and the CUDA graphs stay in VRAM. Recovery is fastest (just re-allocate the KV pool) but the freed memory is modest (KV is usually 20-40% of total).</li>
+          <li><strong>Level 1</strong>: KV pool + weights. The model itself leaves VRAM, offloaded to pinned host memory. Recovery requires re-uploading weights — but if the trainer is going to push <em>new</em> weights anyway after backward, this is essentially free. The frees are large (most of the engine's VRAM).</li>
+          <li><strong>Level 2</strong>: KV pool + weights + CUDA graphs. Even the captured CUDA graphs (which encode kernel launch sequences) are dropped. Recovery is slowest (re-trace + re-capture, hundreds of milliseconds) but the frees are maximal. Used when the trainer needs every byte it can get during backward.</li>
+        </ul>
+
+        <p>The <code>release_memory_occupation()</code> command takes a level argument and the framework above picks based on its backward-pass memory profile. verl's <code>sleep_level=1</code> default is the right choice for most setups; <code>sleep_level=2</code> is only worth it for models that wouldn't otherwise fit.</p>
+
+        <h3>The four <code>update_weights_from_*</code> paths from SGLang's side</h3>
+
+        <p><a href="#four-paths">Primitive ④</a> covered these from the trainer's perspective. From SGLang's side, each path becomes a method on the engine with different memory-and-latency tradeoffs:</p>
+
+        <table>
+          <thead><tr><th>Path</th><th>What SGLang does</th><th>Latency</th><th>Memory overhead</th></tr></thead>
+          <tbody>
+            <tr><td><code>_disk</code></td><td>Read each shard from a shared filesystem; load into the local model.</td><td>Slowest (seconds-to-minutes)</td><td>Low (streaming)</td></tr>
+            <tr><td><code>_distributed</code></td><td>Receive each parameter bucket via NCCL all-gather; write into local shard.</td><td>Fast (ms-to-sec)</td><td>Bucket-sized buffer</td></tr>
+            <tr><td><code>_tensor</code></td><td>Receive each parameter over HTTP / gRPC; write into local shard.</td><td>Slow (network-bound)</td><td>Per-tensor buffer</td></tr>
+            <tr><td><code>_ipc</code></td><td>Map the trainer's CUDA tensor by IPC handle; copy device-to-device.</td><td>Fastest (μs-to-ms)</td><td>Zero-copy if same-rank</td></tr>
+          </tbody>
+        </table>
+
+        <p>The <em>same verb</em> "update weights" has four implementations differing only in transport. This is the canonical example of <a href="#patterns">pattern 1, the functor</a>: one operation lifted across four topologies.</p>
+
+        <h3>Six engineering invariants SGLang enforces</h3>
+
+        <ol>
+          <li><strong>Idle-before-release</strong> — <code>release_memory_occupation()</code> asserts <code>is_fully_idle()</code> before freeing. No in-flight generations.</li>
+          <li><strong>Lock-ref for in-use prefixes</strong> — every active rollout pins its prefix with <code>inc_lock_ref</code>; the radix tree's evictor skips locked nodes.</li>
+          <li><strong>TP lock-step</strong> — all TP ranks see the same request stream in the same order, or NCCL hangs by design.</li>
+          <li><strong>Flush on weight update</strong> — every <code>update_weights_from_*</code> is followed by <code>flush_cache()</code>; new weights ≠ old KV.</li>
+          <li><strong>RoutedExpertsCapturer for MoE-RL</strong> — when MoE inference runs in low precision, the routed-expert record must be emitted, or R3 has nothing to replay.</li>
+          <li><strong>Logprob is engine logprob, not trainer logprob</strong> — the data plane returns the engine's logprob as π<sub>old</sub>. The trainer's recompute is the one that goes into the loss as π<sub>θ</sub>.</li>
+        </ol>
+
+        <h3>What's interesting about SGLang as a case study</h3>
+
+        <p>SGLang's design choice is to <em>be the inference engine that knows it's being driven by a trainer</em>. vLLM, by contrast, was designed first as a serving engine and then bolted RL hooks onto an existing scheduler. The two engines have converged in their RL surface (both expose <code>sleep</code>, <code>wake</code>, <code>update_weights</code>, <code>reset_prefix_cache</code>), but the internals diverge: SGLang's radix tree vs vLLM's block-hash map, SGLang's mixin Scheduler vs vLLM's EngineCore. The next case study walks through vLLM's choices.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — SGLang internals</div>
+          <ul>
+            <li><a href="https://github.com/sgl-project/sglang" target="_blank">sgl-project/sglang</a> — repo root</li>
+            <li><a href="https://github.com/sgl-project/sglang/tree/main/python/sglang/srt/managers" target="_blank"><code>srt/managers/</code></a> — Scheduler, SchedulePolicy, MemoryPool</li>
+            <li><a href="https://github.com/sgl-project/sglang/tree/main/python/sglang/srt/mem_cache" target="_blank"><code>srt/mem_cache/</code></a> — RadixCache and the lock-ref primitives</li>
+            <li><a href="https://github.com/sgl-project/sglang/tree/main/python/sglang/srt/model_executor" target="_blank"><code>srt/model_executor/</code></a> — ModelRunner and the RoutedExpertsCapturer hook</li>
+            <li><a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial" target="_blank">Awesome-ML-SYS-Tutorial</a> — the canonical RL-side reference for SGLang internals</li>
+          </ul>
+        </div>
+      </section>

@@ -1,0 +1,28 @@
+
+
+      <section id="scaling">
+        <h2>The scaling chain</h2>
+
+        <p>The architecture is elegant because each primitive is designed to address the bottleneck that appears at the <em>next</em> scale tier. Walking up the chain:</p>
+
+        <figure>
+          <img src="diagrams/06-scaling-chain.svg" alt="Six tiers from 8 GPUs to 10K+, each with what breaks (red), what dominates cost (gray), and what primitive saves you (green).">
+          <figcaption><span class="fig-label">Figure 6.</span> The scaling chain. Each primitive is critical at one tier and effectively free at smaller ones.</figcaption>
+        </figure>
+
+        <table>
+          <thead>
+            <tr><th>Tier</th><th>What breaks first</th><th>What saves you</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><strong>~8 GPUs</strong> (single node)</td><td>KV + train state collide → OOM</td><td><code>release_memory_occupation</code> + colocate</td></tr>
+            <tr><td><strong>~64 GPUs</strong> (small cluster)</td><td>GRPO group prefills duplicate work</td><td>RadixAttention prefix cache</td></tr>
+            <tr><td><strong>~256 GPUs</strong> (medium)</td><td>Naïve param copy = 50ms × thousands of tensors</td><td>Handle-tuple zero-copy via CUDA IPC + ZMQ</td></tr>
+            <tr><td><strong>~1024 GPUs</strong> (large)</td><td>Long-tail rollouts — 90% GPUs idle 18s/iter</td><td>Partial rollout + TIS/MIS staleness corrections</td></tr>
+            <tr><td><strong>~4096 GPUs</strong> (frontier)</td><td>Single-controller becomes CPU bottleneck</td><td>SPMD multi-controller; M2Flow dynamic scheduling</td></tr>
+            <tr><td><strong>~10000+ GPUs</strong></td><td>NCCL groups can't be resized</td><td>RDMA point-to-point + disaggregated rollout pools</td></tr>
+          </tbody>
+        </table>
+
+        <p>The meta-property is that each primitive is a <em>local</em> optimization. You don't pay for RDMA until you need elasticity. You don't pay for partial rollout until tail latency dominates. The stack is "pay for what you need," which is what makes it scale — the opposite design (monolithic optimization tuned to one tier) wins at that tier and dies at the next.</p>
+      </section>

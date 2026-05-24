@@ -1,0 +1,49 @@
+
+
+      <section id="four-paths">
+        <h3>④ Four <code>update_weights_from_*</code> paths, one verb</h3>
+
+        <p>The trainer might hold the new weights in any of four physical configurations: same process as the inference engine, on a shared disk, on remote NCCL ranks, or in a sibling CUDA-IPC process. SGLang exposes four implementations behind one verb. The framework above writes <code>engine.update_weights_from_*(...)</code>; the topology underneath dictates which method.</p>
+
+        <figure>
+          <img src="diagrams/04-weight-update-paths.svg" alt="The four update_weights paths: from_tensor (same process, via ZMQ), from_disk (checkpoint on shared FS), from_distributed (NCCL broadcast across ranks), from_ipc (CUDA IPC same host, different processes).">
+          <figcaption><span class="fig-label">Figure 4.</span> One verb, four transports. Each maps to a real deployment topology.</figcaption>
+        </figure>
+
+        <p>The pattern is functor-like: the same operation lifted to different categories of topology. What matters mathematically is that all four methods share <code>flush_cache_after_weight_update</code>. The RadixCache (next subsection) must be invalidated because old prefix entries reference the old policy — keeping them would mean the inference engine is serving generations based on a model that no longer exists. Cache invalidation is the inherent consistency obligation; the four transports differ in how they get the bytes to the inference engine, but they all owe the same invariant downstream.</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/scheduler_update_weights_mixin.py" target="_blank"><span class="file-path">python/sglang/srt/managers/scheduler_update_weights_mixin.py</span><span class="file-meta">· four transports, one verb</span></a>
+<pre class="with-source"><code>class SchedulerUpdateWeightsMixin:
+    def update_weights_from_disk(self, recv_req):
+        success, message = self.tp_worker.update_weights_from_disk(recv_req)
+        if success and self.draft_worker is not None:
+            success, message = self.draft_worker.update_weights_from_disk(recv_req)
+        if success:
+            self.flush_cache_after_weight_update(recv_req)
+        return UpdateWeightFromDiskReqOutput(success, message, 0)
+
+    def update_weights_from_distributed(self, recv_req):
+        success, message = self.tp_worker.update_weights_from_distributed(recv_req)
+        if success:
+            self.flush_cache_after_weight_update(recv_req)
+        return UpdateWeightsFromDistributedReqOutput(success, message)
+
+    def update_weights_from_tensor(self, recv_req):
+        worker = self.draft_worker or self.tp_worker
+        success, message = worker.update_weights_from_tensor(recv_req)
+        if success:
+            self.flush_cache_after_weight_update(recv_req)
+        torch.distributed.barrier(group=self.tp_cpu_group)
+        return UpdateWeightsFromTensorReqOutput(success, message)
+
+    def update_weights_from_ipc(self, recv_req):
+        success, message = self.tp_worker.update_weights_from_ipc(recv_req)
+        if success and self.draft_worker is not None:
+            success, message = self.draft_worker.update_weights_from_ipc(recv_req)
+        if success:
+            self.flush_cache_after_weight_update(recv_req)
+        torch.distributed.barrier(group=self.tp_cpu_group)
+        return UpdateWeightsFromIPCReqOutput(success, message)</code></pre>
+
+        <p>An underrated systems constraint that this verb hides: NCCL process groups are static. Their participant set is fixed at creation; adding a new inference node mid-training means destroying and recreating the group. RDMA's point-to-point model treats each connection independently — a new peer establishes a fresh Queue Pair without disturbing existing links. This single fact explains why colocated frameworks lean on NCCL (via <code>init_weights_update_group</code>) while disaggregated systems prefer RDMA or shared disk. <strong>Elasticity is incompatible with NCCL.</strong></p>
+      </section>

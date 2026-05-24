@@ -1,0 +1,40 @@
+
+
+      <section id="memory">
+        <h3>② Memory choreography</h3>
+
+        <p>The hybrid engine works because two functions encode the entire concurrency contract: <code>release_memory_occupation</code> and <code>resume_memory_occupation</code>. They pause the inference engine, hand the GPU to the trainer, then restore it. The implementation is granular — three independent memory pools (KV cache, weights, CUDA graphs) can be released independently.</p>
+
+        <figure>
+          <img src="diagrams/03-hybrid-engine-timeline.svg" alt="Timeline of memory ownership swapping between inference and training across T=0 to T=5, with release_memory_occupation and resume_memory_occupation marking the transitions.">
+          <figcaption><span class="fig-label">Figure 3.</span> One GPU, two roles. Two function calls encode the contract — no locks, no races, no torn reads.</figcaption>
+        </figure>
+
+        <p>Here's the actual implementation in SGLang. The mathematical interest is in the <code>assert is_fully_idle()</code> at the top: the function literally cannot run if any request is in flight. The concurrency contract is checked structurally, not by convention. Each <code>if tag in tags</code> branch is a separate pool with its own pause semantics — granularity is the point.</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/scheduler_update_weights_mixin.py" target="_blank"><span class="file-path">python/sglang/srt/managers/scheduler_update_weights_mixin.py</span><span class="file-meta">· tag-based memory pause</span></a>
+<pre class="with-source"><code>def release_memory_occupation(self, recv_req):
+    assert self.is_fully_idle(), \
+        "release_memory_occupation should be called only when server is idle."
+
+    tags = recv_req.tags or GPU_MEMORY_ALL_TYPES
+    for tag in tags:
+        self.offload_tags.add(tag)
+
+    if GPU_MEMORY_TYPE_KV_CACHE in tags:
+        self.memory_saver_adapter.pause(GPU_MEMORY_TYPE_KV_CACHE)
+        self.flush_cache()
+
+    if GPU_MEMORY_TYPE_WEIGHTS in tags:
+        self.stashed_model_static_state = _export_static_state(
+            self.tp_worker.model_runner.model
+        )
+        torch.distributed.barrier(self.tp_cpu_group)
+        self.memory_saver_adapter.pause(GPU_MEMORY_TYPE_WEIGHTS)
+
+    if GPU_MEMORY_TYPE_CUDA_GRAPH in tags:
+        self.memory_saver_adapter.pause(GPU_MEMORY_TYPE_CUDA_GRAPH)
+
+    torch.get_device_module().synchronize()
+    return ReleaseMemoryOccupationReqOutput()</code></pre>
+      </section>
