@@ -12,7 +12,7 @@
 
         <p>Before reading the code names below, it helps to know what each file represents. In <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/train.py#L67-L98">Miles <code>train.py</code></a>, you are looking at the top-level driver loop: the file that says when rollout happens, when training happens, and when weights are updated. In <a href="https://github.com/verl-project/verl/blob/7dc39fec1c37da4098b50e68840e78906b69f16a/verl/protocol.py#L318-L328">verl <code>protocol.py</code></a>, you are looking at the data envelope that carries tensors, non-tensor metadata, and metrics between workers. In <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/miles/utils/types.py#L10-L29">Miles <code>Sample</code></a> and <a href="https://github.com/THUDM/slime/blob/6961f5970e9dbb4716a10ba4a54a28fa3876d274/slime/utils/types.py#L9-L27">slime <code>Sample</code></a>, you are looking at the schema of one rollout example. In <a href="https://github.com/sgl-project/sglang/blob/cadfa2d025d3e251352a115291621c8214c733e5/python/sglang/srt/entrypoints/EngineBase.py#L7-L52">SGLang <code>EngineBase</code></a>, you are looking at the control API of the inference engine: generate, flush cache, and update weights.</p>
 
-        <h4>Stage 1: generate samples</h4>
+        <h4 id="stage-generate">Stage 1: generate samples</h4>
 
         <p>For Stage 1, I will use one example and follow it carefully: <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/train.py#L67-L98">Miles <code>train.py</code></a>. This file is the top-level driver. It does not define the model architecture, the reward function, or the loss. Its job is to decide when distributed components run. The relevant loop says exactly three things: ask the rollout side to generate data, train on the returned data, then update the rollout weights.</p>
 
@@ -206,7 +206,7 @@ def _init_normal(self, server_args_dict):
 
         <p>This Miles example gives us a pattern to recognize elsewhere: generation is a boundary between the training controller and a rollout/inference subsystem. Different frameworks draw that boundary with different abstractions. In verl, the boundary is less visible from one short driver loop because the control flow is wrapped in Ray worker groups, and the data moving across roles is packaged as <code>DataProto</code>. The underlying question is the same: which worker generated the responses, what metadata traveled with them, and how were they returned to the trainer? SGLang and vLLM sit one level lower. They usually do not define the RL algorithm or the reward pipeline; they provide the fast inference engine that an RL framework calls when it needs samples. Miles is a good first example because all three layers are easy to separate: the training driver asks for rollout, the rollout manager owns the inference engines, and the generated samples are converted into training data before the loss sees them.</p>
 
-        <h4>Stage 2: score the outputs</h4>
+        <h4 id="stage-score">Stage 2: score the outputs</h4>
 
         <p>After generation, many RL training pipelines need to attach a training signal to the generated responses. Sometimes that signal comes from a learned reward model, sometimes from a hand-written scoring function in Python, sometimes from a verifier, and sometimes from an external service. This section is not about which reward is philosophically or statistically best. It is about a more infrastructural question: once a score exists, where is it stored, and how does the trainer know which response, mask, prompt, and metadata that score belongs to?</p>
 
@@ -423,34 +423,623 @@ def _convert_samples_to_train_data(self, samples: list[Sample] | list[list[Sampl
 
         <p>The comparison gives us a clean reading rule. In verl, the batch object is the main contract: generation adds response fields, reward adds <code>rm_scores</code>, and later training reads from the same <code>DataProto</code>. In slime and Miles, the sample object is the first contract: each <code>Sample</code> carries its own reward and alignment fields, and slime's <code>_convert_samples_to_train_data</code> shows how those per-sample fields become training arrays such as <code>tokens</code>, <code>rewards</code>, <code>loss_masks</code>, and <code>rollout_log_probs</code>. The shared principle is not that every framework uses the same container. The shared principle is that reward only becomes useful for training after it is kept aligned with the response tokens and the fields that say how those tokens should be interpreted.</p>
 
-        <h4>Stage 3: filter, mask, or select what counts</h4>
+        <h4 id="stage-filter">Stage 3: filter, mask, or select what counts</h4>
 
-        <p>The word "filter" should be read broadly. Some systems really do drop samples. Others keep the sample but mask out tokens, truncate long completions, mark invalid turns, or compute advantages so that some responses matter more than others. This is why the diagram says "filter," but the text should not imply that every framework has a separate filtering module.</p>
+        <p>The word "filter" should be read broadly. Sometimes a framework really deletes samples. More often, it keeps the row and changes which tokens are allowed to count. A tool observation may be kept as context but excluded from the policy loss, or an invalid response may remain in the batch with a zero mask. This stage is where "the model generated text" becomes a more precise training object: generated tokens plus a rule for which response-side positions may affect the update.</p>
 
-        <p>The concrete code often shows up as masks and per-token fields. In Miles and slime, <code>loss_mask</code> records which response tokens should enter the loss; Miles also checks that <code>loss_mask</code> and <code>rollout_log_probs</code> have the expected response length in its <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/miles/utils/types.py#L149-L172"><code>Sample</code> validation logic</a>. In verl, the batch carries attention masks and response masks, then later gains old logprobs, reference logprobs, values, advantages, and returns. For a theorist, this stage is where a surface phrase like "we train on generated completions" becomes precise: which generated tokens, under which mask, with which logprob, and with which reward?</p>
+        <p>We use Miles as the main example because the mask is visible before the tensorized training step. It appears on the generated <code>Sample</code>, is converted into <code>train_data["loss_masks"]</code>, and later becomes a full training-tensor mask in Stage 4. That gives us a readable path from "this response token should count" to the response-side mask that the trainer will consume.</p>
 
-        <h4>Stage 4: train the policy</h4>
+        <p>The first invariant is local to one generated sample. In <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/miles/utils/types.py#L149-L172">Miles' <code>Sample</code> validation logic</a>, the loss mask and rollout logprobs must have the same length as the response. This check protects a simple alignment assumption: every response-token position can be matched with a mask value and, when available, the rollout logprob produced by the rollout policy.</p>
 
-        <p>Training is the part that looks most familiar from the outside: compute logprobs, compute a PPO/GRPO-like loss, take optimizer steps. The infrastructure detail is that the trainer is usually not consuming raw text. It consumes the structured object produced by the earlier stages. In Miles, the driver passes <code>rollout_data_ref</code> from generation directly into <code>actor_model.train</code>. In verl, the <a href="https://github.com/verl-project/verl/blob/7dc39fec1c37da4098b50e68840e78906b69f16a/verl/trainer/ppo/ray_trainer.py#L1206-L1281">trainer helper methods</a> compute old logprobs, reference logprobs, values, and actor updates on a <code>DataProto</code> batch. Megatron-LM's native RL path is lower-level: it exposes GRPO-style loss and sequence-packing utilities closer to the tensor computation.</p>
+        <pre><code class="language-python"># Miles: miles/utils/types.py
+@property
+def effective_response_length(self):
+    return <span class="code-hl">sum(self.loss_mask)</span> if self.loss_mask is not None else self.response_length
 
-        <p>The commonality is that training needs the same semantic ingredients: prompts, responses, masks, rewards, old policy logprobs, and sometimes reference policy logprobs or routing metadata. The difference is where the framework chooses to hide that complexity. verl hides much of it behind <code>DataProto</code> and Ray worker groups. Miles and slime make the sample fields more explicit. Megatron-LM exposes more of the tensor-level training machinery.</p>
+def validate(self):
+    assert self.response_length &gt;= 0
+    assert len(self.tokens) &gt;= self.response_length
+    if self.loss_mask is not None:
+        assert (
+            <span class="code-hl">len(self.loss_mask) == self.response_length</span>
+        ), f"loss_mask length ({len(self.loss_mask)}) != response_length ({self.response_length})"
+    if self.rollout_log_probs is not None:
+        assert (
+            <span class="code-hl">len(self.rollout_log_probs) == self.response_length</span>
+        ), f"rollout_log_probs length ({len(self.rollout_log_probs)}) != response_length ({self.response_length})"</code></pre>
 
-        <h4>Stage 5: sync the new policy back to rollout</h4>
+        <p>This code gives <code>loss_mask</code> a precise meaning. It is not a yes/no annotation on the whole sample; it is a per-response-token vector. If the response has 300 token positions, the mask must have 300 entries. The property <code>effective_response_length</code> shows the consequence: a response may have a long decoded length, but only the masked-in positions count as effective training tokens.</p>
 
-        <p>After training, the rollout engine is stale. If generation continues using old weights, the next batch was not produced by the current policy. Updating rollout weights is therefore not just copying tensors; it is a consistency protocol. The easiest concrete example is slime's <a href="https://github.com/THUDM/slime/blob/6961f5970e9dbb4716a10ba4a54a28fa3876d274/slime/backends/megatron_utils/update_weight/update_weight_from_distributed.py#L90-L148">distributed weight update path</a>. This file is not the training loss; it is the bridge from the training model to the rollout engines. It pauses generation, flushes the rollout engine cache, transfers non-expert and expert weights, optionally handles quantization post-processing, and then resumes generation. Miles has the same family of mechanisms, including async and P2P transfer paths.</p>
+        <p>The next step happens when rollout samples are converted into train data. In <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/miles/ray/rollout.py#L685-L707"><code>_convert_samples_to_train_data</code></a>, Miles expresses exclusion through the mask. If a sample has no mask, it creates the default all-one response mask. If a sample is marked <code>remove_sample</code>, it keeps the sample in the data structure but sets all response-token mask entries to zero:</p>
 
-        <p>SGLang exposes why this protocol exists. Its <a href="https://github.com/sgl-project/sglang/blob/cadfa2d025d3e251352a115291621c8214c733e5/python/sglang/srt/entrypoints/EngineBase.py#L7-L52">engine interface</a> puts <code>generate</code>, <code>flush_cache</code>, and <code>update_weights_from_tensor</code> in the same control surface. Those methods belong together. If weights change but old prefix/KV cache entries survive, the engine may reuse state computed under the wrong policy. If generation is in flight while weights are updated, the sample may mix assumptions from two policy versions. Some frameworks update every rollout; async frameworks may update every few rollouts and then measure or correct policy staleness. That difference is not a cosmetic implementation choice. It changes how we interpret the data in the loss.</p>
+        <pre><code class="language-python"># Miles: miles/ray/rollout.py
+train_data = {
+    "rewards": rewards,
+    "raw_reward": raw_rewards,
+    "truncated": [1 if sample.status == Sample.Status.TRUNCATED else 0 for sample in samples],
+    "sample_indices": [sample.index for sample in samples],
+}
 
-        <h4>The three large components</h4>
+loss_masks = []
+for sample in samples:
+    if sample.loss_mask is None:
+        sample.loss_mask = <span class="code-hl">[1] * sample.response_length</span>
 
-        <p>Around the loop usually live three large components: a <strong>training engine</strong> that holds the optimizer and computes gradients; an <strong>inference engine</strong> that generates rollouts; and an <strong>orchestrator</strong> that places work across GPUs, starts remote actors, moves data, and decides when stages wait for each other. This is the useful "three pillars" view.</p>
+    assert (
+        <span class="code-hl">len(sample.loss_mask) == sample.response_length</span>
+    ), f"loss mask length {len(sample.loss_mask)} != response length {sample.response_length}"
+    if sample.remove_sample:
+        sample.loss_mask = <span class="code-hl">[0] * sample.response_length</span>
+    loss_masks.append(sample.loss_mask)
+train_data[<span class="code-hl">"loss_masks"</span>] = loss_masks</code></pre>
+
+        <p>This is why "filter" is not always literal deletion. Here <code>remove_sample</code> means "keep the row, but make its response tokens invisible to the loss." The row can still carry bookkeeping fields such as reward, truncation status, and sample index, while the response-token mask becomes all zeros. That preserves batch alignment while preventing the response from contributing policy-gradient tokens.</p>
+
+        <p>The examples above are easiest to read as <em>single-turn</em>: one prompt in, one response out, and the whole response is the model's own output. <em>Multi-turn</em> setups are more delicate. A trajectory may go back and forth over several rounds, often with tool calls in between, and the whole conversation may be stored as one training sample. The model must condition on the whole trajectory, but only the assistant's own generated tokens are policy actions:</p>
+
+        <table>
+          <thead>
+            <tr><th>Turn</th><th>Example content</th><th>In the loss?</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>system</td><td>"You are an assistant with a calculator."</td><td>no — context</td></tr>
+            <tr><td>user</td><td>"What is 23 &times; 47?"</td><td>no — context</td></tr>
+            <tr><td>assistant</td><td>"Let me compute. <code>multiply(23, 47)</code>"</td><td><strong>yes</strong> — model's output</td></tr>
+            <tr><td>tool</td><td>"1081"</td><td>no — context</td></tr>
+            <tr><td>assistant</td><td>"The answer is 1081."</td><td><strong>yes</strong> — model's output</td></tr>
+          </tbody>
+        </table>
+
+        <p>The table leaves out one implementation detail: chat templates add fixed assistant-template tokens around each turn, and those tokens also need mask values. Miles' <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/miles/utils/mask_utils.py#L48-L76"><code>gen_multi_turn_loss_mask_qwen</code></a> handles this by building one token sequence and one loss mask together. The sequence contains the transcript; the mask marks the trainable assistant-action positions inside it:</p>
+
+<pre><code class="language-python"># Miles: miles/utils/mask_utils.py
+def gen_multi_turn_loss_mask_qwen(self, messages: list[dict], tools: list[dict] = None):
+    all_loss_masks = []
+    all_token_ids = []
+
+    for i, message in enumerate(messages):
+        if i == 0:
+            message_ids = self.tokenizer.apply_chat_template(
+                [message], tokenize=True, return_dict=False, tools=tools
+            )
+        else:
+            message_ids = self.tokenizer.apply_chat_template([message], tokenize=True, return_dict=False)
+
+        if message["role"] != "system" and i &gt; 0:
+            message_ids = message_ids[self.system_message_length :]
+
+        if message["role"] == "assistant":
+            loss_mask = <span class="code-hl">[0] * self.gen_token_length + [1] * (len(message_ids) - self.gen_token_length)</span>
+        else:
+            loss_mask = <span class="code-hl">[0] * len(message_ids)</span>
+
+        if message.get("step_loss_mask", 1) != 1:
+            loss_mask = <span class="code-hl">[0] * len(message_ids)</span>
+
+        all_loss_masks.extend(loss_mask)
+        all_token_ids.extend(message_ids)
+
+    return all_token_ids, all_loss_masks</code></pre>
+
+        <p>The code treats assistant turns and non-assistant turns differently because they play different roles in RL. System, user, and tool messages are context: the model must read them, but they are not actions sampled from the current policy, so the <code>else</code> branch assigns <code>[0] * len(message_ids)</code>. Assistant messages are possible policy actions, but the chat template also inserts fixed generation-prompt/template tokens at the beginning of an assistant segment. Those fixed tokens are masked by <code>[0] * self.gen_token_length</code>, while the remaining generated assistant content is marked by the trailing ones in <code>[1] * (len(message_ids) - self.gen_token_length)</code>. Finally, <code>step_loss_mask</code> is an override: a whole turn can remain in the transcript but contribute zero trainable tokens. This is the same zero-mask idea as <code>remove_sample</code>, but applied at turn level rather than sample level.</p>
+
+        <p>The first-message branch and the <code>self.system_message_length</code> slice are bookkeeping around chat-template formatting. The first message is encoded with <code>tools=tools</code> when tool definitions are available; later non-system messages remove a repeated system/template prefix with <code>message_ids[self.system_message_length:]</code>. The exact tokenizer convention is less important than the invariant: tokens and masks are edited together. Every time the function appends tokens with <code>all_token_ids.extend(message_ids)</code>, it appends a mask segment of the same length with <code>all_loss_masks.extend(loss_mask)</code>. The return value is therefore a pair of aligned lists: the transcript and the positions the loss may touch.</p>
+
+        <p>There is one more shape adjustment before this data can become a <code>Sample</code>. The mask built above is as long as the whole transcript: it has entries for system tokens, user tokens, tool tokens, assistant template tokens, and assistant-generated tokens. But the <code>Sample</code> invariant above requires <code>Sample.loss_mask</code> to be only as long as <code>Sample.response_length</code>. Miles therefore converts the full-transcript mask into a response-side mask.</p>
+
+        <p>The rule is simple once stated: find the first <code>1</code> in the full mask, treat everything from there to the end as the response side, and keep only that tail. The tail can still contain zeros, for example if a later tool observation is kept as context but not trained on. This is what <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/miles/utils/mask_utils.py#L4-L6"><code>get_response_lengths</code></a> computes, and <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/miles/router/middleware_hub/radix_tree_middleware.py#L179-L190">multi-turn sample finalization</a> applies the same tail slice to both <code>loss_mask</code> and <code>rollout_log_probs</code>:</p>
+
+<pre><code class="language-python"># Miles: full-transcript mask -&gt; response-length mask
+sample.loss_mask = retrieve_output["loss_mask"]
+sample.response_length = <span class="code-hl">get_response_lengths([sample.loss_mask])[0]</span>
+sample.loss_mask = <span class="code-hl">sample.loss_mask[-sample.response_length :]</span>
+sample.rollout_log_probs = <span class="code-hl">retrieve_output["rollout_logp"][-sample.response_length :]</span></code></pre>
+
+        <p>After this slice, the multi-turn mask obeys the same <code>len(loss_mask) == response_length</code> rule as the single-turn case. Stage 3 has now decided which response-side token positions count. Stage 4 will show how that response-level decision is expanded into the tensor layout used by the loss.</p>
+
+        <p>Other frameworks make the same decision at different points in the data flow. Miles and slime make it sample-level first: each generated <code>Sample</code> can carry a <code>loss_mask</code>, and that mask later becomes part of the training data. verl makes the same idea more batch-level. In the PPO loop from Stage 2, <code>response_mask</code> is computed only after generated responses have been merged back into the <code>DataProto</code> with <code>batch.union(gen_batch_output)</code>. That timing matters because <code>compute_response_mask</code> needs the response tensor to know how many final positions of the attention mask belong to the response. After the mask is added, the same <code>DataProto</code> row carries prompt, response, reward, <code>uid</code>, metadata, and response mask together. AReaL and RLinf expose similar fields under names such as <code>loss_mask</code> or <code>response_mask</code> in their training batches. The names differ, but the role is the same: the framework must record which token positions are allowed to affect the policy update.</p>
+
+        <div class="question-box">
+          <p><strong>Question.</strong> Suppose my algorithm says: randomly drop one data point from the batch. Where should that happen?</p>
+          <p><strong>Answer.</strong> First decide whether "drop" means "do not train on it" or "remove the row from the batch." If the goal is only to prevent policy-gradient tokens from coming from that row, masking is usually the safer implementation: in Miles/slime, set that sample's <code>loss_mask</code> to all zeros or mark <code>remove_sample</code>; in verl, set the corresponding <code>response_mask</code> row to zero before the loss consumes it. The row can still carry metadata, rewards, and ids, but its response tokens do not enter the actor loss.</p>
+          <p>If the algorithm requires the data point to disappear from group-level statistics, advantage normalization, or reward aggregation, then it is not enough to zero the mask. Delete it as a row from the whole data object. In Miles/slime, remove the same sample from the <code>samples</code> list before converting to <code>train_data</code>. In verl, use a batch-level selection operation, such as <code>batch = batch.select_idxs(keep_indices)</code>, so tensors and <code>non_tensor_batch</code> fields such as <code>uid</code> are filtered together. The mistake to avoid is dropping a response tensor while leaving its reward, mask, or id behind; that silently breaks alignment.</p>
+        </div>
+
+        <h4 id="stage-train">Stage 4: train the policy</h4>
+
+        <p>Training is the part that looks most familiar from the outside: compute logprobs, compute a PPO-like objective, take optimizer steps. The infrastructure detail is that the trainer is not consuming raw text. It consumes the aligned object produced by the earlier stages: tokens, response lengths, rewards, masks, old-policy logprobs, and sometimes reference-policy logprobs or routing metadata. Stage 4 is where those fields become a loss, and where that loss becomes a weight update.</p>
+
+        <p>First, keep the Miles example as a bridge from Stage 3. The training side receives response-length masks, but the model trains on full token streams containing prompt and response positions. <a href="https://github.com/radixark/miles/blob/ae083c55173495a82c3f896df7a9bb36ad77b5a0/miles/backends/training_utils/data.py#L220-L250"><code>training_utils/data.py</code></a> pads each response mask into the full token layout, handles sequence-parallel slicing, and asserts that the resulting mask has exactly the same shape as the token tensor:</p>
+
+        <pre><code class="language-python"># Miles: miles/backends/training_utils/data.py
+loss_masks = []
+for loss_mask, total_length, response_length in zip(
+    batch["loss_masks"],
+    batch["total_lengths"],
+    batch["response_lengths"],
+    strict=True,
+):
+    prompt_length = <span class="code-hl">total_length - response_length</span>
+    loss_mask = <span class="code-hl">F.pad(loss_mask, (prompt_length - 1, 1), value=0)</span>
+    if allgather_cp:
+        loss_masks.append(loss_mask)
+        continue
+    loss_mask = slice_with_cp(loss_mask, 0, qkv_format, max_seqlen)
+    loss_masks.append(loss_mask)
+
+if qkv_format == "bshd":
+    loss_masks = torch.stack(loss_masks)
+elif qkv_format == "thd" and allgather_cp:
+    loss_masks = torch.cat(loss_masks, dim=0)
+    if pad != 0:
+        loss_masks = F.pad(loss_masks, (0, pad), value=0)
+    loss_masks = loss_masks.chunk(cp_size, dim=0)[cp_rank].unsqueeze(0)
+elif qkv_format == "thd":
+    loss_masks = torch.cat(loss_masks)
+    loss_masks = F.pad(loss_masks, (0, pad), value=0).unsqueeze(0)
+
+assert <span class="code-hl">loss_masks.shape == tokens.shape</span>
+batch[<span class="code-hl">"full_loss_masks"</span>] = loss_masks</code></pre>
+
+        <p>The padding is not cosmetic. The response mask began as a vector over response tokens only, for example one entry per assistant-generated response token. But the training model sees the full next-token-prediction stream: prompt tokens first, then response tokens. The mask therefore has to be moved into the coordinate system of <code>tokens</code>. The left padding <code>prompt_length - 1</code> inserts zeros for prompt-side prediction positions that should not be trained as response actions. The right padding of <code>1</code> accounts for the final shifted position in next-token prediction. After that shift, every position in <code>tokens</code> has a matching mask value. The final assertion, <code>loss_masks.shape == tokens.shape</code>, is the contract: by the time loss is computed, the model cannot have a token position without a corresponding decision about whether it counts.</p>
+
+        <p>The next Miles step shows that this mask is not merely stored for logging. It is passed into the Megatron model forward call as the model-side <code>loss_mask</code>:</p>
+
+        <pre><code class="language-python"># Miles: miles/backends/megatron_utils/model.py
+batch = get_batch(
+    data_iterator,
+    [
+        <span class="code-hl">"tokens"</span>,
+        <span class="code-hl">"loss_masks"</span>,
+        "multimodal_train_inputs",
+        <span class="code-hl">"total_lengths"</span>,
+        <span class="code-hl">"response_lengths"</span>,
+        "max_seq_lens",
+    ],
+    args.data_pad_size_multiplier,
+    args.qkv_format,
+    allgather_cp=args.allgather_cp,
+)
+
+tokens = batch["tokens"]
+packed_seq_params = get_packed_seq_params(batch, args)
+output_tensor = model(
+    input_ids=<span class="code-hl">tokens</span>,
+    position_ids=None,
+    attention_mask=None,
+    labels=None,
+    packed_seq_params=packed_seq_params,
+    loss_mask=<span class="code-hl">batch["full_loss_masks"]</span>,
+    **(batch["multimodal_train_inputs"] if batch["multimodal_train_inputs"] is not None else {}),
+)</code></pre>
+
+        <p>This is the training-side version of the Stage 3 story. The mask has moved from a per-sample response vector into a tensor field that the model forward pass can use. The code also shows another systems detail: tokens may be packed for efficient attention, but the mask travels with the same batch and is shaped to match the token layout.</p>
+
+        <p>Now let us look at a concrete PPO example from verl. This is slightly different from the Miles example above. Miles makes the training tensor layout visible: response-side masks are padded and passed into the Megatron forward call. verl instead shows the PPO bookkeeping: generated responses, rewards, response masks, old-policy logprobs, and advantages are kept together inside one <code>DataProto</code> flow.</p>
+
+        <div class="primer-box">
+          <p><strong>PPO primer.</strong> PPO does not update from a reward alone. It compares the current policy to a fixed old-policy anchor for this batch. In the simplest on-policy case, that anchor is the policy that produced the sampled response; in decoupled systems, rollout and the old-policy anchor may be tracked separately. For one token position <code>t</code>, the policy ratio is:</p>
+          <div class="formula-display">r_t(&theta;) = exp(log &pi;<sub>&theta;</sub>(a_t | s_t) - log &pi;<sub>old</sub>(a_t | s_t))</div>
+          <p>The clipped PPO actor objective then uses this ratio together with an advantage estimate <code>A_t</code>:</p>
+          <div class="formula-display">L<sup>clip</sup>(&theta;) = E_t[min(r_t(&theta;) A_t, clip(r_t(&theta;), 1 - &epsilon;, 1 + &epsilon;) A_t)]</div>
+          <p>Training code usually minimizes the negative of this objective, often with extra terms such as entropy, KL, or a value loss depending on the variant. In LLM RL, the expectation is implemented over response-token positions, so a mask is needed:</p>
+          <div class="formula-display">loss = - sum_t m_t min(r_t A_t, clip(r_t, 1 - &epsilon;, 1 + &epsilon;) A_t) / sum_t m_t</div>
+          <p>The numerator, <code>log pi_theta</code>, is computed by the actor during the current training update. The denominator, <code>log pi_old</code>, is what verl stores as <code>old_log_probs</code>. The mask <code>m_t</code> is verl's <code>response_mask</code>.</p>
+        </div>
+
+        <p>The formula names three fields that infrastructure has to line up before the actor loss can run: old-policy logprobs for the denominator, advantages for the update direction, and a response mask for the token positions that count. The next verl snippets prepare the first field. The batch does not contain a copy of an old model; it contains token ids and masks. verl adds a tensor field called <code>old_log_probs</code>, which records how the chosen old-policy anchor scores the already generated response tokens.</p>
+
+        <p>verl has two ways to fill that field. The ordinary path recomputes it on the training side. After reward has been extracted, the trainer calls <code>_compute_old_log_prob(batch)</code>, uses the existing <code>response_mask</code> to aggregate entropy for logging, removes the temporary entropy field, and merges the returned logprobs back into the same <code>DataProto</code>:</p>
+
+        <pre><code class="language-python"># verl: verl/trainer/ppo/ray_trainer.py
+reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+
+rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
+bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+if bypass_recomputing_logprobs:
+    apply_bypass_mode(
+        batch=batch,
+        rollout_corr_config=rollout_corr_config,
+        policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
+    )
+else:
+    old_log_prob, old_log_prob_mfu = <span class="code-hl">self._compute_old_log_prob(batch)</span>
+    entropys = old_log_prob.batch["entropys"]
+    response_masks = <span class="code-hl">batch.batch["response_mask"]</span>
+    entropy_agg = agg_loss(
+        loss_mat=entropys,
+        loss_mask=<span class="code-hl">response_masks</span>,
+        loss_agg_mode=actor_config.loss_agg_mode,
+        loss_scale_factor=actor_config.loss_scale_factor,
+    )
+    old_log_prob.batch.pop("entropys")
+    batch = <span class="code-hl">batch.union(old_log_prob)</span>
+
+assert <span class="code-hl">"old_log_probs" in batch.batch</span></code></pre>
+
+        <p>The helper shows what "recompute old logprobs" means in code. It converts the current <code>DataProto</code> into the worker's tensor format, removes padding for efficient inference, asks the actor worker to compute log probabilities without taking a loss, then converts the result back into a padded <code>DataProto</code> field named <code>old_log_probs</code>:</p>
+
+        <pre><code class="language-python"># verl: verl/trainer/ppo/ray_trainer.py
+# excerpt from _compute_old_log_prob
+def _compute_old_log_prob(self, batch: DataProto):
+    batch_td = <span class="code-hl">batch.to_tensordict()</span>
+    batch_td = <span class="code-hl">left_right_2_no_padding(batch_td)</span>
+    tu.assign_non_tensor(
+        batch_td,
+        calculate_entropy=True,
+        calculate_sum_pi_squared=calculate_sum_pi_squared,
+        <span class="code-hl">compute_loss=False</span>,
+    )
+    output = <span class="code-hl">self.actor_rollout_wg.compute_log_prob(batch_td)</span>
+
+    entropy = tu.get(output, "entropy")
+    log_probs = tu.get(output, <span class="code-hl">"log_probs"</span>)
+    old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
+
+    entropy = no_padding_2_padding(entropy, batch_td)
+    log_probs = <span class="code-hl">no_padding_2_padding(log_probs, batch_td)</span>
+
+    result = {<span class="code-hl">"old_log_probs": log_probs.float()</span>, "entropys": entropy.float()}
+    old_log_prob = DataProto.from_tensordict(tu.get_tensordict(result))
+    return old_log_prob, old_log_prob_mfu</code></pre>
+
+        <p>The result is a response-shaped tensor of old-policy logprobs. After padding back to the batch layout, it lines up with <code>response_mask</code> and later <code>advantages</code> token by token.</p>
+
+        <p>The second path is bypass mode. If rollout already produced <code>rollout_log_probs</code>, verl may skip the actor-side recomputation and simply reuse those rollout scores as <code>old_log_probs</code>:</p>
+
+        <pre><code class="language-python"># verl: verl/trainer/ppo/rollout_corr_helper.py
+# excerpt from apply_bypass_mode
+if <span class="code-hl">"rollout_log_probs" not in batch.batch</span>:
+    raise ValueError("bypass_mode=True requires rollout_log_probs in batch.")
+
+batch.batch[<span class="code-hl">"old_log_probs"</span>] = batch.batch[<span class="code-hl">"rollout_log_probs"</span>]</code></pre>
+
+        <p>So bypass mode uses rollout logprobs as the PPO denominator; the ordinary path uses one pre-update actor logprob pass as the fixed anchor. In both cases, <code>old_log_probs</code> must end up in the same <code>DataProto</code> rows as the responses, mask, and advantages.</p>
+
+        <p>Next, verl fills the second field from the PPO primer: the advantage. In the PPO/GAE path, <a href="https://github.com/verl-project/verl/blob/7dc39fec1c37da4098b50e68840e78906b69f16a/verl/trainer/ppo/ray_trainer.py#L163-L177"><code>compute_advantage</code></a> turns token-level rewards into <code>advantages</code> and <code>returns</code>. It reads three aligned tensors from the same batch: <code>token_level_rewards</code>, critic <code>values</code>, and <code>response_mask</code>:</p>
+
+        <pre><code class="language-python"># verl: verl/trainer/ppo/ray_trainer.py
+if "response_mask" not in data.batch.keys():
+    data.batch["response_mask"] = compute_response_mask(data)
+
+if adv_estimator == AdvantageEstimator.GAE:
+    advantages, returns = core_algos.compute_gae_advantage_return(
+        token_level_rewards=<span class="code-hl">data.batch["token_level_rewards"]</span>,
+        values=<span class="code-hl">data.batch["values"]</span>,
+        response_mask=<span class="code-hl">data.batch["response_mask"]</span>,
+        gamma=gamma,
+        lam=lam,
+    )
+    data.batch[<span class="code-hl">"advantages"</span>] = advantages
+    data.batch[<span class="code-hl">"returns"</span>] = returns</code></pre>
+
+        <p>This is where the reward from Stage 2 becomes the update direction used by the actor loss. <code>response_mask</code> keeps the calculation on valid response tokens, while <code>values</code> provide the baseline for GAE. The output is stored back into <code>DataProto</code> as <code>advantages</code> and <code>returns</code>, next to the same tokens, masks, rewards, and old logprobs prepared above. The same <code>compute_advantage</code> entry point also has branches for GRPO and other advantage estimators, but this PPO example follows the GAE branch.</p>
+
+        <p>At actor-update time, verl selects exactly the fields the PPO loss needs. The current-policy logprobs come from the actor's forward pass; the old logprobs, advantages, and response mask come from the prepared batch:</p>
+
+        <pre><code class="language-python"># verl: verl/workers/utils/losses.py
+def ppo_loss(config, model_output, data, dp_group=None):
+    log_prob = no_padding_2_padding(model_output[<span class="code-hl">"log_probs"</span>], data)
+
+    fields = [<span class="code-hl">"response_mask"</span>, <span class="code-hl">"old_log_probs"</span>, <span class="code-hl">"advantages"</span>]
+    data = data.select(*fields).to_padded_tensor()
+
+    response_mask = data["response_mask"].to(bool)
+    old_log_prob = data[<span class="code-hl">"old_log_probs"</span>]
+    advantages = data[<span class="code-hl">"advantages"</span>]
+
+    pg_loss, pg_metrics = policy_loss_fn(
+        old_log_prob=old_log_prob,
+        log_prob=<span class="code-hl">log_prob</span>,
+        advantages=<span class="code-hl">advantages</span>,
+        response_mask=<span class="code-hl">response_mask</span>,
+        loss_agg_mode=loss_agg_mode,
+        config=config,
+    )</code></pre>
+
+        <p>The core PPO loss then does the formula from the primer. In <a href="https://github.com/verl-project/verl/blob/7dc39fec1c37da4098b50e68840e78906b69f16a/verl/trainer/ppo/core_algos.py#L1247-L1275"><code>compute_policy_loss</code></a>, the current-policy logprob and old-policy logprob form the ratio, <code>advantages</code> weight the update, and <code>response_mask</code> controls the masked averages and final loss aggregation:</p>
+
+        <pre><code class="language-python"># verl: verl/trainer/ppo/core_algos.py
+negative_approx_kl = <span class="code-hl">log_prob - old_log_prob</span>
+negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+ratio = <span class="code-hl">torch.exp(negative_approx_kl)</span>
+ppo_kl = verl_F.masked_mean(-negative_approx_kl, <span class="code-hl">response_mask</span>)
+
+pg_losses1 = -advantages * ratio
+if cliprange_low is None:
+    cliprange_low = cliprange
+if cliprange_high is None:
+    cliprange_high = cliprange
+pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
+clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)
+pg_clipfrac = verl_F.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), <span class="code-hl">response_mask</span>)
+
+pg_losses3 = -advantages * clip_ratio_c
+clip_pg_losses2 = torch.min(pg_losses3, clip_pg_losses1)
+pg_clipfrac_lower = verl_F.masked_mean(
+    torch.gt(clip_pg_losses1, pg_losses3) * (advantages &lt; 0).float(), <span class="code-hl">response_mask</span>
+)
+
+pg_losses = torch.where(advantages &lt; 0, clip_pg_losses2, clip_pg_losses1)
+pg_loss = agg_loss(loss_mat=pg_losses, <span class="code-hl">loss_mask=response_mask</span>, loss_agg_mode=loss_agg_mode)</code></pre>
+
+        <p>The loss is then handed to the actor training worker. The trainer driver does not directly call <code>backward()</code>; it marks the prepared batch as a loss-computing update and dispatches it to the actor worker group:</p>
+
+        <pre><code class="language-python"># verl: verl/trainer/ppo/ray_trainer.py
+# excerpt from _update_actor
+batch_td = batch.to_tensordict()
+batch_td = left_right_2_no_padding(batch_td)
+tu.assign_non_tensor(
+    batch_td,
+    mini_batch_size=ppo_mini_batch_size,
+    epochs=ppo_epochs,
+    dataloader_kwargs={"shuffle": shuffle},
+    <span class="code-hl">compute_loss=True</span>,
+)
+actor_output = <span class="code-hl">self.actor_rollout_wg.update_actor(batch_td)</span>
+
+# verl: verl/workers/engine_workers.py
+def update_actor(self, data: TensorDict) -&gt; TensorDict:
+    output = <span class="code-hl">self.actor.train_mini_batch(data=data)</span>
+    return output.cpu() if output is not None else None</code></pre>
+
+        <p>Inside the training engine, the usual deep-learning step happens: zero gradients, run forward/backward on mini-batches, then step the optimizer. For example, the FSDP engine eventually calls <code>loss.backward()</code>, clips gradients, and calls <code>optimizer.step()</code>:</p>
+
+        <pre><code class="language-python"># verl: verl/workers/engine/base.py and verl/workers/engine/fsdp/transformer_impl.py
+# train_mini_batch
+self.optimizer_zero_grad()
+outputs = <span class="code-hl">self.forward_backward_batch(data, loss_function, forward_only=False)</span>
+grad_norm = <span class="code-hl">self.optimizer_step()</span>
+
+# inside forward_backward_batch
+if not forward_only:
+    if scaler is not None:
+        scaler.scale(loss).backward()
+    else:
+        <span class="code-hl">loss.backward()</span>
+
+# inside optimizer_step
+grad_norm = self.module.clip_grad_norm_(self.optimizer_config.clip_grad)
+self.optimizer.step()</code></pre>
+
+        <p>Now the whole training object is visible. PPO is not applied to raw completions. It is applied to aligned tensors: current logprobs, old logprobs, advantages, and a response mask. That loss becomes gradients through the actor training engine, and the optimizer step changes the policy weights. Miles exposes more of the tensor-layout work, because it bridges sample fields into Megatron-style training tensors. verl hides more movement inside <code>DataProto</code> and worker groups, but the semantic ingredients are the same. Training begins only after the earlier stages have made response tokens, rewards, masks, and policy-version information line up.</p>
+
+        <h4 id="stage-sync">Stage 5: sync the new policy back to rollout</h4>
+
+        <p>After Stage 4, the training actor has new weights. The rollout engine may not. Stage 5 is the step that makes the next generated batch come from the policy we intend to train against. That sounds like "copy the weights," but the code has to do more: stop generation at the right time, move weights through the right physical path, clear stale inference cache, and then reopen generation.</p>
+
+        <p>Miles makes the outer loop visible. The training script syncs weights once before the first rollout, then again after each actor training step. If rollout memory has been offloaded, Miles first onloads rollout weight memory, then calls <code>actor_model.update_weights()</code>, and finally onloads the KV-cache memory needed for future generation:</p>
+
+        <pre><code class="language-python"># Miles: train.py
+# initial sync before the first generated batch
+if args.offload_rollout:
+    await <span class="code-hl">rollout_manager.onload_weights.remote()</span>
+
+await <span class="code-hl">actor_model.update_weights()</span>
+
+if args.offload_rollout:
+    await rollout_manager.onload_kv.remote()
+
+# inside the training loop, after actor_model.train(...)
+await offload_train()
+if args.offload_rollout:
+    await <span class="code-hl">rollout_manager.onload_weights.remote()</span>
+await <span class="code-hl">actor_model.update_weights()</span>
+if args.offload_rollout:
+    await rollout_manager.onload_kv.remote()</code></pre>
+
+        <p>This code is mainly about ordering. <code>actor_model.update_weights()</code> is the policy-sync call: it sends the actor's current weights to the rollout engines. The two <code>onload</code> calls are about GPU memory occupation, not about reusing old generation state. Miles is the RL framework here; its rollout engines are SGLang servers, so calls like <code>rollout_manager.onload_kv.remote()</code> eventually reach SGLang's memory-management API.</p>
+
+        <p>That distinction matters for the KV cache. <code>onload_kv</code> resumes the KV-cache memory region and CUDA-graph resources needed for future generation; it does not mean "reuse old KV entries." Miles' SGLang wrapper flushes cache before asking SGLang to release memory, and SGLang itself flushes cache when KV-cache memory is released:</p>
+
+        <pre><code class="language-python"># Miles: miles/backends/sglang_utils/sglang_engine.py
+def release_memory_occupation(self, tags: list[str] = None):
+    self.<span class="code-hl">flush_cache()</span>
+    return self._make_request(
+        "release_memory_occupation",
+        {"tags": tags},
+    )
+
+# SGLang: python/sglang/srt/managers/scheduler_components/weight_updater.py
+def release_memory_occupation(self, recv_req):
+    tags = recv_req.tags
+    ...
+    if <span class="code-hl">GPU_MEMORY_TYPE_KV_CACHE in tags</span>:
+        self.memory_saver_adapter.pause(GPU_MEMORY_TYPE_KV_CACHE)
+        self.<span class="code-hl">flush_cache()</span></code></pre>
+
+        <p>So the outer sequence is: make rollout weight memory available, write the new policy into rollout, then make fresh generation memory available. The old KV entries are gone; only the capacity to build new KV entries is restored.</p>
+
+        <p>Now zoom into the middle step, <code>actor_model.update_weights()</code>. This call has one extra layer. In <code>train.py</code>, <code>actor_model</code> is a <code>RayTrainGroup</code>, so its method broadcasts <code>update_weights</code> to the training actors. Inside each actor, Miles delegates to a topology-specific <code>weight_updater</code>:</p>
+
+        <pre><code class="language-python"># Miles: miles/ray/actor_group.py
+async def update_weights(self):
+    await <span class="code-hl">self._broadcast("update_weights")</span>
+
+# Miles: miles/backends/megatron_utils/actor.py
+def update_weights(self) -&gt; None:
+    ...
+    with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+        <span class="code-hl">self.weight_updater.update_weights()</span></code></pre>
+
+        <p>The next snippet is one implementation behind that final call. In the distributed update path, <code>self.weight_updater.update_weights()</code> becomes a lifecycle: assign a new weight version, pause rollout, flush cache, transfer weights, post-process, and resume rollout:</p>
+
+        <pre><code class="language-python"># Miles: miles/backends/megatron_utils/update_weight/update_weight_from_distributed/mixin.py
+def _pause_and_prepare_engines(self) -&gt; None:
+    if dist.get_rank() == 0:
+        mode = self.args.pause_generation_mode
+        ray.get([engine.<span class="code-hl">pause_generation.remote(mode=mode)</span> for engine in self.rollout_engines])
+        if mode not in ("in_place"):
+            ray.get([engine.<span class="code-hl">flush_cache.remote()</span> for engine in self.rollout_engines])
+
+def _finalize_and_resume_engines(self, post_load_weights: bool = False) -&gt; None:
+    if dist.get_rank() == 0:
+        post_process_weights(
+            rollout_engines=self.rollout_engines,
+            restore_weights_before_load=False,
+            post_process_quantization=True,
+            post_load_weights=post_load_weights,
+        )
+        ray.get([engine.<span class="code-hl">continue_generation.remote()</span> for engine in self.rollout_engines])
+
+@torch.no_grad()
+def update_weights(self) -&gt; None:
+    self.<span class="code-hl">weight_version += 1</span>
+    <span class="code-hl">self._pause_and_prepare_engines()</span>
+    dist.barrier(group=get_gloo_group())
+
+    <span class="code-hl">self._gather_and_update_non_expert_weights(...)</span>
+    dist.barrier(group=get_gloo_group())
+    <span class="code-hl">self._gather_and_update_expert_weights(...)</span>
+    dist.barrier(group=get_gloo_group())
+
+    <span class="code-hl">self._finalize_and_resume_engines()</span>
+    dist.barrier(group=get_gloo_group())</code></pre>
+
+        <p>The order is the point. <code>weight_version += 1</code> creates a new policy version for rollout to observe. <code>_pause_and_prepare_engines()</code> closes the generation door before any weights move: it pauses rollout engines and, outside in-place mode, flushes cache entries from the old weights. Only then does Miles transfer parameters. The split between non-expert and expert weights reflects the model layout: dense parameters and MoE expert parameters may live under different parallel groups, so they are gathered and sent separately. <code>_finalize_and_resume_engines()</code> runs rollout-side post-processing and reopens generation. The barriers make training ranks agree on each phase before the next one begins.</p>
+
+        <p>The lifecycle above tells us when it is safe to move weights. It does not show how bytes reach the rollout engine. That part depends on topology. The colocated tensor path is a compact example: Miles chunks Megatron weights into HuggingFace-style tensors, sends base and LoRA weights separately when needed, and attaches the current <code>weight_version</code> to the SGLang update call:</p>
+
+        <pre><code class="language-python"># Miles: miles/backends/megatron_utils/update_weight/update_weight_from_tensor.py
+megatron_local_weights = self.weights_getter()
+
+for hf_named_tensors in self._hf_weight_iterator.get_hf_weight_chunks(
+    megatron_local_weights,
+    weight_type="base",
+):
+    refs, long_lived_tensors = self._send_base_params(<span class="code-hl">hf_named_tensors</span>)
+    results = <span class="code-hl">ray.get(refs)</span>
+    <span class="code-hl">_check_weight_sync_results(results, is_lora=False)</span>
+
+def _send_to_colocated_engine(..., weight_version=None, ...):
+    ...
+    kwargs = {
+        <span class="code-hl">"serialized_named_tensors"</span>: [tensors[i] for tensors in serialized_named_tensors],
+        "load_format": "flattened_bucket",
+        <span class="code-hl">"weight_version": str(weight_version)</span>,
+    }
+    refs.append(<span class="code-hl">ipc_engine.update_weights_from_tensor.remote(**kwargs)</span>)</code></pre>
+
+        <p>Read this from top to bottom. <code>update_weights()</code> obtains local training weights. The iterator turns them into <code>hf_named_tensors</code> chunks in the format expected by the rollout loader. For each chunk, <code>_send_base_params</code> eventually calls <code>_send_to_colocated_engine</code>. That helper builds the SGLang payload: <code>serialized_named_tensors</code> carries the tensor data, and <code>weight_version</code> tags the policy version being installed.</p>
+
+        <p>The handoff to SGLang is <code>ipc_engine.update_weights_from_tensor.remote(**kwargs)</code>. In Ray, <code>.remote(...)</code> returns object references immediately; it does not mean the remote work has finished. The line <code>results = ray.get(refs)</code> is the wait: it blocks until the rollout-engine updates return. Miles then checks the returned <code>success</code> fields and raises if any engine reports failure:</p>
+
+        <pre><code class="language-python"># Miles: miles/backends/megatron_utils/update_weight/update_weight_from_tensor.py
+def _check_weight_sync_results(results: list, *, is_lora: bool) -&gt; None:
+    for result in results:
+        if isinstance(result, Mapping):
+            success = result.get("success")
+            error_msg = result.get("error_message") or result.get("error") or "unknown error"
+        elif hasattr(result, "success"):
+            success = result.success
+            error_msg = getattr(result, "error_message", "unknown error")
+        else:
+            continue
+
+        if <span class="code-hl">success is False</span>:
+            <span class="code-hl">raise RuntimeError</span>(
+                f"weight sync failed on rollout engine: {error_msg}"
+            )</code></pre>
+
+        <p>Without this wait-and-check step, training could continue while a rollout engine still holds old or incorrectly updated weights.</p>
+
+        <p>Now switch to the receiving side inside SGLang. The matching pieces are visible: <code>UpdateWeightsFromTensorReqInput</code> receives the serialized tensor payload from Miles, <code>UpdateWeightsFromDistributedReqInput</code> receives distributed tensor metadata, and both requests carry <code>flush_cache</code>. This wrapper still does not mutate model weights directly. It turns an external update call into a structured request and passes that request to <code>tokenizer_manager</code>, where the scheduler-side update will run:</p>
+
+        <pre><code class="language-python"># SGLang: python/sglang/srt/entrypoints/engine.py
+def update_weights_from_distributed(
+    self,
+    <span class="code-hl">names</span>: list[str],
+    <span class="code-hl">dtypes</span>: list[str],
+    <span class="code-hl">shapes</span>: list[list[int]],
+    group_name: str = "weight_update_group",
+    <span class="code-hl">flush_cache: bool = True</span>,
+    load_format: Optional[str] = None,
+):
+    obj = <span class="code-hl">UpdateWeightsFromDistributedReqInput</span>(
+        names=names,
+        dtypes=dtypes,
+        shapes=shapes,
+        group_name=group_name,
+        <span class="code-hl">flush_cache=flush_cache</span>,
+        load_format=load_format,
+    )
+    return self.loop.run_until_complete(
+        <span class="code-hl">self.tokenizer_manager.update_weights_from_distributed(obj, None)</span>
+    )
+
+def update_weights_from_tensor(
+    self,
+    <span class="code-hl">named_tensors</span>: List[Tuple[str, torch.Tensor]],
+    load_format: Optional[str] = None,
+    <span class="code-hl">flush_cache: bool = True</span>,
+):
+    ...
+    obj = <span class="code-hl">UpdateWeightsFromTensorReqInput</span>(
+        serialized_named_tensors=serialized_named_tensors,
+        load_format=load_format,
+        <span class="code-hl">flush_cache=flush_cache</span>,
+    )
+    return self.loop.run_until_complete(
+        <span class="code-hl">self.tokenizer_manager.update_weights_from_tensor(obj, None)</span>
+    )</code></pre>
+
+        <p>The important detail is the handoff shape. Tensor payloads and distributed metadata look different, but SGLang packages each update into a request object. The cache policy travels in that same object through <code>flush_cache</code>.</p>
+
+        <p>The next layer consumes the request. It first performs the actual load into the SGLang worker. Only after the load reports <code>success</code> does it call <code>flush_cache_after_weight_update</code>. Cache cleanup is therefore attached to successful weight mutation, not left as a separate step that an RL framework might forget to call.</p>
+
+        <pre><code class="language-python"># SGLang: python/sglang/srt/managers/scheduler_components/weight_updater.py
+def flush_cache_after_weight_update(self, recv_req) -&gt; None:
+    if <span class="code-hl">recv_req.flush_cache</span>:
+        flush_cache_success = <span class="code-hl">self.flush_cache</span>(
+            empty_cache=recv_req.torch_empty_cache
+        )
+        <span class="code-hl">assert flush_cache_success</span>, "Cache flush failed after updating weights"
+
+def update_weights_from_distributed(self, recv_req):
+    success, message = self.tp_worker.update_weights_from_distributed(recv_req)
+    if <span class="code-hl">success</span>:
+        <span class="code-hl">self.flush_cache_after_weight_update(recv_req)</span>
+    return UpdateWeightsFromDistributedReqOutput(success, message)
+
+def update_weights_from_tensor(self, recv_req):
+    if recv_req.disable_draft_model:
+        worker = self.tp_worker
+    else:
+        worker = self.draft_worker or self.tp_worker
+    success, message = worker.update_weights_from_tensor(recv_req)
+    if <span class="code-hl">success</span>:
+        <span class="code-hl">self.flush_cache_after_weight_update(recv_req)</span>
+    return UpdateWeightsFromTensorReqOutput(success, message)</code></pre>
+
+        <p>The reason is simple: prefix and KV caches are computed under a particular set of weights. After a weight update, reusing old cache entries would mix old-policy hidden state with new-policy parameters.</p>
+
+        <p>Synchronous frameworks usually run this sync after every training update. Async frameworks may deliberately sync less often. Miles' async loop updates rollout weights only every <code>update_weights_interval</code> rollouts, after waiting for any in-flight generation to finish:</p>
+
+        <pre><code class="language-python"># Miles: train_async.py
+if (rollout_id + 1) % args.<span class="code-hl">update_weights_interval</span> == 0:
+    # sync generate before update weights to prevent update weight in the middle of generation
+    rollout_data_curr_ref = (await x) if (x := rollout_data_next_future) is not None else None
+    rollout_data_next_future = None
+    await <span class="code-hl">actor_model.update_weights()</span></code></pre>
+
+        <p>That choice changes the next batch. If rollout weights are updated every step, generated data is close to on-policy. If rollout weights lag behind training, the framework must record, measure, or correct that lag elsewhere.</p>
+
+        <p>Other frameworks solve the same problem with different wrappers. The problem is simple: after the trainer updates the actor, the generator must not keep acting as if nothing changed. slime looks much like Miles: after training, it calls <code>actor_model.update_weights()</code>, then its SGLang update path pauses generation, clears cache, sends converted weights, and resumes generation. verl puts the same job behind <code>checkpoint_manager.update_weights(global_steps)</code>; with vLLM, the rollout adapter sends new weights and clears rollout-side KV cache. OpenRLHF follows a similar vLLM pattern and resets prefix cache after actor updates. AReaL makes the version number more visible by passing <code>versioned_meta</code> into <code>update_weights</code>. The details differ, but the question is always the same: will the next rollout use the new actor weights, or is it intentionally running with older weights?</p>
+
+        <p>Stage 5 is therefore the boundary between an optimizer update and the data distribution used by the next rollout.</p>
+
+        <h4>The system map behind the five stages</h4>
+
+        <p>The five stages above describe the RL loop in time: generate a response, attach a training signal, decide which tokens count, train the actor, and sync the new policy back to rollout. The same loop can also be read as a system map. Most RL infrastructure stacks split the work across three large components: a <strong>training engine</strong>, an <strong>inference engine</strong>, and an <strong>orchestrator</strong>.</p>
 
         <figure>
           <img src="diagrams/02-three-pillars.svg" alt="Three pillars: training engine (Megatron, FSDP, DeepSpeed), inference engine (SGLang, vLLM, TRT-LLM), orchestrator (Ray, custom NCCL, torchrun).">
           <figcaption><span class="fig-label">Figure 2.</span> A common decomposition: training engine, inference engine, and orchestrator. It is a useful reading map, but real frameworks also depend on data schemas, cache state, and weight-update protocols that cross these boundaries.</figcaption>
         </figure>
 
-        <p>Miles and slime are close to the textbook version of this decomposition: Megatron-style training, SGLang rollout, and Ray orchestration. verl is similar at the level of roles, but its abstractions are different: the driver coordinates Ray worker groups and passes <code>DataProto</code> through rollout, reward, logprob computation, and actor update. OpenRLHF also uses Ray actors and vLLM synchronization. AReaL has rollout controllers and workflow APIs for more general environments. cosmos-rl adds reward services and non-text rollout schemas for video and embodied tasks. These systems rhyme, but they are not identical.</p>
+        <p>The mapping is not one-to-one, but it is useful. The <strong>inference engine</strong> is most visible in Stage 1 and Stage 5: it generates tokens, maintains KV or prefix cache, and receives weight updates. The <strong>training engine</strong> is most visible in Stage 4: it computes logprobs, loss, backward pass, and optimizer steps. The <strong>orchestrator</strong> is everywhere: it decides when rollout runs, when reward is computed, when batches are merged, when training starts, and when rollout weights are refreshed.</p>
 
-        <p>The main correction to the simple picture is that the interfaces are not magically stable. They are contracts that have to be maintained. A sample schema must preserve the fields the loss expects. A weight-sync protocol must keep caches consistent with weights. An orchestrator must know whether train and rollout are colocated, separated, or overlapped asynchronously. The modern stack is powerful because these pieces can be separated; it is fragile because the meaning of an RL update depends on the assumptions that cross the separation.</p>
+        <p>Miles and slime are close to the clean version of this map: Megatron-style training, SGLang rollout, and Ray orchestration. verl has similar roles, but the driver coordinates Ray worker groups and passes <code>DataProto</code> through rollout, reward, logprob computation, and actor update. OpenRLHF also uses Ray actors and vLLM synchronization. AReaL adds rollout controllers and workflow APIs for more general environments. These systems rhyme, but they are not identical.</p>
+
+        <p>The useful lesson is not just that these three components exist. It is that the algorithm lives in the state passed between them. A paper may describe "sample from the policy, compute reward, take a PPO step." The implementation has to decide which policy version produced the sample, which token positions count, where the reward is stored, which logprobs define the denominator, and whether the rollout cache was computed under the current weights. Those decisions sit at the boundaries between components. That is why reading RL infrastructure is not a distraction from the algorithm; it is how we find the algorithm's actual operational meaning.</p>
       </section>

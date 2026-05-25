@@ -1,23 +1,29 @@
 
 
       <section id="tension">
-        <h2>The central tension: two halves that fight</h2>
+        <h2>Why the five-stage loop is not enough</h2>
 
-        <p>Pretraining an LLM is a static dataset plus a training loop. Inference is a model plus a request stream. Both are well-understood; the right tools are Megatron-LM and vLLM (or SGLang) respectively. RL post-training is both at once, and the two halves want opposite things from the same hardware.</p>
+        <p>The five stages give us the semantic skeleton of RL post-training: generate, score, mask, train, and sync. That skeleton is necessary because it tells us what information must exist before an update is meaningful. But it still leaves out the execution problem. It does not say where rollout runs, where training runs, whether they share GPUs, how large weights move between them, or when cached inference state becomes invalid.</p>
+
+        <p>The missing difficulty is that the loop alternates between two very different machine modes. In training mode, the system wants stable batches, gradients, activations, optimizer state, and a controlled update to the actor. In rollout mode, the system wants many generations, KV cache, prefix reuse, continuous batching, and low request latency. Both modes are expensive, and both want the same scarce GPUs.</p>
+
+        <p>This is not only a software-organization issue. It creates concrete constraints that the five verbs do not express. Separate GPU pools can make the roles easier to reason about, but one pool may wait while the other works. If training and rollout share GPUs, the system must decide which memory belongs to which phase. After training changes the actor, the rollout engine needs the new weights, but moving a large model is expensive. After those weights change, old KV or prefix cache may have been computed under the previous policy, so keeping it can make the next generation inconsistent with the new weights.</p>
 
         <table>
           <thead>
-            <tr><th>Concern</th><th>Training prefers</th><th>Rollout prefers</th></tr>
+            <tr><th>Concern</th><th>Training side needs</th><th>Rollout side needs</th></tr>
           </thead>
           <tbody>
-            <tr><td>Parallelism</td><td>High TP / PP — split the model</td><td>High DP — split the batch</td></tr>
-            <tr><td>Memory</td><td>Optimizer states + gradients + activations</td><td>Weights + KV cache + CUDA graphs</td></tr>
-            <tr><td>Throughput unit</td><td>Tokens/step (compute-bound)</td><td>Trajectories/sec (memory-bound)</td></tr>
-            <tr><td>Goal</td><td>Update one global policy</td><td>Generate N independent samples</td></tr>
+            <tr><td>Weights</td><td>Parameters being updated by the optimizer</td><td>Serving weights loaded into inference engines</td></tr>
+            <tr><td>Memory</td><td>Activations, gradients, optimizer states</td><td>KV cache, prefix cache, CUDA graphs, request buffers</td></tr>
+            <tr><td>Parallelism</td><td>Layouts optimized for backward and optimizer steps</td><td>Layouts optimized for many independent generations</td></tr>
+            <tr><td>Timing</td><td>Stable batches for loss computation</td><td>Continuous or batched request generation</td></tr>
+            <tr><td>Policy version</td><td>A fixed old/current policy relation for PPO-style losses</td><td>Fresh enough weights for the next rollout batch</td></tr>
           </tbody>
         </table>
 
-        <p>If you give half your fleet to training and half to inference and let them run in parallel, the on-policy constraint forces them to alternate anyway — half the fleet is always idle. If you force identical parallelism on both, one side bottlenecks. If you give them different parallelism, every phase transition requires resharding the model. Every engineering primitive that follows is a way out of this trap.</p>
+        <p>Read the next six primitives as answers to these constraints. The <strong>hybrid engine</strong> is mainly about utilization: use the same expensive devices for training and rollout instead of leaving one pool idle. <strong>Memory choreography</strong> is what makes that sharing possible: before a phase switch, the system releases the memory pools the next phase needs. <strong>Zero-copy weight synchronization</strong> reduces the cost of moving the updated actor into the rollout engine. The different <strong>update_weights</strong> paths adapt that synchronization to real deployment topologies while preserving the cache-invalidation obligation after a successful update.</p>
 
-        <p>This is, mathematically, a resource-conflict problem with a Pareto frontier. The pragmatic solution — colocate both halves on the same GPUs and serialize them in time — turns the conflict into a sequencing problem. That sequencing problem is what the next six sections solve.</p>
+        <p>The remaining primitives come from the structure and timing of rollout itself. <strong>RadixAttention</strong> matters because some RL algorithms generate several completions from the same prompt, exposing a shared prefix that the inference engine can reuse instead of prefilling repeatedly. <strong>Async training</strong> matters because rollout times are uneven; waiting for the slowest trajectories wastes hardware, while training on partial or stale rollout data changes the statistical meaning of the update. The five-stage loop tells us these phases exist. The primitives explain how modern systems make the phase transitions cheap enough and disciplined enough to run at scale.</p>
+
       </section>

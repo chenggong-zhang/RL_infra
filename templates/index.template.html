@@ -141,6 +141,54 @@
     font-weight: 600;
     border-left-color: var(--purple);
   }
+  .site-nav .nav-collapsible .nav-row {
+    display: flex;
+    align-items: stretch;
+  }
+  .site-nav .nav-collapsible .nav-row .nav-link {
+    flex: 1;
+    min-width: 0;
+    padding-right: 8px;
+  }
+  .site-nav .nav-toggle {
+    width: 34px;
+    border: 0;
+    border-left: 1px solid rgba(114,83,237,0.08);
+    background: transparent;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .site-nav .nav-toggle:hover,
+  .site-nav .nav-toggle:focus-visible {
+    color: var(--purple-dark);
+    background: rgba(114,83,237,0.05);
+    outline: none;
+  }
+  .site-nav .nav-toggle::before {
+    content: "-";
+  }
+  .site-nav .nav-collapsible.is-collapsed .nav-toggle::before {
+    content: "+";
+  }
+  .site-nav .nav-collapsible.is-collapsed .nav-sublist {
+    display: none;
+  }
+  .site-nav .nav-sublist {
+    margin: 2px 0 8px 0;
+  }
+  .site-nav .nav-sublink {
+    padding: 2px 28px 2px 44px;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.35;
+    border-left: 3px solid transparent;
+  }
+  .site-nav .nav-sublink:hover {
+    background: rgba(114,83,237,0.04);
+    color: var(--purple-dark);
+  }
 
   .main-wrap {
     margin-left: var(--sidebar-w);
@@ -389,6 +437,38 @@
   .primer-box strong {
     color: #193968;
   }
+  .primer-box .formula-display {
+    margin: 10px 0;
+    padding: 10px 12px;
+    overflow-x: auto;
+    background: #ffffff;
+    border: 1px solid #dbeafe;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: #1d3557;
+    white-space: nowrap;
+  }
+  .question-box {
+    margin: 18px 0 22px;
+    padding: 14px 16px;
+    background: #fffaf0;
+    border: 1px solid #f1d49a;
+    border-left: 4px solid #c98200;
+    border-radius: 6px;
+  }
+  .question-box p {
+    margin: 0 0 10px;
+    font-size: 14px;
+    line-height: 1.65;
+    color: #4d3a17;
+  }
+  .question-box p:last-child {
+    margin-bottom: 0;
+  }
+  .question-box strong {
+    color: #7a4d00;
+  }
 
   .label {
     display: inline-block;
@@ -571,8 +651,20 @@
     <li><a href="#top" class="nav-link active">Opening</a></li>
     <li><a href="#why" class="nav-link">Preface</a></li>
     <li><a href="#how-to-read" class="nav-link">How to read this survey</a></li>
-    <li><a href="#skeleton" class="nav-link">The skeleton</a></li>
-    <li><a href="#tension" class="nav-link">The central tension</a></li>
+    <li class="nav-collapsible" data-nav-collapsible>
+      <div class="nav-row">
+        <a href="#skeleton" class="nav-link">The skeleton</a>
+        <button class="nav-toggle" type="button" aria-expanded="true" aria-controls="skeleton-stages" aria-label="Collapse skeleton stages"></button>
+      </div>
+      <ul id="skeleton-stages" class="nav-sublist">
+        <li><a href="#stage-generate" class="nav-sublink">Stage 1 · Generate</a></li>
+        <li><a href="#stage-score" class="nav-sublink">Stage 2 · Score</a></li>
+        <li><a href="#stage-filter" class="nav-sublink">Stage 3 · Mask/select</a></li>
+        <li><a href="#stage-train" class="nav-sublink">Stage 4 · Train</a></li>
+        <li><a href="#stage-sync" class="nav-sublink">Stage 5 · Sync</a></li>
+      </ul>
+    </li>
+    <li><a href="#tension" class="nav-link">Why five stages are not enough</a></li>
   </ul>
 
   <div class="nav-heading">Engineering primitives</div>
@@ -632,7 +724,7 @@
       <li><a href="#why">Preface</a></li>
       <li><a href="#how-to-read">How to read this survey</a></li>
       <li><a href="#skeleton">The skeleton</a></li>
-      <li><a href="#tension">The central tension</a></li>
+      <li><a href="#tension">Why five stages are not enough</a></li>
     </ul>
 
     <h4>② Six primitives</h4>
@@ -701,6 +793,17 @@ const observer = new IntersectionObserver(entries => {
   });
 }, { rootMargin: '-80px 0px -70% 0px' });
 sections.forEach(s => { if (s.id) observer.observe(s); });
+
+document.querySelectorAll('[data-nav-collapsible]').forEach(item => {
+  const toggle = item.querySelector('.nav-toggle');
+  if (!toggle) return;
+
+  toggle.addEventListener('click', () => {
+    const collapsed = item.classList.toggle('is-collapsed');
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    toggle.setAttribute('aria-label', collapsed ? 'Expand skeleton stages' : 'Collapse skeleton stages');
+  });
+});
 
 const searchBox = document.getElementById('searchBox');
 if (searchBox) {
