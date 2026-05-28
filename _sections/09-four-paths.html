@@ -12,8 +12,8 @@
 
         <p>The pattern is functor-like: the same operation lifted to different categories of topology. What matters mathematically is that all four methods share <code>flush_cache_after_weight_update</code>. The RadixCache (next subsection) must be invalidated because old prefix entries reference the old policy — keeping them would mean the inference engine is serving generations based on a model that no longer exists. Cache invalidation is the inherent consistency obligation; the four transports differ in how they get the bytes to the inference engine, but they all owe the same invariant downstream.</p>
 
-<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/scheduler_update_weights_mixin.py" target="_blank"><span class="file-path">python/sglang/srt/managers/scheduler_update_weights_mixin.py</span><span class="file-meta">· four transports, one verb</span></a>
-<pre class="with-source"><code>class SchedulerUpdateWeightsMixin:
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/scheduler_components/weight_updater.py" target="_blank"><span class="file-path">python/sglang/srt/managers/scheduler_components/weight_updater.py</span><span class="file-meta">· four transports, one verb</span></a>
+<pre class="with-source"><code>class SchedulerWeightUpdaterManager:
     def update_weights_from_disk(self, recv_req):
         success, message = self.tp_worker.update_weights_from_disk(recv_req)
         if success and self.draft_worker is not None:

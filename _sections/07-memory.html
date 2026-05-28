@@ -3,38 +3,314 @@
       <section id="memory">
         <h3>② Memory choreography</h3>
 
-        <p>The hybrid engine works because two functions encode the entire concurrency contract: <code>release_memory_occupation</code> and <code>resume_memory_occupation</code>. They pause the inference engine, hand the GPU to the trainer, then restore it. The implementation is granular — three independent memory pools (KV cache, weights, CUDA graphs) can be released independently.</p>
+        <p>The previous chapter answered the placement question: rollout workers and actor training can live on the same GPU allocation. It did not yet explain how GPU memory is shared. Generation needs weights, KV cache, and runtime buffers; training needs weights, gradients, optimizer states, and activations. This chapter explains why sleep, wake, release, and resume are not minor optimizations, but the phase-switch protocol that makes colocation possible.</p>
+
+        <h4>6.1 What lives in GPU memory?</h4>
+
+        <div class="primer-box">
+          <strong>GPU memory is not one object.</strong>
+          <p>When people say "the GPU is full," they are usually mixing several different things that live on the GPU for different reasons. Some are the model itself. Some are temporary states created while generating tokens. Some are temporary states created while computing gradients. Memory choreography starts by separating these objects, because releasing one kind of memory may be harmless while releasing another may destroy the current phase of computation.</p>
+        </div>
+
+        <p><strong>Weights</strong> are the model parameters: attention matrices, MLP weights, embeddings, and so on. Generation reads them to produce tokens; training changes them through optimizer updates. In RL infra, weights are also versioned state: rollout should use the actor version the algorithm thinks it is using.</p>
+
+        <p><strong>KV cache</strong> is generation-side memory. It stores key/value tensors for previous tokens, so decoding the next token does not recompute the whole prefix. It speeds up rollout but can grow quickly with batch size and sequence length.</p>
+
+        <p><strong>CUDA graphs</strong> are serving-side performance machinery. For repeated generation workloads with stable shapes, the engine can capture a sequence of GPU operations once and replay it with lower CPU overhead. This does not change the model's math, but the captured graph and its associated buffers still occupy GPU memory.</p>
+
+        <p><strong>Runtime buffers</strong> are temporary workspaces used while kernels run. Attention kernels, communication collectives, batching logic, and inference schedulers may all need scratch memory to execute efficiently. These buffers are easy to miss because they are not model weights or generated tokens, but they can still decide whether a large rollout batch fits.</p>
+
+        <p><strong>Gradients</strong> are training-side memory. Backpropagation produces gradients for trainable parameters, and the optimizer uses them to change the weights. They are unnecessary during rollout but essential during actor training.</p>
+
+        <p><strong>Optimizer state</strong> is also training-side memory. Adam-style optimizers keep extra statistics such as momentum and second-moment estimates, often sharded across workers. This memory is not needed to serve tokens, but it is needed to update the actor.</p>
+
+        <p><strong>Activations</strong> are intermediate tensors produced during the forward pass. Training needs them, or needs to recompute them, for backward computation. Inference activations are mostly temporary; the long-lived inference state is usually the KV cache.</p>
+
+        <p>These objects matter because rollout and training do not need the same GPU memory at the same time. During generation, the system wants serving weights, KV cache, CUDA graphs, and runtime buffers so rollout can be fast. During training, the system needs room for activations, gradients, and optimizer work so the actor can be updated. If both phases live on the same GPU allocation, the framework has to switch the GPU from a serving shape to a training shape and then back again. The next section shows how sleep and resume APIs make that phase switch explicit.</p>
+
+        <h4>6.2 Sleep mode as a phase-switch protocol</h4>
+
+        <p>The previous list explains why colocation needs a phase switch. During rollout, the GPU allocation is shaped for serving; during training, it must make room for backward and optimizer work. The timeline below is the mental model for the rest of this section:</p>
 
         <figure>
-          <img src="diagrams/03-hybrid-engine-timeline.svg" alt="Timeline of memory ownership swapping between inference and training across T=0 to T=5, with release_memory_occupation and resume_memory_occupation marking the transitions.">
-          <figcaption><span class="fig-label">Figure 3.</span> One GPU, two roles. Two function calls encode the contract — no locks, no races, no torn reads.</figcaption>
+          <img src="diagrams/03-hybrid-engine-timeline.svg" alt="Timeline of a shared GPU allocation switching from rollout memory to training memory and back through release and resume calls.">
+          <figcaption><span class="fig-label">Figure 3.</span> A shared GPU allocation alternates between rollout memory and training memory. Release and resume are the inference-engine side of this phase switch; the RL framework still coordinates training, weight sync, and the next rollout.</figcaption>
         </figure>
 
-        <p>Here's the actual implementation in SGLang. The mathematical interest is in the <code>assert is_fully_idle()</code> at the top: the function literally cannot run if any request is in flight. The concurrency contract is checked structurally, not by convention. Each <code>if tag in tags</code> branch is a separate pool with its own pause semantics — granularity is the point.</p>
+        <p>Frameworks often describe this transition as putting the rollout engine to "sleep" and later "waking" or "resuming" it. The word sleep is a framework-level shorthand: the rollout server process is still there, but it is no longer occupying the same GPU memory shape as an active inference engine. In SGLang, the concrete mechanism underneath that shorthand is <code>release_memory_occupation</code> and <code>resume_memory_occupation</code>. These APIs let the caller release or resume selected memory regions such as <code>kv_cache</code>, <code>weights</code>, and, in the scheduler implementation, <code>cuda_graph</code>.</p>
 
-<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/scheduler_update_weights_mixin.py" target="_blank"><span class="file-path">python/sglang/srt/managers/scheduler_update_weights_mixin.py</span><span class="file-meta">· tag-based memory pause</span></a>
-<pre class="with-source"><code>def release_memory_occupation(self, recv_req):
-    assert self.is_fully_idle(), \
+        <p>The public control surface is small. A caller passes optional tags into release or resume; if no tags are provided, SGLang treats the request as applying to all supported memory regions:</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/entrypoints/engine.py" target="_blank"><span class="file-path">python/sglang/srt/entrypoints/engine.py</span><span class="file-meta">· release/resume API</span></a>
+<pre class="with-source"><code class="language-python">def release_memory_occupation(self, tags: Optional[List[str]] = None):
+    obj = <span class="code-hl">ReleaseMemoryOccupationReqInput(tags=tags)</span>
+    return self.loop.run_until_complete(
+        self.tokenizer_manager.<span class="code-hl">release_memory_occupation</span>(obj, None)
+    )
+
+def resume_memory_occupation(self, tags: Optional[List[str]] = None):
+    obj = <span class="code-hl">ResumeMemoryOccupationReqInput(tags=tags)</span>
+    return self.loop.run_until_complete(
+        self.tokenizer_manager.<span class="code-hl">resume_memory_occupation</span>(obj, None)
+    )</code></pre>
+
+        <p>This API turns a framework-level phase decision into a structured memory request for the inference engine: "these memory regions may leave GPU now" or "these memory regions are needed again." The important design choice is the <code>tags</code> argument. A framework can release only KV cache, or release both KV cache and weights, instead of treating rollout memory as one indivisible block.</p>
+
+        <p>The real protocol appears on the scheduler side. Release is allowed only at a safe boundary, and each memory resident has different release behavior:</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/scheduler_components/weight_updater.py" target="_blank"><span class="file-path">python/sglang/srt/managers/scheduler_components/weight_updater.py</span><span class="file-meta">· scheduler-side memory release</span></a>
+<pre class="with-source"><code class="language-python">def release_memory_occupation(self, recv_req: ReleaseMemoryOccupationReqInput):
+    <span class="code-hl">assert self.is_fully_idle()</span>, (
         "release_memory_occupation should be called only when server is idle."
+    )
 
-    tags = recv_req.tags or GPU_MEMORY_ALL_TYPES
+    tags = recv_req.tags
+    if tags is None or len(tags) == 0:
+        tags = <span class="code-hl">GPU_MEMORY_ALL_TYPES</span>
+
     for tag in tags:
         self.offload_tags.add(tag)
 
     if GPU_MEMORY_TYPE_KV_CACHE in tags:
-        self.memory_saver_adapter.pause(GPU_MEMORY_TYPE_KV_CACHE)
-        self.flush_cache()
+        self.memory_saver_adapter.<span class="code-hl">pause</span>(GPU_MEMORY_TYPE_KV_CACHE)
+        self.<span class="code-hl">flush_cache</span>()
 
     if GPU_MEMORY_TYPE_WEIGHTS in tags:
-        self.stashed_model_static_state = _export_static_state(
+        self.stashed_model_static_state = <span class="code-hl">_export_static_state</span>(
             self.tp_worker.model_runner.model
         )
-        torch.distributed.barrier(self.tp_cpu_group)
-        self.memory_saver_adapter.pause(GPU_MEMORY_TYPE_WEIGHTS)
+        torch.distributed.<span class="code-hl">barrier</span>(self.tp_cpu_group)
+        self.memory_saver_adapter.<span class="code-hl">pause</span>(GPU_MEMORY_TYPE_WEIGHTS)
 
     if GPU_MEMORY_TYPE_CUDA_GRAPH in tags:
-        self.memory_saver_adapter.pause(GPU_MEMORY_TYPE_CUDA_GRAPH)
+        self.memory_saver_adapter.<span class="code-hl">pause</span>(GPU_MEMORY_TYPE_CUDA_GRAPH)
 
-    torch.get_device_module().synchronize()
-    return ReleaseMemoryOccupationReqOutput()</code></pre>
+    torch.get_device_module().<span class="code-hl">synchronize</span>()</code></pre>
+
+        <p>There are four details worth reading slowly. First, <code>is_fully_idle()</code> makes release a phase-boundary operation: SGLang should not offload memory while a request is still decoding. Second, <code>recv_req.tags</code> becomes concrete branches such as <code>if GPU_MEMORY_TYPE_KV_CACHE in tags</code> and <code>if GPU_MEMORY_TYPE_WEIGHTS in tags</code>, so the caller's policy decides which residents are affected. Third, the KV branch calls both <code>pause(GPU_MEMORY_TYPE_KV_CACHE)</code> and <code>flush_cache()</code>. The old attention history is gone; later resume restores the ability to allocate KV cache, not the old cache contents. Fourth, the weights branch first calls <code>_export_static_state(...)</code>. In this file, that helper clones the model's named buffers, so SGLang keeps a small piece of model state that must survive while the weight region is paused. Then <code>torch.distributed.barrier(...)</code> makes every rank in the tensor-parallel CPU group wait until the others also reach this point. Only after the group is synchronized does SGLang call <code>pause(GPU_MEMORY_TYPE_WEIGHTS)</code>. This matters because a serving model may be split across several tensor-parallel ranks; weight release has to happen as a group boundary, not as an independent local action on one rank.</p>
+
+        <div class="primer-box">
+          <strong>What does "paused" mean?</strong>
+          <p>A paused region is a region that the inference engine has temporarily made unavailable for active serving. The rollout process and its scheduler still exist. The model object still has enough structure for SGLang to resume later. What changes is the GPU-resident form of the selected memory region. For <code>kv_cache</code>, SGLang flushes the old cache entries and later resumes the capacity to build new ones. For <code>weights</code>, SGLang saves static buffer state, synchronizes the tensor-parallel group, and lets the memory saver pause the weight region. So "pause weights" should be read as "make the serving weight region give up GPU memory until resume," rather than "permanently delete the model."</p>
+        </div>
+
+        <p>Resume is the other half of the protocol. It removes the tags from the offloaded set and brings the selected regions back before generation continues:</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/scheduler_components/weight_updater.py" target="_blank"><span class="file-path">python/sglang/srt/managers/scheduler_components/weight_updater.py</span><span class="file-meta">· scheduler-side memory resume</span></a>
+<pre class="with-source"><code class="language-python">def resume_memory_occupation(self, recv_req: ResumeMemoryOccupationReqInput):
+    tags = recv_req.tags
+    if tags is None or len(tags) == 0:
+        tags = <span class="code-hl">GPU_MEMORY_ALL_TYPES</span>
+
+    for tag in tags:
+        self.offload_tags.<span class="code-hl">remove</span>(tag)
+
+    if GPU_MEMORY_TYPE_CUDA_GRAPH in tags:
+        self.memory_saver_adapter.<span class="code-hl">resume</span>(GPU_MEMORY_TYPE_CUDA_GRAPH)
+
+    if GPU_MEMORY_TYPE_WEIGHTS in tags:
+        self.memory_saver_adapter.<span class="code-hl">resume</span>(GPU_MEMORY_TYPE_WEIGHTS)
+        torch.distributed.<span class="code-hl">barrier</span>(self.tp_cpu_group)
+        <span class="code-hl">_import_static_state</span>(
+            self.tp_worker.model_runner.model,
+            self.stashed_model_static_state,
+        )
+        del self.stashed_model_static_state
+
+    if GPU_MEMORY_TYPE_KV_CACHE in tags:
+        self.memory_saver_adapter.<span class="code-hl">resume</span>(GPU_MEMORY_TYPE_KV_CACHE)</code></pre>
+
+        <p>The resume path reverses the bookkeeping from release. First, <code>self.offload_tags.remove(tag)</code> marks the selected region as no longer offloaded. Then each branch restores the GPU-resident resource needed for serving. <code>resume(GPU_MEMORY_TYPE_CUDA_GRAPH)</code> brings back CUDA-graph execution state. <code>resume(GPU_MEMORY_TYPE_WEIGHTS)</code> makes the serving weights resident again, waits at <code>torch.distributed.barrier(...)</code>, and then <code>_import_static_state(...)</code> writes the saved buffers back into the model. Finally, <code>resume(GPU_MEMORY_TYPE_KV_CACHE)</code> restores KV-cache capacity. It does not restore old cache contents, because release already called <code>flush_cache()</code>; the next rollout will build fresh cache entries from new requests.</p>
+
+        <p>The outer RL framework decides which tags to use. In verl's SGLang rollout wrapper, <code>sleep_level</code> changes the release policy. A lighter mode releases only KV cache; the default path releases both KV cache and weights:</p>
+
+<a class="source-badge" href="https://github.com/volcengine/verl/blob/main/verl/workers/rollout/sglang_rollout/sglang_rollout.py" target="_blank"><span class="file-path">verl/workers/rollout/sglang_rollout/sglang_rollout.py</span><span class="file-meta">· framework policy for SGLang memory release</span></a>
+<pre class="with-source"><code class="language-python">async def release(self):
+    await self._init_server_adapter()
+    if self._engine is None:
+        return
+
+    if self._is_server_tp_leader() and self.config.free_cache_engine:
+        if self.sleep_level == 1:
+            tags = [<span class="code-hl">"kv_cache"</span>]
+        else:
+            tags = [<span class="code-hl">"kv_cache"</span>, <span class="code-hl">"weights"</span>]
+
+        await self._engine.<span class="code-hl">release_memory_occupation</span>(tags=tags)</code></pre>
+
+        <p>verl uses this wrapper to decide what "sleep rollout" means for one SGLang replica. <code>self.config.free_cache_engine</code> is the top-level switch: if it is disabled, this wrapper does not ask SGLang to release serving memory. <code>self._is_server_tp_leader()</code> restricts the call to one leader inside the serving tensor-parallel group, so a group of ranks does not send duplicate release commands. The actual memory policy is the <code>sleep_level</code> branch. With <code>sleep_level == 1</code>, verl sends only <code>["kv_cache"]</code>, keeping serving weights resident. Otherwise it sends <code>["kv_cache", "weights"]</code>, giving training more GPU room before the actor update phase.</p>
+
+        <h4>6.3 From offload to sleeping to staged wake-up</h4>
+
+        <p>The progression in this section follows Biao He's memory-management writeup on verl and SGLang.</p>
+
+        <a class="source-badge" href="https://hebiao064.github.io/rl-memory-management" target="_blank"><span class="file-path">Biao He: Efficient RL Training - Optimizing Memory Usage in verl</span><span class="file-meta">· memory saver explanation</span></a>
+
+        <p>Start with the simplest possible design: keep the training model and the rollout inference engine resident on the same GPUs. That is the cleanest mental model, but it often fails immediately. Rollout wants serving weights, KV cache, CUDA graphs, and buffers. Training also needs room for activations, gradients, and optimizer work. The combined peak can exceed GPU memory before the algorithm has done anything interesting.</p>
+
+        <figure>
+          <img src="assets/biao-memory/v0-naive-approach.png" alt="Original blog diagram for v0 naive approach, where training and inference memory are both resident and exceed GPU memory.">
+          <figcaption><span class="fig-label">Biao v0.</span> The naive baseline from Biao He's memory-management writeup: training memory and inference memory are both resident, so the combined peak can exceed GPU capacity.</figcaption>
+        </figure>
+
+        <p>The next attempt is to make one side leave. After training, the system can offload training weights, relaunch the inference engine for rollout, and reload weights. That reduces simultaneous GPU residency, but it puts weight loading and CUDA graph recapture on the phase-switch path.</p>
+
+        <figure>
+          <img src="assets/biao-memory/v1-offload-weights-to-cpu.png" alt="Original blog diagram for v1 offloading weights to CPU and relaunching the inference engine.">
+          <figcaption><span class="fig-label">Biao v1.</span> The offload-and-relaunch design reduces simultaneous residency, but rollout has to pay reload and CUDA-graph setup cost.</figcaption>
+        </figure>
+
+        <p>A better design would keep the serving CUDA graph alive while freeing large regions such as weights and KV cache during training. The obstacle is address stability. CUDA graph replay can depend on the virtual addresses of the tensors used when the graph was captured. If the system deletes those tensors and recreates them later, the new tensors may live at different addresses, and the captured graph may no longer be replayable. Sleep mode therefore has a precise goal: release physical GPU memory during training, preserve the virtual-address layout, and map physical memory back to the same addresses before rollout resumes.</p>
+
+        <figure>
+          <img src="assets/biao-memory/v2-sleeping-inference-engine.png" alt="Original blog diagram for v2 sleeping the inference engine while preserving CUDA graph compatibility.">
+          <figcaption><span class="fig-label">Biao v2.</span> Sleeping the inference engine keeps the serving runtime alive while releasing large memory regions during training.</figcaption>
+        </figure>
+
+        <p>To make this work, the runtime needs two capabilities. First, it must know which tensors belong to the memory region that may sleep, such as rollout weights or KV cache. Second, when that region sleeps, it must release the physical GPU memory while keeping enough address information to map memory back before rollout resumes. <code>torch_memory_saver</code> supports the first capability with <code>region(tag)</code>: tensors allocated inside the context are recorded as belonging to a named pausable region.</p>
+
+<a class="source-badge" href="https://github.com/fzyzcjy/torch_memory_saver/blob/master/torch_memory_saver/entrypoint.py" target="_blank"><span class="file-path">torch_memory_saver/entrypoint.py</span><span class="file-meta">· region config and tagged memory pool</span></a>
+<pre class="with-source"><code class="language-python">def region(self, tag: str, enable_cpu_backup: bool):
+    mem_pool = self._mem_pools[(tag, enable_cpu_backup)]
+    with torch.cuda.<span class="code-hl">use_mem_pool</span>(mem_pool):
+        with self._with_region_config(
+            <span class="code-hl">tag=tag</span>,
+            <span class="code-hl">enable_cpu_backup=enable_cpu_backup</span>,
+        ):
+            yield</code></pre>
+
+        <p>This small context manager is the labeling step. <code>tag</code> is the name that later pause/resume calls use to select a region, for example <code>"kv_cache"</code> or <code>"weights"</code>. <code>enable_cpu_backup</code> says whether tensor contents should be copied to CPU when the region is paused. <code>torch.cuda.use_mem_pool(mem_pool)</code> makes allocations inside the block use the tag-specific CUDA memory pool, so tensors created during <code>yield</code> are tracked as part of that region.</p>
+
+        <p>The second capability appears in the allocator. When memory is allocated inside a tagged region, the C++ side creates physical memory with <code>cu_mem_create</code>, reserves a virtual address with <code>cuMemAddressReserve</code>, maps the physical memory to that address with <code>cuMemMap</code>, and saves the tag with the allocation metadata through <code>allocation_metadata_.emplace</code>:</p>
+
+        <figure>
+          <img src="assets/biao-memory/cuda-malloc.png" alt="Original blog diagram showing CUDA virtual memory allocation: create a physical memory handle, reserve a virtual address range, map physical memory to that address, and store metadata.">
+          <figcaption><span class="fig-label">Biao CUDA malloc.</span> Allocation separates the virtual address from the physical memory handle, then stores the mapping in metadata.</figcaption>
+        </figure>
+
+<a class="source-badge" href="https://github.com/fzyzcjy/torch_memory_saver/blob/master/csrc/core.cpp" target="_blank"><span class="file-path">csrc/core.cpp</span><span class="file-meta">· allocate with stable virtual address and tag metadata</span></a>
+<pre class="with-source"><code class="language-cpp">CUmemGenericAllocationHandle allocHandle;
+CUDAUtils::<span class="code-hl">cu_mem_create</span>(&amp;allocHandle, size, device);
+
+<span class="code-hl">cuMemAddressReserve</span>((CUdeviceptr *)ptr, size, 0, 0, 0);
+<span class="code-hl">cuMemMap</span>((CUdeviceptr)*ptr, size, 0, allocHandle, 0);
+CUDAUtils::cu_mem_set_access(*ptr, size, device);
+
+allocation_metadata_.emplace(
+    *ptr,
+    AllocationMetadata{
+        size, device, <span class="code-hl">tag</span>,
+        AllocationState::ACTIVE,
+        enable_cpu_backup,
+        nullptr,
+        allocHandle,
+    }
+);</code></pre>
+
+        <p>Now the two directions are easy to name. <code>pause(tag)</code> finds allocations with that tag, unmaps their virtual addresses with <code>cuMemUnmap</code>, and releases their physical memory handles with <code>cuMemRelease</code>. <code>resume(tag)</code> creates fresh physical memory with <code>cu_mem_create</code> and maps it back to the same saved pointer with <code>cuMemMap</code>:</p>
+
+<a class="source-badge" href="https://github.com/fzyzcjy/torch_memory_saver/blob/master/csrc/core.cpp" target="_blank"><span class="file-path">csrc/core.cpp</span><span class="file-meta">· pause releases physical memory; resume remaps it</span></a>
+<pre class="with-source"><code class="language-cpp">void TorchMemorySaver::pause(const std::string&amp; tag) {
+    for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
+        void *ptr = it-&gt;first;
+        AllocationMetadata&amp; metadata = it-&gt;second;
+        if (!tag.empty() &amp;&amp; metadata.tag != tag) continue;
+
+        if (metadata.enable_cpu_backup) {
+            cudaMemcpy(metadata.cpu_backup, ptr, metadata.size, cudaMemcpyDeviceToHost);
+        }
+
+        <span class="code-hl">cuMemUnmap</span>((CUdeviceptr)ptr, metadata.size);
+        <span class="code-hl">cuMemRelease</span>(metadata.allocHandle);
+        metadata.state = AllocationState::PAUSED;
+    }
+}
+
+void TorchMemorySaver::resume(const std::string&amp; tag) {
+    for (auto it = allocation_metadata_.begin(); it != allocation_metadata_.end(); ++it) {
+        void *ptr = it-&gt;first;
+        AllocationMetadata&amp; metadata = it-&gt;second;
+        if (!tag.empty() &amp;&amp; metadata.tag != tag) continue;
+
+        CUmemGenericAllocationHandle newAllocHandle;
+        CUDAUtils::<span class="code-hl">cu_mem_create</span>(&amp;newAllocHandle, metadata.size, metadata.device);
+        <span class="code-hl">cuMemMap</span>((CUdeviceptr)ptr, metadata.size, 0, newAllocHandle, 0);
+        CUDAUtils::cu_mem_set_access(ptr, metadata.size, metadata.device);
+        metadata.state = AllocationState::ACTIVE;
+        metadata.allocHandle = newAllocHandle;
+    }
+}</code></pre>
+
+        <p>That is the implementation behind the blog's sleep-mode story. The tensor's address survives the pause/resume cycle; the physical memory can leave during training and come back before rollout.</p>
+
+        <p>SGLang integrates this by allocating its large rollout residents inside tagged regions. The KV-cache tables and attention buffers are created under <code>GPU_MEMORY_TYPE_KV_CACHE</code>; serving weights are created under <code>GPU_MEMORY_TYPE_WEIGHTS</code>:</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/mem_cache/memory_pool.py" target="_blank"><span class="file-path">python/sglang/srt/mem_cache/memory_pool.py</span><span class="file-meta">· KV cache tensors are allocated in a pausable region</span></a>
+<pre class="with-source"><code class="language-python"># request-to-token table
+with memory_saver_adapter.<span class="code-hl">region(GPU_MEMORY_TYPE_KV_CACHE)</span>:
+    self.req_to_token = torch.zeros(
+        (self._alloc_size, max_context_len),
+        dtype=torch.int32,
+        device=device,
+    )
+
+# attention KV buffers
+with self.memory_saver_adapter.<span class="code-hl">region(GPU_MEMORY_TYPE_KV_CACHE)</span>:
+    # [size, head_num, head_dim] for each layer
+    ...
+</code></pre>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/model_executor/model_runner.py" target="_blank"><span class="file-path">python/sglang/srt/model_executor/model_runner.py</span><span class="file-meta">· serving weights are allocated in a pausable region</span></a>
+<pre class="with-source"><code class="language-python">with self.memory_saver_adapter.<span class="code-hl">region(
+    GPU_MEMORY_TYPE_WEIGHTS,
+    enable_cpu_backup=enable_cpu_backup,
+)</span>:
+    self.loader = get_model_loader(...)
+    self.model = self.loader.load_model(...)</code></pre>
+
+        <p>This is the SGLang-side meaning of the tags used in 6.2. When SGLang releases <code>kv_cache</code>, the memory saver knows which allocations to pause. When SGLang resumes <code>kv_cache</code>, the rollout engine regains cache capacity and will build fresh KV entries for new requests. For weights, <code>enable_cpu_backup</code> is the detail that lets the memory saver preserve tensor contents across a pause when that mode is used.</p>
+
+        <p>The final step in this progression is multi-stage wake-up. Even after sleep mode exists, resuming everything at once can create a temporary memory spike: training weights, inference weights, and KV cache may overlap during the handoff. verl's SGLang path follows the same staged shape: resume rollout weights, sync updated actor weights, offload training-side model memory when configured, then resume KV cache.</p>
+
+        <figure>
+          <img src="assets/biao-memory/v3-multi-stage-resume.png" alt="Original blog diagram for v3 multi-stage resume: resume weights, sync weights, offload training model, then resume KV cache.">
+          <figcaption><span class="fig-label">Biao v3.</span> Multi-stage wake-up resumes only the memory regions needed for each step, avoiding a temporary peak where training memory and full rollout cache overlap.</figcaption>
+        </figure>
+
+<a class="source-badge" href="https://github.com/volcengine/verl/blob/main/verl/workers/engine_workers.py" target="_blank"><span class="file-path">verl/workers/engine_workers.py</span><span class="file-meta">· selected excerpt: staged wake-up around rollout weight sync</span></a>
+<pre class="with-source"><code class="language-python">effective_mode = mode if mode != "auto" else self.config.rollout.checkpoint_engine.backend
+
+# send updated actor weights through the checkpoint engine
+if effective_mode != "naive":
+    per_tensor_param, _ = self.actor.engine.<span class="code-hl">get_per_tensor_param</span>()
+    await self.checkpoint_engine.send_weights(per_tensor_param)
+    return
+
+# resume rollout weights first
+if self.config.rollout.free_cache_engine:
+    await self.rollout.<span class="code-hl">resume(tags=["weights"])</span>
+
+# read updated actor weights from the training engine
+per_tensor_param, peft_config = self.actor.engine.<span class="code-hl">get_per_tensor_param</span>(
+    layered_summon=self.layered_summon, base_sync_done=True
+)
+
+# sync updated actor weights into rollout
+await self.rollout.<span class="code-hl">update_weights</span>(
+    per_tensor_param, peft_config=peft_config, base_sync_done=True, global_steps=global_steps
+)
+
+# offload training-side model memory before resuming KV cache
+if self.actor.engine.is_param_offload_enabled:
+    self.actor.engine.<span class="code-hl">to("cpu", model=True, optimizer=False, grad=False)</span>
+aggressive_empty_cache(force_sync=True)
+
+# resume KV cache last
+if self.config.rollout.free_cache_engine:
+    await self.rollout.<span class="code-hl">resume(tags=["kv_cache"])</span>
+
+self.base_sync_done = True
+set_expandable_segments(True)</code></pre>
+
+        <p>The first two primitives now fit together. The hybrid engine primitive explains how one actor can alternate between rollout and training roles on a shared GPU allocation. Memory choreography explains how that alternation becomes physically possible: rollout memory can step aside during training, and the inference engine can later resume the regions needed for the next rollout. The next primitive asks what happens at the most delicate point in that transition: after training changes the actor, how do the new weights reach the rollout engine without turning every iteration into a full checkpoint copy?</p>
       </section>
