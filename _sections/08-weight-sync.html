@@ -3,13 +3,91 @@
       <section id="weight-sync">
         <h3>③ Zero-copy weight synchronization</h3>
 
-        <p>After each training step the trainer has a new policy θ<sub>t+1</sub>; the inference engine still has θ<sub>t</sub>. Naively, you serialize the new weights, send them, deserialize. On a 70B model that's tens of milliseconds per parameter, with thousands of parameters per layer — minutes per training step, untenable.</p>
+        <p>After actor training, the new policy θ<sub>t+1</sub> exists first inside the training engine. The rollout engine is a separate serving runtime, so it may still have the old policy θ<sub>t</sub> loaded in its inference model. Weight synchronization is the step that makes the sentence "the next rollout uses the updated actor" physically true.</p>
 
-        <p>The trick is to never move the tensor data. The trainer process has the new weights in GPU memory; the inference process is either on the same host or shares a NCCL group with the trainer. The trainer sends only a <strong>handle tuple</strong> — pointer, stride, offset, CUDA IPC descriptor — under a kilobyte. The inference process reconstructs a Python tensor object that points to the same physical GPU memory.</p>
+        <p>The simplest useful implementation is the local tensor path. Instead of writing a checkpoint to disk and asking the rollout engine to reload the whole actor, the trainer exposes the updated parameters as <strong>named tensors</strong>: pairs like <code>("model.layers.0...weight", tensor)</code>. The rollout adapter then prepares those tensors in bounded chunks, because a full actor can be too large to handle as one transfer unit. This section stays on the upstream side of the handoff: how verl prepares tensor buckets and SGLang-ready descriptors. The next section will cover the receiving verbs such as <code>update_weights_from_tensor</code>.</p>
 
-        <p>What's mathematically interesting here is that the abstraction is functorial: a Python <code>Tensor</code> is a thin wrapper around an underlying memory descriptor, and reconstructing the wrapper is independent of moving the bytes. The trainer and inference engine end up with two different objects denoting the same memory. The synchronization cost goes from O(parameters × byte_throughput) to O(parameters × pointer_size). Sub-millisecond instead of minutes.</p>
+        <p>Before reading the code, separate two meanings of "send weights." A byte-copy path would copy a GPU tensor to CPU, encode all parameter values into a payload, send that payload, decode it, and copy the values back into GPU memory on the rollout side. The local tensor path is designed to avoid that control-plane byte copy. The trainer still has a real tensor <code>W</code> in GPU memory; the handoff should pass a descriptor for how to find <code>W</code>'s storage, not a serialized list of all values in <code>W</code>. The first code block below only shows the outer loop that enters this path. The descriptor mechanism appears in the second code block.</p>
 
-        <aside class="note warn">
-          <strong>Pitfall.</strong> verl's implementation requires <code>monkey_patch_torch_reductions()</code> to register the CUDA IPC handle deserializer. Missing this causes intermittent segfaults on the SGLang side, not deterministic ones — exactly the kind of bug a mathematician would call a "leaky abstraction." The handle tuple appears to be opaque, but its semantics depend on a global registration step. Read the integration code line by line.
-        </aside>
+        <p>In verl's SGLang rollout adapter, the outer path starts in <code>update_weights</code>. The trainer-side worker passes in a generator of named tensors. The adapter buckets them, optionally converts them for FP8 loading, and then calls SGLang's weight-update helper one bucket at a time:</p>
+
+<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/workers/rollout/sglang_rollout/sglang_rollout.py" target="_blank"><span class="file-path">verl/workers/rollout/sglang_rollout/sglang_rollout.py</span><span class="file-meta">· bucket actor weights before SGLang refit</span></a>
+<pre class="with-source"><code class="language-python">async def update_weights(
+    self,
+    weights: Generator[tuple[str, torch.Tensor], None, None],
+    global_steps: int = None,
+    **kwargs,
+):
+    await self._init_server_adapter()
+
+    update_weights_bucket_bytes = <span class="code-hl">(
+        int(self.config.checkpoint_engine.update_weights_bucket_megabytes) &lt;&lt; 20
+    )</span>
+
+    if self.config.get("quantization", None) == "fp8":
+        # omitted: construct SGLangFP8QuantizerHelper from model config
+        weights = fp8_quantizer_helper.quant_weights_by_name(
+            weights,
+            dtype=self.model_config.hf_config.dtype,
+        )
+
+    async for <span class="code-hl">params_batch</span> in <span class="code-hl">get_named_tensor_buckets</span>(
+        weights, <span class="code-hl">update_weights_bucket_bytes</span>
+    ):
+        await <span class="code-hl">sgl_update_weights</span>(
+            engine=self._engine,
+            params_batch=params_batch,
+            <span class="code-hl">device_mesh_key="infer_tp"</span>,
+            <span class="code-hl">device_mesh=self.device_mesh</span>,
+        )
+
+    if self._engine is not None and self._is_server_tp_leader():
+        await self._engine.<span class="code-hl">flush_cache</span>()</code></pre>
+
+        <p>This block is the outer loop of weight sync. <code>update_weights_bucket_bytes</code> sets how large one update chunk can be. <code>get_named_tensor_buckets(...)</code> cuts the stream of named weights into chunks of roughly that size. For each chunk, verl calls <code>sgl_update_weights(...)</code>, the helper that will turn tensors into transferable handles and send them toward SGLang. The <code>device_mesh_key="infer_tp"</code> argument tells the helper to organize this handoff according to the rollout engine's tensor-parallel ranks. After all chunks are updated, <code>flush_cache()</code> clears cache entries produced under the old weights.</p>
+
+        <p>The zero-copy part appears inside the helper called in the previous block: <code>sgl_update_weights(...)</code>. The Awesome-ML-SYS tutorial gives the clearest small version of that co-located verl path. The key line is <code>MultiprocessingSerializer.serialize(...)</code>: it returns a handle tuple for a tensor, not the tensor's full value buffer. The rest of the helper gathers those handle tuples and packages them as <code>LocalSerializedTensor</code>.</p>
+
+        <a class="source-badge" href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/sys-design/readme-1-EN.md" target="_blank"><span class="file-path">Awesome-ML-SYS: Weight Update Mechanisms</span><span class="file-meta">· co-located verl tensor-handle path</span></a>
+<pre class="with-source"><code class="language-python">def _preprocess_tensor_for_update_weights(tensor: torch.Tensor):
+    if isinstance(tensor, DTensor):
+        return tensor.<span class="code-hl">full_tensor</span>()
+    return tensor
+
+for tensor_index, (name, tensor) in enumerate(named_tensors):
+    serialized_tensor = <span class="code-hl">MultiprocessingSerializer.serialize</span>(
+        _preprocess_tensor_for_update_weights(tensor)
+    )
+
+    if self.device_mesh["infer_tp"].get_local_rank() == 0:
+        gathered_serialized_tensors = [
+            None for _ in range(self.device_mesh["infer_tp"].mesh.size()[0])
+        ]
+    else:
+        gathered_serialized_tensors = None
+
+    dist.<span class="code-hl">gather_object</span>(
+        obj=serialized_tensor,
+        object_gather_list=gathered_serialized_tensors,
+        dst=self.device_mesh["infer_tp"].mesh.tolist()[0],
+        group=self.device_mesh["infer_tp"].get_group(),
+    )
+
+    if self.device_mesh["infer_tp"].get_local_rank() == 0:
+        await self.inference_engine.update_weights_from_tensor(
+            named_tensors=[
+                (name, <span class="code-hl">LocalSerializedTensor</span>(values=gathered_serialized_tensors))
+            ],
+            load_format=load_format,
+            flush_cache=tensor_index == len(named_tensors) - 1,
+        )</code></pre>
+
+        <p>Read this block as the handle path. <code>full_tensor()</code> produces the tensor object for the current parameter. <code>MultiprocessingSerializer.serialize(...)</code> does not turn that tensor's values into a Python byte payload; it produces a handle-like object for that tensor. <code>gather_object(...)</code> then gathers those handle objects, not full parameter values, to inference TP rank 0. Finally, <code>LocalSerializedTensor(values=...)</code> stores one gathered handle per inference TP rank, so the receiving side can later choose the handle for its own <code>tp_rank</code>.</p>
+
+        <p><strong>Tensor serialization.</strong> For a CUDA tensor, the serialized object is better understood as a handle tuple. It contains reconstruction information such as tensor type, shape, stride, storage offset, dtype, source device, CUDA allocation handle, storage size, reference-counter handle, and event/synchronization metadata. It does not contain the actual parameter values. So the receiver gets instructions for reconstructing a tensor reference, not a copied list of weights.</p>
+
+        <p><strong>Gathering handles.</strong> Each inference TP rank participates in <code>dist.gather_object(...)</code> by sending its own serialized handle. Only the destination rank, here inference TP rank 0, receives the full list <code>[handle_rank0, handle_rank1, ...]</code>; non-destination ranks keep <code>gathered_serialized_tensors = None</code>. This keeps the control object centralized: rank 0 passes one <code>LocalSerializedTensor</code> containing all rank handles to SGLang, instead of making every rank hold the full handle list.</p>
+
+        <p>This section stops at the handle handoff. Section ④ follows the receiving side: how SGLang turns those handles, or other transport inputs, into updated serving weights.</p>
+
       </section>
