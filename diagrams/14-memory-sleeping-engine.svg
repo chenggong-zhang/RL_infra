@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2380 980" role="img" aria-labelledby="title desc">
+  <title id="title">Sleeping inference engine across rollout, training, update, and rollout</title>
+  <desc id="desc">First rollout has SGLang CUDA graph, KV cache, and serving model. During training only CUDA graph remains with optimizer state and training model. During update weights SGLang resumes KV cache and serving model while training model remains. During rollout SGLang is active and training memory is not used.</desc>
+  <defs>
+    <pattern id="blue-hatch" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="9" height="9" fill="#eaf6ff"/><line x1="0" y1="0" x2="0" y2="9" stroke="#8ecaf8" stroke-width="1.7"/></pattern>
+    <pattern id="green-hatch" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="9" height="9" fill="#effcee"/><line x1="0" y1="0" x2="0" y2="9" stroke="#8cdf9b" stroke-width="1.7"/></pattern>
+    <pattern id="red-hatch" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="9" height="9" fill="#fff0f0"/><line x1="0" y1="0" x2="0" y2="9" stroke="#f3a0a0" stroke-width="1.7"/></pattern>
+    <style>
+      .bg{fill:#fbfaf7}.gpu{fill:#fff;stroke:#24222a;stroke-width:2;rx:18}.blue{fill:url(#blue-hatch);stroke:#24222a;stroke-width:1.7;rx:12}.green{fill:url(#green-hatch);stroke:#24222a;stroke-width:1.7;rx:12}.red{fill:url(#red-hatch);stroke:#24222a;stroke-width:1.7;rx:12}
+      .title{font:700 27px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#24222a}.phase{font:700 26px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#24222a}.label{font:700 22px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#24222a}.small{font:600 16px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#5d5862}
+    </style>
+  </defs>
+  <rect class="bg" width="2380" height="980"/>
+  <text class="title" x="68" y="56">v2: sleeping keeps SGLang alive while selected regions disappear and return</text>
+
+  <text class="phase" x="126" y="112">First Rollout</text>
+  <rect class="gpu" x="42" y="190" width="520" height="720"/>
+  <rect class="blue" x="64" y="210" width="476" height="548"/>
+  <text class="label" x="260" y="250">SGLang</text>
+  <rect class="blue" x="82" y="282" width="440" height="56"/>
+  <text class="label" x="202" y="320">CUDA Graph</text>
+  <rect class="blue" x="82" y="352" width="440" height="232"/>
+  <text class="label" x="244" y="478">KV Cache</text>
+  <rect class="blue" x="82" y="600" width="440" height="140"/>
+  <text class="label" x="212" y="680">Serving Model</text>
+
+  <text class="phase" x="780" y="78">During Training</text>
+  <rect class="gpu" x="640" y="190" width="520" height="720"/>
+  <rect class="blue" x="662" y="210" width="476" height="124"/>
+  <text class="label" x="858" y="250">SGLang</text>
+  <rect class="blue" x="682" y="276" width="436" height="44"/>
+  <text class="label" x="796" y="307">CUDA Graph</text>
+  <rect class="green" x="682" y="560" width="436" height="158"/>
+  <text class="label" x="790" y="650">Optimizer State</text>
+  <rect class="green" x="682" y="736" width="436" height="152"/>
+  <text class="label" x="796" y="824">Training Model</text>
+  <text class="small" x="704" y="392">KV cache and serving weights are paused.</text>
+
+  <text class="phase" x="1292" y="78">During Update Weights</text>
+  <rect class="gpu" x="1238" y="190" width="520" height="720"/>
+  <rect class="blue" x="1260" y="210" width="476" height="552"/>
+  <text class="label" x="1456" y="250">SGLang</text>
+  <rect class="blue" x="1280" y="274" width="436" height="56"/>
+  <text class="label" x="1396" y="313">CUDA Graph</text>
+  <rect class="blue" x="1280" y="346" width="436" height="230"/>
+  <text class="label" x="1442" y="470">KV Cache</text>
+  <rect class="blue" x="1280" y="590" width="436" height="150"/>
+  <text class="label" x="1408" y="676">Serving Model</text>
+  <rect class="green" x="1280" y="798" width="436" height="84"/>
+  <text class="label" x="1400" y="850">Training Model</text>
+
+  <text class="phase" x="2026" y="78">During Rollout</text>
+  <rect class="gpu" x="1840" y="190" width="520" height="720"/>
+  <rect class="blue" x="1862" y="210" width="476" height="548"/>
+  <text class="label" x="2058" y="250">SGLang</text>
+  <rect class="blue" x="1882" y="276" width="436" height="56"/>
+  <text class="label" x="1998" y="315">CUDA Graph</text>
+  <rect class="blue" x="1882" y="346" width="436" height="230"/>
+  <text class="label" x="2044" y="470">KV Cache</text>
+  <rect class="blue" x="1882" y="590" width="436" height="150"/>
+  <text class="label" x="2010" y="676">Serving Model</text>
+  <rect class="red" x="1882" y="790" width="436" height="102"/>
+  <text class="label" x="1948" y="830">Training memory</text>
+  <text class="label" x="1934" y="864">is not being used</text>
+</svg>

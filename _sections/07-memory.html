@@ -149,22 +149,22 @@ def resume_memory_occupation(self, tags: Optional[List[str]] = None):
         <p>Start with the simplest possible design: keep the training model and the rollout inference engine resident on the same GPUs. That is the cleanest mental model, but it often fails immediately. Rollout wants serving weights, KV cache, CUDA graphs, and buffers. Training also needs room for activations, gradients, and optimizer work. The combined peak can exceed GPU memory before the algorithm has done anything interesting.</p>
 
         <figure>
-          <img src="assets/biao-memory/v0-naive-approach.png" alt="Original blog diagram for v0 naive approach, where training and inference memory are both resident and exceed GPU memory.">
-          <figcaption><span class="fig-label">Biao v0.</span> The naive baseline from Biao He's memory-management writeup: training memory and inference memory are both resident, so the combined peak can exceed GPU capacity.</figcaption>
+          <img src="diagrams/12-memory-naive.svg" alt="Naive colocated memory residency: training memory and rollout memory are both resident on the same GPU allocation, and the combined peak can exceed capacity.">
+          <figcaption><span class="fig-label">Naive residency.</span> Training memory and rollout memory are both resident, so the combined peak can exceed GPU capacity.</figcaption>
         </figure>
 
         <p>The next attempt is to make one side leave. After training, the system can offload training weights, relaunch the inference engine for rollout, and reload weights. That reduces simultaneous GPU residency, but it puts weight loading and CUDA graph recapture on the phase-switch path.</p>
 
         <figure>
-          <img src="assets/biao-memory/v1-offload-weights-to-cpu.png" alt="Original blog diagram for v1 offloading weights to CPU and relaunching the inference engine.">
-          <figcaption><span class="fig-label">Biao v1.</span> The offload-and-relaunch design reduces simultaneous residency, but rollout has to pay reload and CUDA-graph setup cost.</figcaption>
+          <img src="diagrams/13-memory-offload-relaunch.svg" alt="Offload and relaunch design: training memory leaves GPU, then rollout reloads weights and recaptures CUDA graphs.">
+          <figcaption><span class="fig-label">Offload and relaunch.</span> The design reduces simultaneous residency, but rollout has to pay reload and CUDA-graph setup cost.</figcaption>
         </figure>
 
         <p>A better design would keep the serving CUDA graph alive while freeing large regions such as weights and KV cache during training. The obstacle is address stability. CUDA graph replay can depend on the virtual addresses of the tensors used when the graph was captured. If the system deletes those tensors and recreates them later, the new tensors may live at different addresses, and the captured graph may no longer be replayable. Sleep mode therefore has a precise goal: release physical GPU memory during training, preserve the virtual-address layout, and map physical memory back to the same addresses before rollout resumes.</p>
 
         <figure>
-          <img src="assets/biao-memory/v2-sleeping-inference-engine.png" alt="Original blog diagram for v2 sleeping the inference engine while preserving CUDA graph compatibility.">
-          <figcaption><span class="fig-label">Biao v2.</span> Sleeping the inference engine keeps the serving runtime alive while releasing large memory regions during training.</figcaption>
+          <img src="diagrams/14-memory-sleeping-engine.svg" alt="Sleeping inference engine: the serving process and virtual address layout remain, while physical memory for weights and KV cache can be released and later remapped.">
+          <figcaption><span class="fig-label">Sleeping engine.</span> The serving runtime stays alive while selected physical memory regions are released during training and remapped before rollout.</figcaption>
         </figure>
 
         <p>To make this work, the runtime needs two capabilities. First, it must know which tensors belong to the memory region that may sleep, such as rollout weights or KV cache. Second, when that region sleeps, it must release the physical GPU memory while keeping enough address information to map memory back before rollout resumes. <code>torch_memory_saver</code> supports the first capability with <code>region(tag)</code>: tensors allocated inside the context are recorded as belonging to a named pausable region.</p>
@@ -184,8 +184,8 @@ def resume_memory_occupation(self, tags: Optional[List[str]] = None):
         <p>The second capability appears in the allocator. When memory is allocated inside a tagged region, the C++ side creates physical memory with <code>cu_mem_create</code>, reserves a virtual address with <code>cuMemAddressReserve</code>, maps the physical memory to that address with <code>cuMemMap</code>, and saves the tag with the allocation metadata through <code>allocation_metadata_.emplace</code>:</p>
 
         <figure>
-          <img src="assets/biao-memory/cuda-malloc.png" alt="Original blog diagram showing CUDA virtual memory allocation: create a physical memory handle, reserve a virtual address range, map physical memory to that address, and store metadata.">
-          <figcaption><span class="fig-label">Biao CUDA malloc.</span> Allocation separates the virtual address from the physical memory handle, then stores the mapping in metadata.</figcaption>
+          <img src="diagrams/15-cuda-virtual-memory.svg" alt="CUDA virtual memory allocation: create a physical memory handle, reserve a virtual address range, map the handle to that address, and store tag metadata.">
+          <figcaption><span class="fig-label">Pausable allocation.</span> Allocation separates the virtual address from the physical memory handle, then stores the tag and mapping metadata.</figcaption>
         </figure>
 
 <a class="source-badge" href="https://github.com/fzyzcjy/torch_memory_saver/blob/master/csrc/core.cpp" target="_blank"><span class="file-path">csrc/core.cpp</span><span class="file-meta">· allocate with stable virtual address and tag metadata</span></a>
@@ -273,8 +273,8 @@ with self.memory_saver_adapter.<span class="code-hl">region(GPU_MEMORY_TYPE_KV_C
         <p>The final step in this progression is multi-stage wake-up. Even after sleep mode exists, resuming everything at once can create a temporary memory spike: training weights, inference weights, and KV cache may overlap during the handoff. verl's SGLang path follows the same staged shape: resume rollout weights, sync updated actor weights, offload training-side model memory when configured, then resume KV cache.</p>
 
         <figure>
-          <img src="assets/biao-memory/v3-multi-stage-resume.png" alt="Original blog diagram for v3 multi-stage resume: resume weights, sync weights, offload training model, then resume KV cache.">
-          <figcaption><span class="fig-label">Biao v3.</span> Multi-stage wake-up resumes only the memory regions needed for each step, avoiding a temporary peak where training memory and full rollout cache overlap.</figcaption>
+          <img src="diagrams/16-memory-staged-wakeup.svg" alt="Multi-stage wake-up around rollout weight synchronization: resume weights, sync actor weights, offload training model, then resume KV cache.">
+          <figcaption><span class="fig-label">Staged wake-up.</span> Multi-stage wake-up resumes only the memory regions needed for each step, avoiding a temporary peak where training memory and full rollout cache overlap.</figcaption>
         </figure>
 
 <a class="source-badge" href="https://github.com/volcengine/verl/blob/main/verl/workers/engine_workers.py" target="_blank"><span class="file-path">verl/workers/engine_workers.py</span><span class="file-meta">· selected excerpt: staged wake-up around rollout weight sync</span></a>
