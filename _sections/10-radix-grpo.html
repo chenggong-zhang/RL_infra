@@ -1,30 +1,294 @@
 
 
       <section id="radix-grpo">
-        <h3>⑤ RadixAttention × GRPO — algebraic composition</h3>
+        <h3>⑤ RadixAttention and prefix reuse</h3>
 
-        <p>This is the example I would lead with if I were trying to convince a mathematician that engineering can be beautiful. <a href="https://arxiv.org/abs/2402.03300">GRPO</a> generates N completions per prompt and normalizes rewards within the group as a baseline; the algorithmic motivation is variance reduction. The system-level consequence is that all N completions share the prompt prefix.</p>
+        <p>The previous primitives were about phase boundaries: how the actor switches between training and rollout, how memory steps aside, and how updated weights reach the serving engine. RadixAttention is different. It is a rollout-side throughput primitive. It asks a narrower question: when many requests share the same prefix, can the inference engine avoid prefilling that prefix again and again?</p>
 
-        <p>RadixAttention exploits this. The shared prefix is a single node in a radix tree; each completion branches off as a child. Reference counting (<code>inc_lock_ref</code> / <code>dec_lock_ref</code>) means a node with <code>lock_ref &gt; 0</code> cannot be evicted. Use-after-free is structurally unrepresentable.</p>
+        <div class="primer-box">
+          <strong>KV cache: prefill, decode, and reuse.</strong>
+          <p>When an autoregressive model receives a prompt, the serving engine first runs <strong>prefill</strong>: it processes the prompt tokens and produces key/value tensors for attention. After that, <strong>decode</strong> generates new tokens one by one. During decode, the model should not recompute the whole prompt every time, so the engine keeps the prompt's key/value tensors in a KV cache.</p>
+          <p>A KV cache entry is not text and not token ids. It is attention state stored in GPU memory. Ordinary KV caching helps one request continue generation efficiently. Prefix caching asks a stronger question: if another request begins with the same tokens, can it reuse the KV state that was already computed for the first request?</p>
+        </div>
+
+        <p>Prefix reuse appears naturally in RL. A GRPO or best-of-N rollout may sample several completions from the same prompt. Multi-turn agentic RL may keep the same system prompt, tool instructions, and conversation history across branches. If the prompt prefix is token-identical, the corresponding KV state is reusable. Without prefix caching, the rollout engine may pay the prefill cost for the same prefix repeatedly. With a prefix-cache hit, it can reuse the shared prefix and compute only the unmatched suffix.</p>
 
         <figure>
           <img src="diagrams/05-radix-tree-grpo.svg" alt="Without prefix cache: 4 separate prefills of the prompt P. With RadixAttention: one shared prefix node with lock_ref=4, four tail completions branching from it.">
-          <figcaption><span class="fig-label">Figure 5.</span> Without prefix cache: 4× prefill cost, 4× KV memory. With RadixAttention: 1× prefill, 1× shared KV, near-free decode tails.</figcaption>
+          <figcaption><span class="fig-label">Figure 5.</span> Repeated rollouts expose the sharing pattern: four completions may have different tails, but the prompt prefix is the same KV object.</figcaption>
         </figure>
 
-<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/mem_cache/radix_cache.py" target="_blank"><span class="file-path">python/sglang/srt/mem_cache/radix_cache.py</span><span class="file-meta">· the six methods of the prefix tree</span></a>
-<pre class="with-source"><code>class RadixCache(BasePrefixCache, KVCacheEventMixin):
-    def match_prefix(self, params: MatchPrefixParams) -> MatchResult: ...
-    def insert(self, params: InsertParams) -> InsertResult: ...
-    def inc_lock_ref(self, node: TreeNode) -> IncLockRefResult: ...
-    def dec_lock_ref(self, ...) -> DecLockRefResult: ...
-    def evict(self, params: EvictParams) -> EvictResult: ...
-    @property
-    def evictable_size(self): ...</code></pre>
+        <a class="source-badge" href="https://www.lmsys.org/blog/2024-01-17-sglang/" target="_blank"><span class="file-path">LMSYS: Fast and Expressive LLM Inference with RadixAttention and SGLang</span><span class="file-meta">· original RadixAttention motivation</span></a>
 
-        <blockquote class="pull">
-          Neither was designed for the other. GRPO chose group sampling for variance reduction. RadixAttention chose a tree for cache reuse. Their composition multiplies savings — and reference counting means cache lifetime is automatic.
-        </blockquote>
+        <p>The first problem is naming. A serving engine cannot ask the RL framework to manually identify every reusable prefix. It sees streams of token ids, and it has to discover sharing by itself. A flat cache keyed by the whole prompt is too coarse: if two requests share the first 2,000 tokens but diverge at token 2,001, the whole-prompt keys are different even though most of the prefill work is shared.</p>
 
-        <p>This kind of accidental-but-elegant composition recurs throughout the field. A mathematician will recognize the structure: the algorithm exposes a sharing pattern (here, a common prefix); the data structure exposes a sharing mechanism (here, a radix tree); their composition is the categorical product. The right notation makes the saving obvious — the wrong notation makes the saving impossible to express.</p>
+        <p>RadixAttention solves that lookup problem with a radix tree. The tree stores cached token prefixes. A new request searches the tree for the longest prefix it already has. If the request begins with cached tokens, the engine reuses the KV-cache slots for those tokens and only computes KV for the unmatched suffix. After the request has produced more tokens, the newly computed prefix can be inserted into the tree so later requests can reuse it.</p>
+
+        <h4>Radix tree: the shape of prefix reuse</h4>
+
+        <p>Before reading SGLang's code, separate the data-structure idea from the RL setting. A trie is a tree for sequences. Starting from the root, you consume the sequence from left to right. If two sequences begin the same way, they follow the same path for that shared beginning and split only when their next tokens differ.</p>
+
+        <pre><code>[A, B, C, x]
+[A, B, C, y]
+
+shared path:  A -> B -> C
+branches:                   x
+                            y</code></pre>
+
+        <p>Here <code>A</code>, <code>B</code>, and <code>C</code> are token ids, not words. In an RL rollout, they might represent a shared system prompt plus the first part of the user problem. The two tails <code>x</code> and <code>y</code> might be two different sampled completions.</p>
+
+        <p>A radix tree is a compressed trie. The compression is simple: if several tokens appear in a row and there is no branch between them, the tree stores that whole run as one segment. In the example above, the ordinary trie walks through <code>A</code>, then <code>B</code>, then <code>C</code>. A radix tree can store the same shared path as one edge <code>[A, B, C]</code>, then branch to <code>[x]</code> and <code>[y]</code>:</p>
+
+        <pre><code>ordinary trie:
+
+root -> A -> B -> C -> x
+                  \
+                   y
+
+radix tree:
+
+root -> [A, B, C] -> [x]
+                  \
+                   [y]</code></pre>
+
+        <p>The tree is still representing token prefixes. The only difference is that each edge may be a token segment rather than a single token. This matters for prefix caching because shared prompts are often long. If a system prompt is 2,000 tokens and has no branch in the middle, the cache does not need a 2,000-level tree. It can store that prompt prefix as a smaller number of segments.</p>
+
+        <p>The tree can also split a segment later. Suppose the cache already has <code>[A, B, C]</code>, but a new request begins with <code>[A, B, z]</code>. The shared part is only <code>[A, B]</code>. To make that shorter prefix reusable, SGLang can split the old segment:</p>
+
+        <pre><code>before:
+
+root -> [A, B, C]
+
+after:
+
+root -> [A, B] -> [C]
+              \
+               [z]</code></pre>
+
+        <p>Now the connection to prefix caching is direct. The tree separates the shared prefix from the diverging suffix, and KV reuse has the same shape. If the engine has already computed KV state for <code>[A, B, C]</code>, a later request beginning with <code>[A, B, C, z]</code> can reuse the KV cache for <code>[A, B, C]</code> and allocate new KV slots only for <code>[z]</code>. If another request shares only <code>[A, B]</code>, the split makes <code>[A, B]</code> a standalone reusable prefix instead of forcing the cache to choose between "all of <code>[A, B, C]</code>" and "nothing."</p>
+
+        <p>SGLang stores this idea as radix-cache nodes. Each node represents one cached token segment. The node's <code>key</code> is the token segment, such as <code>[A, B, C]</code>. Its <code>value</code> does not store the KV tensors themselves. It stores slot numbers pointing to where those tensors live in the serving engine's KV-cache memory pool. For example, a node for <code>[A, B, C]</code> may store <code>[17, 18, 19]</code>, meaning that the KV state for token <code>A</code> lives in cache slot 17, token <code>B</code> in slot 18, and token <code>C</code> in slot 19. These slot numbers are the <strong>KV-cache indices</strong>. The node's <code>children</code> are possible continuations after that segment. Its <code>lock_ref</code> will matter later: it counts how many active requests are currently using the node.</p>
+
+        <h4>Read side: finding a cached prefix</h4>
+
+        <p>The scheduler is where this tree first affects a real request. A request arrives with token ids, but before SGLang runs prefill on all of them, it asks the radix cache: "How much of the beginning is already stored?" If the first 2,000 tokens hit in the tree, SGLang does not need to recompute KV for those tokens. It records the reusable cache slots in <code>prefix_indices</code>, records the tree node where the match ended in <code>last_node</code>, and leaves the remaining unmatched tokens for prefill. After this step, the request carries two pieces of state: cached prefix positions it can reuse, and suffix tokens that still need new KV computation.</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/schedule_policy.py" target="_blank"><span class="file-path">python/sglang/srt/managers/schedule_policy.py</span><span class="file-meta">· request admission asks for a prefix hit</span></a>
+<pre class="with-source"><code class="language-python">def match_prefix_for_req(tree_cache: BasePrefixCache, req: Req, token_ids=None, ...):
+    if token_ids is None:
+        token_ids = <span class="code-hl">req.origin_input_ids + req.output_ids</span>
+
+    match_result = tree_cache.<span class="code-hl">match_prefix</span>(
+        MatchPrefixParams(
+            key=<span class="code-hl">RadixKey(token_ids=token_ids, extra_key=req.extra_key)</span>,
+            req=req if include_req else None,
+        )
+    )
+
+    (
+        req.<span class="code-hl">prefix_indices</span>,
+        req.<span class="code-hl">last_node</span>,
+        req.last_host_node,
+        req.best_match_node,
+        req.host_hit_length,
+    ) = (
+        match_result.<span class="code-hl">device_indices</span>,
+        match_result.<span class="code-hl">last_device_node</span>,
+        match_result.last_host_node,
+        match_result.best_match_node,
+        match_result.host_hit_length,
+    )
+    return match_result</code></pre>
+
+        <p>This code answers the first practical question: how does prefix reuse enter the request object? If the caller does not pass a custom <code>token_ids</code>, SGLang builds the lookup sequence from <code>req.origin_input_ids + req.output_ids</code>. That means the cache lookup is not limited to the original prompt. If the request has already generated some tokens, those tokens can also become part of the prefix being matched.</p>
+
+        <p>The lookup key is then wrapped as a <code>RadixKey</code>. The token sequence is the main part of the key, but <code>extra_key</code> is included too. This prevents two requests with identical token ids from sharing cache when they should not, for example because they belong to different adapters, modalities, or cache namespaces. After <code>tree_cache.match_prefix(...)</code> returns, <code>match_result.device_indices</code> contains the KV-cache slots for the longest matched prefix. The scheduler copies those slots into <code>req.prefix_indices</code>. It also stores <code>match_result.last_device_node</code> as <code>req.last_node</code>, so later cache code knows which radix-tree node this active request is using.</p>
+
+        <p>The matching algorithm is easier to read if we first look at the common token-by-token path in <code>RadixKey</code>. A <code>RadixKey</code> is not a hash of the prompt. It is a small wrapper around the token-id sequence plus the optional <code>extra_key</code> namespace. Two methods matter for prefix matching. <code>child_key</code> chooses the dictionary key for the next child edge. <code>match</code> compares a stored edge with the remaining request prefix and returns how many leading tokens they share:</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/mem_cache/radix_cache.py" target="_blank"><span class="file-path">python/sglang/srt/mem_cache/radix_cache.py</span><span class="file-meta">· RadixKey defines child lookup and prefix match</span></a>
+<pre class="with-source"><code class="language-python">class RadixKey:
+    def __init__(self, token_ids: array[int], extra_key: Optional[str] = None, ...):
+        self.<span class="code-hl">token_ids</span> = token_ids
+        self.<span class="code-hl">extra_key</span> = extra_key
+
+    def child_key(self, page_size: int = 1):
+        t = self.token_ids
+        plain = <span class="code-hl">t[0] if page_size == 1 else tuple(t[:page_size])</span>
+        return plain if self.extra_key is None else <span class="code-hl">(self.extra_key, plain)</span>
+
+    def match(self, other: "RadixKey", page_size: int = 1) -&gt; int:
+        self._check_compatible(other)
+        t0, t1 = self.token_ids, other.token_ids
+        if page_size == 1:
+            i = 0
+            for a, b in zip(t0, t1):
+                if a != b:
+                    break
+                i += 1
+            return <span class="code-hl">i</span>
+
+        min_len = min(len(self), len(other))
+        i = 0
+        while i &lt; min_len:
+            if t0[i : i + page_size] != t1[i : i + page_size]:
+                break
+            i += page_size
+        return <span class="code-hl">i</span></code></pre>
+
+        <p>So the tree lookup has two levels. <code>child_key</code> quickly picks the only child edge that could match the next position. When <code>page_size == 1</code>, that key is just the next token. When <code>page_size &gt; 1</code>, the key is the next page of tokens, represented as a tuple. Here, <code>page_size</code> is the KV-cache memory block size used for allocator alignment, not the radix-tree compression unit. For example, if <code>page_size = 2</code>, the sequence is viewed as pages like <code>[A, B]</code>, <code>[C, D]</code>, <code>[E, F]</code>.</p>
+
+        <p>Then <code>match</code> compares two sequences from the beginning: the stored edge's <code>child.key</code> and the remaining request <code>key</code>. For example, if the tree edge is <code>[A, B, C]</code> and the request remainder is <code>[A, B, z]</code>, <code>match</code> returns <code>2</code> because only <code>[A, B]</code> is shared. If the request remainder is <code>[A, B, C, x]</code>, it returns <code>3</code>, meaning the whole stored edge matches and the walk can continue after <code>C</code>. With larger pages, the same idea is applied page by page, so the cache only reports reusable chunks that the KV memory allocator can address cleanly.</p>
+
+        <p>With that in mind, the helper loop is just a longest-prefix walk. It starts at the root, follows matching child edges, appends each matched edge's KV-cache indices to <code>value</code>, and stops when the request can no longer follow the tree:</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/mem_cache/radix_cache.py" target="_blank"><span class="file-path">python/sglang/srt/mem_cache/radix_cache.py</span><span class="file-meta">· longest prefix walk</span></a>
+<pre class="with-source"><code class="language-python">def match_prefix(self, params: MatchPrefixParams) -&gt; MatchResult:
+    key = params.key
+    key, _ = key.maybe_to_bigram_view(self.is_eagle)
+    key = key.<span class="code-hl">page_aligned(self.page_size)</span>
+
+    value, last_node = self.<span class="code-hl">_match_prefix_helper</span>(self.root_node, key)
+    value = torch.cat(value) if value else self._empty_match_result.device_indices
+    return MatchResult(device_indices=<span class="code-hl">value</span>, last_device_node=<span class="code-hl">last_node</span>, ...)
+
+def _match_prefix_helper(self, node: TreeNode, key: RadixKey):
+    child_key = <span class="code-hl">key.child_key(self.page_size)</span>
+    value = []
+    while len(key) &gt; 0 and child_key in node.children.keys():
+        child = node.children[child_key]
+        prefix_len = child.key.<span class="code-hl">match(key, page_size=self.page_size)</span>
+        if prefix_len &lt; len(child.key):
+            new_node = self.<span class="code-hl">_split_node</span>(child.key, child, prefix_len)
+            value.append(new_node.value)
+            node = new_node
+            break
+        else:
+            value.append(child.value)
+            node = child
+            key = key[prefix_len:]
+            if len(key):
+                child_key = key.child_key(self.page_size)
+    return value, node</code></pre>
+
+        <p>Read the loop in cases. If the request fully matches the child edge, SGLang appends <code>child.value</code> to <code>value</code>, moves down to that child, removes the matched prefix from <code>key</code>, and continues. If the request matches only part of the edge, the match ends inside a compressed segment. SGLang calls <code>_split_node</code>, turns the shared part into its own node, appends that new node's KV indices, and stops. The returned <code>value</code> is therefore not text. It is the concatenated KV-cache indices for the longest cached prefix, and <code>last_node</code> is the tree node where that reusable prefix ends.</p>
+
+        <h4>Write side: making new prefixes reusable</h4>
+
+        <p>The previous code covered the read side: a new request asks, "what prefix can I reuse?" The other half is the write side. Suppose the cache already covers <code>[A, B, C]</code>, and the request generates <code>x</code>. SGLang computes KV for <code>x</code> in a fresh cache slot. If the tree never records that new slot, a later request beginning with <code>[A, B, C, x]</code> cannot reuse it. So when a request finishes, SGLang inserts the committed token prefix together with the KV-cache indices that store its attention state.</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/mem_cache/radix_cache.py" target="_blank"><span class="file-path">python/sglang/srt/mem_cache/radix_cache.py</span><span class="file-meta">· finished requests enter the cache</span></a>
+<pre class="with-source"><code class="language-python">def cache_finished_req(self, req: Req, is_insert: bool = True):
+    kv_committed_len = req.pop_committed_kv_cache()
+    token_ids = <span class="code-hl">(req.origin_input_ids + req.output_ids)[:kv_committed_len]</span>
+    kv_indices = self.req_to_token_pool.req_to_token[
+        req.req_pool_idx, : len(token_ids)
+    ]
+
+    radix_key = RadixKey(token_ids, req.extra_key, is_bigram=self.is_eagle).page_aligned(
+        self.page_size
+    )
+    values = <span class="code-hl">kv_indices[: len(radix_key)].to(dtype=torch.int64, copy=True)</span>
+
+    if is_insert:
+        result = self.<span class="code-hl">insert</span>(InsertParams(key=radix_key, value=values))
+        self.token_to_kv_pool_allocator.free(
+            kv_indices[req.cache_protected_len : result.prefix_len]
+        )
+
+    self.token_to_kv_pool_allocator.free(kv_indices[len(radix_key) :])
+    if req.last_node is not None:
+        self.<span class="code-hl">dec_lock_ref(req.last_node)</span></code></pre>
+
+        <p>Read this function as three moves. First, <code>token_ids</code> chooses the logical prefix that is safe to cache: prompt plus output, truncated to the committed KV length. Second, <code>kv_indices</code> reads the cache slots that currently hold KV state for those token positions, and <code>values</code> copies the relevant slot numbers into the radix-tree entry. Third, <code>insert</code> adds that mapping to the tree. If part of the sequence was already cached, insertion can return an existing prefix length, and SGLang frees duplicate KV slots rather than keeping two copies of the same prefix state.</p>
+
+        <p>SGLang has a related path for unfinished requests, used for long or chunked prefills. The idea is the same but the timing is earlier. Suppose a long request has token prefix <code>[A, B, C, D, E, F]</code>, but the engine prefills it in two chunks: first <code>[A, B, C]</code>, then <code>[D, E, F]</code>. After the first chunk commits KV slots, SGLang can insert the partial prefix <code>[A, B, C]</code> into the radix tree even though the request is not finished. When the next chunk runs, or when another request with the same beginning arrives, the cache already knows that <code>[A, B, C]</code> is reusable. For a first reading, the finished-request path is still the main case; the unfinished path just applies the same insert-and-rematch idea before the full request is done.</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/mem_cache/radix_cache.py" target="_blank"><span class="file-path">python/sglang/srt/mem_cache/radix_cache.py</span><span class="file-meta">· unfinished requests insert and rematch partial prefixes</span></a>
+<pre class="with-source"><code class="language-python">def cache_unfinished_req(self, req: Req, chunked=False):
+    token_ids = <span class="code-hl">req.fill_ids</span>
+    kv_indices = self.req_to_token_pool.req_to_token[
+        req.req_pool_idx, : len(token_ids)
+    ]
+    radix_key = RadixKey(token_ids, req.extra_key, is_bigram=self.is_eagle).page_aligned(
+        self.page_size
+    )
+    values = <span class="code-hl">kv_indices[: len(radix_key)].to(dtype=torch.int64, copy=True)</span>
+
+    result = self.<span class="code-hl">insert</span>(
+        InsertParams(key=radix_key, value=values, chunked=chunked)
+    )
+
+    match_result = self.<span class="code-hl">match_prefix</span>(MatchPrefixParams(key=radix_key))
+    new_indices, new_last_node = (
+        match_result.device_indices,
+        match_result.last_device_node,
+    )
+    self.req_to_token_pool.<span class="code-hl">write</span>(
+        (req.req_pool_idx, slice(req.cache_protected_len, len(new_indices))),
+        new_indices[req.cache_protected_len :],
+    )
+    req.<span class="code-hl">prefix_indices</span> = new_indices
+    req.<span class="code-hl">last_node</span> = new_last_node</code></pre>
+
+        <p>This is the unfinished-request version of the same storage rule. <code>req.fill_ids</code> means "the prefix filled so far," not the whole final request. SGLang inserts that partial prefix, immediately matches it again, and writes the resulting KV indices back into the request-token table. The update to <code>req.prefix_indices</code> and <code>req.last_node</code> is important: the same running request now knows that the earlier chunk has become cached prefix state. That is why later chunked prefill can continue from the updated cache view instead of treating the first chunk as ordinary temporary work.</p>
+
+        <h4>Protection and eviction</h4>
+
+        <p>Once prefixes are shared, the cache needs one more rule. A prefix can be valuable and still unsafe to delete if a running request is currently reading it. SGLang handles this with reference counts on tree nodes. When a request starts using a matched prefix, the scheduler increments the node's <code>lock_ref</code>. When the request finishes or moves to a different cached prefix, the lock is decremented:</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/mem_cache/radix_cache.py" target="_blank"><span class="file-path">python/sglang/srt/mem_cache/radix_cache.py</span><span class="file-meta">· lock ref protects active prefixes from eviction</span></a>
+<pre class="with-source"><code class="language-python">def inc_lock_ref(self, node: TreeNode) -&gt; IncLockRefResult:
+    delta = 0
+    while node != self.root_node:
+        if node.<span class="code-hl">lock_ref == 0</span>:
+            self.evictable_size_ -= len(node.key)
+            self.protected_size_ += len(node.key)
+        node.<span class="code-hl">lock_ref += 1</span>
+        self._update_leaf_status(node)
+        node = node.parent
+    return IncLockRefResult(delta=delta)
+
+def dec_lock_ref(self, node: TreeNode, params=None) -&gt; DecLockRefResult:
+    delta = 0
+    while node != self.root_node:
+        if node.<span class="code-hl">lock_ref == 1</span>:
+            self.evictable_size_ += len(node.key)
+            self.protected_size_ -= len(node.key)
+        node.<span class="code-hl">lock_ref -= 1</span>
+        self._update_leaf_status(node)
+        node = node.parent
+    return DecLockRefResult(delta=delta)</code></pre>
+
+        <p>This is the safety rule behind prefix reuse. The first transition, <code>lock_ref: 0 -> 1</code>, moves a node from evictable to protected because at least one active request depends on it. The reverse transition makes it evictable again. This lets the cache reclaim memory under pressure without deleting a prefix that is still part of a running batch.</p>
+
+        <p>Eviction then becomes a tree operation. A <strong>leaf</strong> is the end of a cached branch: it has no remaining children below it. SGLang keeps a set of evictable leaves and uses the configured eviction strategy, usually LRU-like (least recently used: remove colder cache entries first), to choose which leaves to remove. After removing a leaf, its parent may become a new evictable leaf if it has no remaining children and no active lock:</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/mem_cache/radix_cache.py" target="_blank"><span class="file-path">python/sglang/srt/mem_cache/radix_cache.py</span><span class="file-meta">· evict only unprotected leaves</span></a>
+<pre class="with-source"><code class="language-python">def evict(self, params: EvictParams) -&gt; EvictResult:
+    num_tokens = params.num_tokens
+    leaves = list(self.<span class="code-hl">evictable_leaves</span>)
+    eviction_heap = [
+        (self.eviction_strategy.get_priority(node), node) for node in leaves
+    ]
+    heapq.heapify(eviction_heap)
+
+    num_evicted = 0
+    while num_evicted &lt; num_tokens and len(eviction_heap):
+        _priority, x = heapq.heappop(eviction_heap)
+        self.token_to_kv_pool_allocator.<span class="code-hl">free(x.value)</span>
+        num_evicted += len(x.value)
+        self.<span class="code-hl">_delete_leaf(x)</span>
+
+        if len(x.parent.children) == 0 and x.parent.<span class="code-hl">lock_ref == 0</span>:
+            new_priority = self.eviction_strategy.get_priority(x.parent)
+            heapq.heappush(eviction_heap, (new_priority, x.parent))
+
+    return EvictResult(num_tokens_evicted=num_evicted)</code></pre>
+
+        <p>This is where the radix tree becomes more than a lookup table. It gives the engine a unit of eviction. A whole request does not have to be kept or discarded as one flat cache entry. Shared prefixes can remain while cold suffixes disappear. For repeated rollouts from the same prompt, this is exactly the useful shape: keep the common prefix if it is still valuable, and let individual completion tails compete for memory.</p>
+
+        <p>The practical consequence is simple: rollout cost depends not only on prompt length and response length, but also on how much prefix structure the workload exposes. If an algorithm samples <code>N</code> completions from the same prompt, the abstract algorithm may look like <code>N</code> independent rollouts, while the serving engine may reuse one shared prefill.</p>
+
+        <p>Most RL frameworks do not implement this tree themselves. Miles, slime, and verl can call SGLang or another inference engine for generation; prefix reuse happens inside the serving engine. From the trainer's view, rollout simply becomes faster. The mechanism underneath is token-level cache identity, tree mutation, lock refs, and eviction policy.</p>
       </section>
