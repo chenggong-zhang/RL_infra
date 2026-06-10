@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1752 760" role="img" aria-labelledby="title desc">
+  <title id="title">Multi-stage resume around update weights</title>
+  <desc id="desc">During training only CUDA graph, optimizer state, and training model are resident. Update weights stage 1 resumes serving model with training model. Update weights stage 2 keeps SGLang CUDA graph and serving model after training is removed. During rollout SGLang resumes KV cache and serving model.</desc>
+  <defs>
+    <pattern id="blue-hatch" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="9" height="9" fill="#eaf6ff"/><line x1="0" y1="0" x2="0" y2="9" stroke="#8ecaf8" stroke-width="1.7"/></pattern>
+    <pattern id="green-hatch" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="9" height="9" fill="#effcee"/><line x1="0" y1="0" x2="0" y2="9" stroke="#8cdf9b" stroke-width="1.7"/></pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="#24222a"/></marker>
+    <style>
+      .bg{fill:#fbfaf7}.gpu{fill:#fff;stroke:#24222a;stroke-width:2;rx:16}.blue{fill:url(#blue-hatch);stroke:#24222a;stroke-width:1.7;rx:12}.green{fill:url(#green-hatch);stroke:#24222a;stroke-width:1.7;rx:12}
+      .title{font:700 24px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#24222a}.phase{font:700 22px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#24222a}.label{font:700 19px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#24222a}.small{font:600 14px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#5d5862}.wire{fill:none;stroke:#24222a;stroke-width:2;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect class="bg" width="1752" height="760"/>
+  <text class="title" x="54" y="48">v3: multi-stage wake-up</text>
+
+  <text class="phase" x="136" y="86">During Training</text>
+  <rect class="gpu" x="44" y="128" width="380" height="592"/>
+  <rect class="blue" x="62" y="142" width="344" height="86"/>
+  <text class="label" x="194" y="166">SGLang</text>
+  <rect class="blue" x="74" y="176" width="320" height="40"/>
+  <text class="label" x="170" y="204">CUDA Graph</text>
+  <rect class="green" x="62" y="424" width="344" height="126"/>
+  <text class="label" x="142" y="496">Optimizer State</text>
+  <rect class="green" x="62" y="562" width="344" height="144"/>
+  <text class="label" x="142" y="644">Training Model</text>
+
+  <text class="phase" x="548" y="62">During Update Weights</text>
+  <text class="phase" x="548" y="92">Stage 1</text>
+  <rect class="gpu" x="488" y="128" width="380" height="592"/>
+  <rect class="blue" x="506" y="142" width="344" height="224"/>
+  <text class="label" x="638" y="166">SGLang</text>
+  <rect class="blue" x="518" y="176" width="320" height="40"/>
+  <text class="label" x="614" y="204">CUDA Graph</text>
+  <rect class="blue" x="518" y="226" width="320" height="128"/>
+  <text class="label" x="610" y="298">Serving Model</text>
+  <rect class="green" x="518" y="562" width="320" height="144"/>
+  <text class="label" x="586" y="644">Training Model</text>
+  <path class="wire" d="M678 562 V368"/>
+
+  <text class="phase" x="944" y="62">During Update Weights</text>
+  <text class="phase" x="944" y="92">Stage 2</text>
+  <rect class="gpu" x="912" y="128" width="380" height="592"/>
+  <rect class="blue" x="930" y="142" width="344" height="224"/>
+  <text class="label" x="1062" y="166">SGLang</text>
+  <rect class="blue" x="942" y="176" width="320" height="40"/>
+  <text class="label" x="1038" y="204">CUDA Graph</text>
+  <rect class="blue" x="942" y="226" width="320" height="128"/>
+  <text class="label" x="1034" y="298">Serving Model</text>
+  <text class="small" x="964" y="438">training model has stepped aside</text>
+
+  <text class="phase" x="1430" y="86">During Rollout</text>
+  <rect class="gpu" x="1348" y="128" width="380" height="592"/>
+  <rect class="blue" x="1366" y="142" width="344" height="564"/>
+  <text class="label" x="1498" y="166">SGLang</text>
+  <rect class="blue" x="1378" y="176" width="320" height="40"/>
+  <text class="label" x="1474" y="204">CUDA Graph</text>
+  <rect class="blue" x="1378" y="226" width="320" height="322"/>
+  <text class="label" x="1484" y="398">KV Cache</text>
+  <rect class="blue" x="1378" y="568" width="320" height="126"/>
+  <text class="label" x="1470" y="640">Serving Model</text>
+</svg>
