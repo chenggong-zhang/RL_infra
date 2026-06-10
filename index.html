@@ -726,6 +726,7 @@
     <li><a href="#slime-pipeline" class="nav-link">slime · upstream framework</a></li>
     <li><a href="#miles-pipeline" class="nav-link">Miles · DeepSeek-V3</a></li>
     <li><a href="#verl-pipeline" class="nav-link">verl · HybridFlow</a></li>
+    <li><a href="#gradient-accumulation" class="nav-link">Gradient accumulation</a></li>
     <li><a href="#deepseek-v4" class="nav-link">DeepSeek V4 · OPD-heavy</a></li>
     <li><a href="#sglang-internals" class="nav-link">SGLang · inference substrate</a></li>
     <li><a href="#vllm-internals" class="nav-link">vLLM · block-paging contrast</a></li>
@@ -4238,6 +4239,100 @@ batch.batch["returns"] = ...</code></pre>
         </div>
       </section>
 
+      <section id="gradient-accumulation">
+        <h2>Case study — gradient accumulation and the meaning of one update</h2>
+
+        <p>Gradient accumulation is easy to dismiss as a standard training trick: split a large batch into smaller microbatches, run backward several times, then call <code>optimizer.step()</code> once. In RL infrastructure, it deserves a separate look because "one update" is also the unit that controls weight sync, policy versioning, and how many rollout samples are consumed before the actor changes.</p>
+
+        <p>The cleanest entry point is slime's training configuration guide. It separates rollout production from training consumption. Rollout produces <code>rollout_batch_size × n_samples_per_prompt</code> samples. Training consumes <code>global_batch_size × num_steps_per_rollout</code> samples. The guide also makes a small but important distinction: a parameter update means the training-side <code>optimizer.step()</code>, not the later weight-sync call that copies the updated actor into the rollout engine.</p>
+
+<a class="source-badge" href="https://github.com/THUDM/slime/blob/6961f5970e9dbb4716a10ba4a54a28fa3876d274/docs/zh/get_started/quick_start.md#L153-L170" target="_blank"><span class="file-path">slime/docs/zh/get_started/quick_start.md</span><span class="file-meta">· rollout production and training consumption</span></a>
+<pre class="with-source"><code class="language-text">rollout_batch_size × n_samples_per_prompt
+=
+global_batch_size × num_steps_per_rollout
+
+global_batch_size:
+  the number of samples needed for one optimizer.step()
+
+num_steps_per_rollout:
+  how many optimizer steps are taken from the current rollout data</code></pre>
+
+        <p>For a theorist, this is the first useful correction. The batch that appears in an algorithm is not necessarily the tensor batch that fits on one GPU forward/backward pass. <code>global_batch_size</code> is an algorithm-facing quantity: how much rollout data contributes to one actor update. <code>micro_batch_size</code> is a hardware-facing quantity: how much of that data the training engine can process at once without running out of memory.</p>
+
+        <p>slime's Megatron backend shows where the two meet. One rollout may contain several training steps, and each step has its own number of microbatches and its own effective global batch size:</p>
+
+<a class="source-badge" href="https://github.com/THUDM/slime/blob/6961f5970e9dbb4716a10ba4a54a28fa3876d274/slime/backends/megatron_utils/model.py#L717-L733" target="_blank"><span class="file-path">slime/slime/backends/megatron_utils/model.py</span><span class="file-meta">· each rollout can feed several optimizer steps</span></a>
+<pre class="with-source"><code class="language-python">num_steps_per_rollout = len(num_microbatches)
+
+for step_id in range(num_steps_per_rollout):
+    loss_dict, grad_norm = train_one_step(
+        args,
+        rollout_id,
+        step_id,
+        data_iterator,
+        model,
+        optimizer,
+        opt_param_scheduler,
+        <span class="code-hl">num_microbatches[step_id]</span>,
+        <span class="code-hl">global_batch_sizes[step_id]</span>,
+        microbatch_pbar=microbatch_pbar,
+    )</code></pre>
+
+        <p>The next function is the actual accumulation boundary. <code>forward_backward_func</code> runs forward/backward over <code>num_microbatches</code> microbatches. Gradients accumulate across those microbatches in the training model. Only after that does slime call <code>optimizer.step()</code>. Then it clears gradient buffers before the next optimizer step begins:</p>
+
+<a class="source-badge" href="https://github.com/THUDM/slime/blob/6961f5970e9dbb4716a10ba4a54a28fa3876d274/slime/backends/megatron_utils/model.py#L531-L576" target="_blank"><span class="file-path">slime/slime/backends/megatron_utils/model.py</span><span class="file-meta">· microbatches accumulate before optimizer.step</span></a>
+<pre class="with-source"><code class="language-python">return output_tensor, partial(
+    loss_function,
+    args,
+    batch,
+    <span class="code-hl">num_microbatches</span>,
+    <span class="code-hl">step_global_batch_size</span>,
+)
+
+losses_reduced = <span class="code-hl">forward_backward_func</span>(
+    forward_step_func=_wrap_forward_step_with_microbatch_pbar(
+        forward_step, microbatch_pbar
+    ),
+    data_iterator=data_iterator,
+    model=model,
+    <span class="code-hl">num_microbatches=num_microbatches</span>,
+    seq_length=args.seq_length,
+    <span class="code-hl">micro_batch_size=args.micro_batch_size</span>,
+    decoder_seq_length=args.decoder_seq_length,
+    forward_only=False,
+)
+
+if valid_step:
+    <span class="code-hl">update_successful, grad_norm, num_zeros_in_grad = optimizer.step()</span>
+    assert update_successful
+    opt_param_scheduler.step(increment=<span class="code-hl">step_global_batch_size</span>)
+
+for model_chunk in model:
+    model_chunk.<span class="code-hl">zero_grad_buffer()</span>
+optimizer.<span class="code-hl">zero_grad()</span></code></pre>
+
+        <p>Read this as one optimizer update made from several smaller tensor passes. The microbatches are not independent RL updates. They are pieces of the same update until <code>optimizer.step()</code> happens. That is also why <code>step_global_batch_size</code> is passed into the loss and scheduler path: dynamic batching can change how many samples or tokens a step represents, and the framework has to keep learning-rate schedules and loss normalization tied to the effective update, not merely to the number of microbatch loops.</p>
+
+        <p>This boundary matters for the rest of the RL system. The rollout engine should not receive new actor weights after every microbatch backward. It should receive them after the optimizer has actually changed the training actor. A metric called "step" may mean microbatch progress, optimizer updates, rollout iterations, or weight-sync events depending on where it is logged. When reading a result, the safe question is: what exactly increments the policy version?</p>
+
+        <p>verl exposes the same distinction in a different style. Its performance guide says algorithmic quantities such as train batch size and PPO mini-batch size are global, while <code>*micro_batch_size_per_gpu</code> is a local performance parameter. It even suggests larger microbatches for forward-only work such as reference logprobs than for actor PPO training, because forward-only paths do not store the same backward activations.</p>
+
+<a class="source-badge" href="https://github.com/verl-project/verl/blob/7dc39fec1c37da4098b50e68840e78906b69f16a/docs/perf/perf_tuning.rst#L86-L115" target="_blank"><span class="file-path">verl/docs/perf/perf_tuning.rst</span><span class="file-meta">· global algorithmic batch vs per-GPU microbatch</span></a>
+<pre class="with-source"><code class="language-text">Algorithmic metrics:
+  train batch size, PPO mini-batch size
+  global from the controller's view
+
+Performance parameters:
+  micro_batch_size_per_gpu, max_token_len_per_gpu
+  local per-GPU allocation knobs
+
+Forward-only paths can often use larger microbatches
+than actor/critic training paths.</code></pre>
+
+        <p>Gradient accumulation is the mechanism that lets the algorithm speak in global update units while the engine executes memory-sized pieces. In RL infrastructure, the distinction protects three invariants: the loss should be normalized over the intended update batch, the optimizer should step only after all pieces of that update have contributed gradients, and rollout weight sync should happen after the actor truly changed.</p>
+      </section>
+
+
       <section id="deepseek-v4">
         <h2>Case study — DeepSeek V4's post-training infrastructure</h2>
 
@@ -5094,6 +5189,7 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
       <li><a href="#slime-pipeline">slime · upstream framework</a></li>
       <li><a href="#miles-pipeline">Miles · DeepSeek-V3</a></li>
       <li><a href="#verl-pipeline">verl · HybridFlow</a></li>
+      <li><a href="#gradient-accumulation">Gradient accumulation</a></li>
       <li><a href="#deepseek-v4">DeepSeek V4 · OPD</a></li>
       <li><a href="#sglang-internals">SGLang internals</a></li>
       <li><a href="#vllm-internals">vLLM · block-paging</a></li>
