@@ -470,6 +470,44 @@
     color: #7a4d00;
   }
 
+  .compare-box {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin: 18px 0 24px;
+    padding: 14px;
+    border: 1px solid #d7dde8;
+    border-left: 4px solid #6172f3;
+    border-radius: 8px;
+    background: #f8fbff;
+  }
+  .compare-card {
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+  }
+  .compare-card h5 {
+    margin: 0 0 8px;
+    font-family: var(--font-sans);
+    font-size: 14px;
+    font-weight: 720;
+    color: var(--text);
+  }
+  .compare-card p {
+    margin: 0 0 8px;
+    font-size: 13px;
+    line-height: 1.58;
+  }
+  .compare-card p:last-child {
+    margin-bottom: 0;
+  }
+  @media (max-width: 720px) {
+    .compare-box {
+      grid-template-columns: 1fr;
+    }
+  }
+
   .extra-box {
     margin: 24px 0 28px;
     padding: 4px 0 4px 18px;
@@ -545,6 +583,25 @@
     border-radius: 6px;
     background: #fff;
     padding: 12px;
+  }
+  .photo-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    align-items: stretch;
+  }
+  .photo-grid img {
+    height: 240px;
+    object-fit: contain;
+    background: #fff;
+  }
+  @media (max-width: 720px) {
+    .photo-grid {
+      grid-template-columns: 1fr;
+    }
+    .photo-grid img {
+      height: auto;
+    }
   }
   figcaption {
     margin-top: 10px;

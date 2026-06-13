@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 500" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+  <title>From bits to GPU execution units</title>
+  <desc>A short conceptual ladder from bits and logic gates to arithmetic units, processor cores, and GPU SMs.</desc>
+  <defs>
+    <style>
+      .title { font-size: 26px; font-weight: 760; fill: #27262b; }
+      .label { font-size: 18px; font-weight: 720; fill: #27262b; }
+      .text { font-size: 14px; fill: #5d5964; }
+      .small { font-size: 12px; fill: #77727d; }
+      .arrow { fill: none; stroke: #4f4a58; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+    </style>
+    <marker id="arrow21" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4f4a58"/>
+    </marker>
+  </defs>
+
+  <rect width="1100" height="500" fill="#ffffff"/>
+  <text x="550" y="45" text-anchor="middle" class="title">A minimal path from bits to GPU work</text>
+  <text x="550" y="73" text-anchor="middle" class="text">The point is not chip design; it is to see how numeric work becomes organized hardware execution.</text>
+
+  <rect x="60" y="140" width="175" height="130" rx="14" fill="#f7f2ff" stroke="#7253ed" stroke-width="2"/>
+  <text x="88" y="175" class="label">Bits</text>
+  <text x="88" y="202" class="text">0/1 voltage states</text>
+  <text x="88" y="225" class="small">values are represented</text>
+  <text x="88" y="245" class="small">as binary patterns</text>
+
+  <rect x="280" y="140" width="175" height="130" rx="14" fill="#fff7e8" stroke="#b85c00" stroke-width="2"/>
+  <text x="308" y="175" class="label">Logic gates</text>
+  <text x="308" y="202" class="text">AND · OR · NOT</text>
+  <text x="308" y="225" class="small">combine bit signals</text>
+  <text x="308" y="245" class="small">into simple decisions</text>
+
+  <rect x="500" y="140" width="175" height="130" rx="14" fill="#eefaf6" stroke="#026e57" stroke-width="2"/>
+  <text x="528" y="175" class="label">Units</text>
+  <text x="528" y="202" class="text">adders · registers</text>
+  <text x="528" y="225" class="small">compute and hold</text>
+  <text x="528" y="245" class="small">temporary values</text>
+
+  <rect x="720" y="140" width="175" height="130" rx="14" fill="#f9fafc" stroke="#c8c2cf" stroke-width="2"/>
+  <text x="748" y="175" class="label">Processor</text>
+  <text x="748" y="202" class="text">instructions</text>
+  <text x="748" y="225" class="small">move values through</text>
+  <text x="748" y="245" class="small">units and memory</text>
+
+  <rect x="390" y="340" width="320" height="92" rx="14" fill="#27262b" stroke="#27262b" stroke-width="2"/>
+  <text x="550" y="376" text-anchor="middle" font-size="18" font-weight="740" fill="#ffffff">GPU organization</text>
+  <text x="550" y="402" text-anchor="middle" font-size="14" fill="#dad5e6">many lanes grouped into SMs</text>
+
+  <path class="arrow" d="M 235 205 H 279" marker-end="url(#arrow21)"/>
+  <path class="arrow" d="M 455 205 H 499" marker-end="url(#arrow21)"/>
+  <path class="arrow" d="M 675 205 H 719" marker-end="url(#arrow21)"/>
+  <path class="arrow" d="M 807 271 C 795 330 705 360 711 384" marker-end="url(#arrow21)"/>
+</svg>
