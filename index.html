@@ -449,6 +449,53 @@
     color: #1d3557;
     white-space: nowrap;
   }
+  .glossary {
+    position: relative;
+    display: inline-flex;
+    align-items: baseline;
+    border-bottom: 1px dotted var(--purple);
+    color: var(--purple-dark);
+    cursor: help;
+    outline: none;
+  }
+  .glossary::after {
+    content: "?";
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 13px;
+    height: 13px;
+    margin-left: 3px;
+    border-radius: 50%;
+    background: var(--purple-soft);
+    color: var(--purple-dark);
+    font-family: var(--font-sans);
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .glossary .glossary-panel {
+    display: none;
+    position: absolute;
+    left: 0;
+    bottom: calc(100% + 8px);
+    width: min(300px, 78vw);
+    padding: 10px 12px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--purple);
+    border-radius: 6px;
+    box-shadow: 0 14px 36px rgba(28, 29, 35, 0.16);
+    color: var(--text-body);
+    font-size: 13px;
+    line-height: 1.45;
+    z-index: 20;
+  }
+  .glossary:hover .glossary-panel,
+  .glossary:focus .glossary-panel,
+  .glossary:focus-within .glossary-panel {
+    display: block;
+  }
   .question-box {
     margin: 18px 0 22px;
     padding: 14px 16px;
@@ -784,6 +831,7 @@
     <li><a href="#miles-pipeline" class="nav-link">Miles · DeepSeek-V3</a></li>
     <li><a href="#verl-pipeline" class="nav-link">verl · HybridFlow</a></li>
     <li><a href="#gradient-accumulation" class="nav-link">Gradient accumulation</a></li>
+    <li><a href="#fsdp" class="nav-link">FSDP · training backbone</a></li>
     <li><a href="#deepseek-v4" class="nav-link">DeepSeek V4 · OPD-heavy</a></li>
     <li><a href="#sglang-internals" class="nav-link">SGLang · inference substrate</a></li>
     <li><a href="#vllm-internals" class="nav-link">vLLM · block-paging contrast</a></li>
@@ -812,13 +860,13 @@
       <header>
         <div class="eyebrow">An engineering survey · for the mathematically inclined</div>
         <h1>RL Infrastructure for the Mathematically Inclined</h1>
-        <p class="subtitle">A field survey of reinforcement-learning post-training systems — six engineering primitives, three kernel-level DSLs, the training backbone, the quantization problem, seven production case studies (multi-turn agentic · slime · Miles · verl · DeepSeek V4 · SGLang internals · vLLM block-paging), six recurring design patterns, a researcher's checklist, a 19-repo reading plan, and open questions at the systems–theory boundary. Written for mathematicians and RL theorists who want to read the source code of <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/vllm-project/vllm">vLLM</a>, <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a>, <a href="https://github.com/triton-lang/triton">Triton</a> and recognize what's mathematically interesting about the engineering choices.</p>
+        <p class="subtitle">A field survey of reinforcement-learning post-training systems — six engineering primitives, three kernel-level DSLs, the training backbone, the quantization problem, eight production case studies (multi-turn agentic · slime · Miles · verl · FSDP · DeepSeek V4 · SGLang internals · vLLM block-paging), six recurring design patterns, a researcher's checklist, a 19-repo reading plan, and open questions at the systems–theory boundary. Written for mathematicians and RL theorists who want to read the source code of <a href="https://github.com/verl-project/verl">verl</a>, <a href="https://github.com/sgl-project/sglang">SGLang</a>, <a href="https://github.com/vllm-project/vllm">vLLM</a>, <a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a>, <a href="https://github.com/triton-lang/triton">Triton</a> and recognize what's mathematically interesting about the engineering choices.</p>
         <div class="byline">
           <span>~115 min read</span>
           <span>·</span>
           <span>20 repos surveyed · 12 diagrams · 18+ code excerpts</span>
           <span>·</span>
-          <span>7 case studies · 6 design patterns · 9-question checklist · 19-repo reading plan</span>
+          <span>8 case studies · 6 design patterns · 9-question checklist · 19-repo reading plan</span>
         </div>
       </header>
 
@@ -3747,129 +3795,70 @@ c = matmul_kernel(a, b)   # a, b: PyTorch tensors on a CUDA device</code></pre>
       <section id="megatron">
         <h2>The training backbone: Megatron-LM</h2>
 
-        <p><a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a> is the training engine sitting under almost every RL framework in this survey. The repository contains two parts: <strong>Megatron Core</strong> (a composable library of GPU-optimized building blocks — kernels, parallelism strategies, mixed-precision support) and <strong>Megatron-LM</strong> proper (reference training scripts using the core). Performance numbers from NVIDIA's benchmarks: 462B-parameter models trained on 6144 H100 GPUs, reaching 47% Model FLOP Utilization. For comparison, naïve PyTorch DDP on a 70B model typically achieves 30-35% MFU.</p>
+        <p>By this point, the training object is visible: response tokens, masks, rewards or advantages, and policy logprobs have to line up before the actor loss is meaningful. The next question sits one layer lower. Once that object reaches the training engine, how is one actor update actually executed on a GPU cluster?</p>
 
-        <p>From the survey's point of view, Megatron plays <em>two distinct roles</em> at once. As a <strong>substrate</strong>, it is the engine that Miles, slime, and verl wrap to do the actual gradient work — recomputing logprobs, computing the GRPO loss, running backward, stepping the optimizer, and materializing rollout weights. As a <strong>native RL framework</strong>, it ships its own complete first-party RL stack at <code>megatron/rl/</code>, with <code>train_rl.py</code>, <code>rl_utils.py</code>, <code>sequence_packing_utils.py</code>, and an SGLang-server bridge. Knowing both roles is what lets you read the verl/slime/Miles code without losing track of which abstraction owns which invariant.</p>
-
-        <figure>
-          <img src="diagrams/11-megatron-rl-role.svg" alt="Megatron-LM's dual role: substrate (recompute logprobs, compute GRPO loss, backward, materialize weights) versus native RL stack (train_rl.py, rl_utils.py, sequence_packing_utils.py, MegatronLocal, verify_model_weights_swap). Below: 5D parallelism strip — TP, PP, DP, EP, CP — each with its RL meaning. Bottom: communication intensity ordering.">
-          <figcaption><span class="fig-label">Figure 10.</span> Megatron's two roles. Left: the substrate role used by Miles, slime, and verl. Right: the native RL stack at <code>megatron/rl/</code>. Bottom: 5D parallelism, each axis with its concrete RL meaning.</figcaption>
-        </figure>
-
-        <h3>Role 1: substrate for Miles / slime / verl</h3>
-
-        <p>When a framework above wraps Megatron, it asks Megatron for four things, in this order:</p>
-
-        <ol>
-          <li><strong>Recompute logprobs</strong> for the rollout tokens. The inference engine produced its own logprobs but they cannot be trusted for the loss — different precision, different kernels, sometimes different operator order. The trainer must recompute them in the training precision, with the training kernels, on the training parallel layout. This is one forward pass per microbatch, no backward.</li>
-          <li><strong>Compute the loss</strong>. Given recomputed logprobs π<sub>θ</sub>, rollout logprobs π<sub>old</sub>, advantages Â, and a KL reference π<sub>ref</sub>, build the GRPO objective and a few diagnostic scalars. The next subsection has the explicit formula.</li>
-          <li><strong>Backward + optimizer step</strong>. Standard Megatron, but with a quirk: at RL scale, the parallelism layout chosen for backward (favoring DP for throughput) is usually not the same one that's fastest for the rollout forward (favoring TP for low latency). The framework above arbitrates.</li>
-          <li><strong>Materialize weights for rollout sync</strong>. After the optimizer step, the new policy has to flow back into SGLang. The trainer exposes a method (parameter iteration with DTensor → full_tensor() bucketing, or an offload-to-disk path) that yields named tensors in a form the inference engine can ingest. <a href="#weight-sync">Primitive ③</a> covers this.</li>
-        </ol>
-
-        <p>Three of the four jobs above are exactly what a normal pretraining loop does. The one that distinguishes RL is #1, the recompute. Every RL framework eats this cost because the alternative — trusting inference-engine logprobs — produces silent training-time drift that the gradient cannot detect.</p>
-
-        <h3>Role 2: Megatron's own RL stack</h3>
-
-        <p>The directory <code>megatron/rl/</code> is a complete RL framework in its own right, hidden inside what is nominally a pretraining library. The headline files are worth knowing by name:</p>
-
-        <ul>
-          <li><strong><code>train_rl.py</code></strong> — the top-level entrypoint. Builds the model with the standard Megatron <code>pretrain()</code> harness, then swaps the forward-step function for an RL-aware one and the data iterator for a rollout-driven one. The training loop is <em>identical</em> to pretraining at the outer level; only the inner step differs.</li>
-          <li><strong><code>megatron/rl/rl_utils.py</code></strong> — the GRPO loss, the truncated-importance-sampling clip, the KL penalty, the entropy bonus, and the precision-mismatch diagnostics. This is the file to read if you want to see what a GRPO step <em>actually</em> computes, with all corrections inline rather than spread across a framework.</li>
-          <li><strong><code>megatron/rl/sequence_packing_utils.py</code></strong> — the packing logic that lets variable-length rollouts share a microbatch without attention leaking across sequence boundaries. Produces a <code>PackedSeqParams</code> object holding <code>cu_seqlens</code> (cumulative lengths) which the Transformer Engine attention kernels honor as a hard mask. The packing prevents O(n²) attention waste on the tail of short rollouts.</li>
-          <li><strong><code>megatron/rl/agent/</code> · <code>inference/</code> · <code>server/</code></strong> — the three modules that bridge Megatron to an external sampler. <code>server/</code> exposes a <code>MegatronLocal</code> handle that the SGLang RL backend uses for parameter transfer and <code>verify_model_weights_swap()</code> checks. <code>inference/</code> hosts the rollout client. <code>agent/</code> hosts the environment interface.</li>
-          <li><strong><code>verify_model_weights_swap()</code></strong> — a small but load-bearing invariant. After a sync, it asserts that the inference engine and trainer hold the same weights up to a tolerance, by sampling parameters and comparing reductions. Failures here are the canonical staleness bug. Without this check, a missed sync drifts silently until rewards crater.</li>
-        </ul>
-
-        <h3>The GRPO loss as Megatron writes it</h3>
-
-        <p>GRPO drops PPO's critic and replaces it with a group-relative baseline: for a prompt, sample G completions, compute the reward for each, normalize within the group, and use the normalized reward as the advantage. The Megatron implementation builds the loss as:</p>
-
-<pre><code>L_GRPO = -E[ min( ρ · Â, clip(ρ, 1-ε, 1+ε) · Â ) ]   # truncated importance sampling
-       + β · KL( π_θ || π_ref )                       # reference penalty
-       - α · H( π_θ )                                 # entropy bonus
-
-where ρ = exp( π_θ(a|s) - π_old(a|s) ),
-      Â = group-normalized reward within G samples for the same prompt,
-      π_old = logprobs at sampling time (from the rollout engine, NOT trusted as numerics
-              but trusted as the policy that generated the action),
-      π_θ   = recomputed logprobs from the trainer in the training precision.</code></pre>
-
-        <p>The mathematically delicate term is ρ. In on-policy PPO/GRPO, ρ should be ≈ 1 because the same model generates and trains. In practice it is not, for three reasons: (a) partial rollouts replay older policy actions, (b) numerical drift between FP8 inference and BF16 training, (c) MoE routing divergence when low-precision routing flips top-k picks. Megatron's <code>rl_utils.py</code> exposes <strong>mismatch metrics</strong> that compute |ρ - 1| moments per batch — when those grow beyond a threshold, the training is no longer on-policy in the empirical sense and the gradient estimator's bias has eaten the trust region.</p>
+        <p>Megatron-LM is a good example for this layer because several RL infrastructure stacks use it directly as the training-side backend. Miles and slime wrap Megatron-style training workers around SGLang rollout, and verl can run its actor backend on Megatron as one of its supported training choices. It also exposes the central fact about this layer clearly, so we state it up front.</p>
 
         <blockquote class="pull">
-          The mismatch metric is the <em>empirical</em> answer to "is my training on-policy?". The math says ρ should be 1; the metric tells you what it actually is. Every production GRPO run watches this number.
+          Megatron-LM is a reference training example built on Megatron Core. Megatron Core is the reusable layer: transformer building blocks, advanced parallelism strategies (TP, PP, DP, EP, and CP), mixed precision support (FP16, BF16, FP8, and FP4), and model architectures for custom training frameworks.
         </blockquote>
 
-        <h3>Sequence packing — why attention leakage matters</h3>
+        <p>This quote tells us where to look. Megatron Core is the layer that owns the distributed training machinery: how the model is partitioned, how forward and backward are scheduled, how gradients are synchronized, and how the optimizer step is applied. RL infrastructure builds around that machinery. It supplies rollout data instead of ordinary pretraining text, computes an RL loss instead of next-token cross entropy, and then sends the updated actor back to the rollout side.</p>
 
-        <p>Rollouts vary in length wildly: a math problem may finish in 200 tokens, a long-horizon code task in 8000. A naïve batch pads to the longest sequence and burns FLOPs on padding. Packing concatenates several rollouts end-to-end into a single packed sequence and tells the attention kernel where the boundaries are. Done wrong — without the boundary mask — tokens at position 250 in rollout B attend to tokens at position 200 in rollout A, and the gradient learns to mix unrelated trajectories. <code>PackedSeqParams</code> with <code>cu_seqlens = [0, 200, 4500, 4700, …]</code> is the data structure that Transformer Engine's flash attention uses to enforce the boundary. The packing transformation is <em>not</em> just a memory optimization; it is a correctness primitive. The bug it prevents (cross-sequence attention) is the kind that produces a coherent-looking loss curve and a quietly-broken policy.</p>
+        <p>For someone already comfortable designing RL losses, this section is not mainly about the formula. It is about what happens after the formula enters a distributed training engine. Megatron decides which ranks see which slice of the batch, how large batches are broken into microbatches, when gradients are accumulated or synchronized, and which optimizer step actually creates the next policy version.</p>
 
-        <h3>The four-layer Megatron ↔ SGLang interface</h3>
+        <h3>Background: the actor as a distributed object</h3>
 
-        <p>When a framework above (slime, Miles) connects Megatron to SGLang, the interface decomposes into four layers, each enforcing one invariant:</p>
+        <p>A <strong>rank</strong> is one participating training process, usually associated with one GPU. A <strong>process group</strong> is a selected set of ranks that communicate for one purpose. Megatron builds several overlapping process groups because different parts of training need different communication patterns.</p>
 
-        <ol>
-          <li><strong>Process layer.</strong> Ray spawns a Megatron worker group and an SGLang scheduler group. They live on the same GPUs (sleep-mode time-sharing) or different GPUs (disaggregated). Invariant: every Megatron rank knows which SGLang rank it talks to, and vice versa.</li>
-          <li><strong>Memory layer.</strong> <code>release_memory_occupation()</code> on SGLang frees the engine's KV cache before backward; <code>resume_memory_occupation()</code> reclaims it after. Invariant: at any instant, exactly one of {trainer activations, inference KV} occupies the shared GPU memory pool. <a href="#memory">Primitive ②</a> made this concrete.</li>
-          <li><strong>Weight layer.</strong> <code>update_weights_from_distributed()</code> (or its IPC / disk variant) streams parameters from trainer to engine, bucket by bucket, NCCL-overlapped. Invariant: <code>verify_model_weights_swap()</code> must pass before the next rollout begins.</li>
-          <li><strong>Token layer.</strong> SGLang generates, Megatron recomputes logprobs, the framework above stitches the tuples. Invariant: the <code>π_old</code> stored on disk for the loss is the engine's logprob; the <code>π_θ</code> used for the loss is always the recompute.</li>
-        </ol>
+        <p>The algorithm can treat the actor as one policy <code>π<sub>θ</sub></code>. The training engine has to represent that policy through many partial states: one rank may hold a shard of a weight matrix, another may hold a later range of layers, and another replica may work on a different slice of the batch. Megatron coordinates those partial states so the optimizer step still updates one logical actor.</p>
 
-        <p>Bugs at each layer have different symptoms: process-layer bugs hang; memory-layer bugs OOM; weight-layer bugs drift; token-layer bugs corrupt gradients. The right invariant to assert at each layer is what makes the four layers cleanly decomposable.</p>
-
-        <h3>5D parallelism in the RL setting</h3>
-
-        <p>The product space TP × PP × DP × EP × CP is huge. Below is how each axis interacts specifically with RL — what makes RL different from pretraining is that the <em>same model</em> has to run in both rollout and training modes, with different optimal layouts.</p>
+        <p>The ways of splitting the work are named by what is being split:</p>
 
         <ul>
-          <li><strong>TP (Tensor Parallel)</strong> — split each layer's weight matrices across GPUs. Within-machine, NVLink-bound. RL setting: TP is the dimension most often shared between rollout and training (because the rollout engine is also TP-sharded). Sleep-mode hybrid engines (verl, slime) typically use <em>identical</em> TP for trainer and engine, which makes the weight handoff a no-op in layout.</li>
-          <li><strong>PP (Pipeline Parallel)</strong> — split layers across GPUs. Cross-machine, InfiniBand-bound. RL setting: PP is rarely matched between trainer and engine — SGLang prefers TP-only for low decode latency, while the trainer benefits from PP for the backward. The mismatch is handled at the weight-sync layer with explicit gather and scatter steps.</li>
-          <li><strong>DP (Data Parallel)</strong> — replicate the model, split the batch. RL setting: DP scales the trainer cheaply but does <em>nothing</em> for the rollout (the rollout is bottlenecked by single-sample latency, not per-batch throughput). High-DP layouts therefore over-provision the trainer relative to the engine, which is fine if rollout dominates wall time but wasteful otherwise.</li>
-          <li><strong>EP (Expert Parallel)</strong> — split MoE experts across GPUs. Required for DeepSeek-V3, Qwen3-MoE, GPT-OSS. RL setting: EP is where the R3 routing-replay invariant lives. The trainer's EP layout and the engine's EP layout must agree on which expert handles which token, or the gradient signal corrupts. Miles' contribution is the EP-aware replay.</li>
-          <li><strong>CP (Context Parallel)</strong> — split the sequence dimension across GPUs. RL setting: CP is what makes V4's million-token RL possible. The 2026 dynamic-CP work (1.48× on variable-length) is precisely the RL setting — rollouts have wildly variable lengths, so a static CP wastes capacity on short sequences.</li>
+          <li><strong>Tensor parallelism (TP)</strong> splits tensors inside a layer — for example, different ranks hold different columns or rows of a weight matrix, and must communicate while computing one logical layer. Because this communication happens inside many layers, systems usually keep a TP group within one node, where GPUs can use fast links such as <span class="glossary" tabindex="0">NVLink<span class="glossary-panel">NVLink is NVIDIA's high-bandwidth connection between GPUs inside the same server. It is much faster than sending tensor data through ordinary cross-machine networking, so it is a natural fit for tensor-parallel communication.</span></span>.</li>
+          <li><strong>Pipeline parallelism (PP)</strong> splits the transformer by layers. Earlier layers live on one group of ranks, later layers on another, and activations move from stage to stage. The communication is sparse and can cross machines.</li>
+          <li><strong>Data parallelism (DP)</strong> splits examples. Several ranks hold the same logical replica, each processes a different slice of the batch, and their gradients are synchronized before the optimizer step.</li>
+          <li><strong>Expert parallelism (EP)</strong> splits MoE experts. Different ranks own different experts, so token routing becomes part of the distributed execution plan.</li>
+          <li><strong>Context parallelism (CP)</strong> splits the sequence dimension itself across ranks, so one very long sequence can be processed by several GPUs at once.</li>
         </ul>
 
-        <blockquote class="pull">
-          Communication intensity falls along TP &gt; CP &gt; EP &gt; DP &gt; PP. Place the densest communication on the fastest hardware (NVLink within a node) and the sparsest on the slowest (cross-rack InfiniBand). This is the structure principle of every distributed training topology — Megatron, vLLM, SGLang, DeepSpeed, all the same.
-        </blockquote>
+        <p>These dimensions compose. A rank can be part of a TP group, a PP stage, and a DP replica at the same time. That is why "training on 128 GPUs" is not enough information. The important question is how those GPUs are grouped, because the grouping decides which parameters are local, which activations must be sent, and when gradients are synchronized.</p>
 
-        <h3>Six engineering invariants Megatron enforces</h3>
+        <h3>Batch units: global batch, DP shard, microbatch</h3>
 
-        <ol>
-          <li><strong>Logprob recompute</strong> — never use inference-engine logprobs for the loss; recompute them in the trainer's precision and kernels.</li>
-          <li><strong>Mismatch metrics</strong> — track |ρ - 1| moments per batch; if they grow, the training is no longer empirically on-policy.</li>
-          <li><strong>Sequence-packing boundary mask</strong> — <code>cu_seqlens</code> is mandatory whenever variable-length rollouts share a microbatch.</li>
-          <li><strong>Weight-swap verification</strong> — <code>verify_model_weights_swap()</code> must pass before each new rollout.</li>
-          <li><strong>EP routing agreement</strong> — trainer's expert assignment must match the engine's, either by shared routing or by R3 replay.</li>
-          <li><strong>Communication-overlap flags</strong> — <code>--overlap-grad-reduce</code>, <code>--overlap-param-gather</code>, <code>--tp-comm-overlap</code> are not optional at scale; they hide the all-reduce behind compute and are why 47% MFU is achievable.</li>
-        </ol>
+        <p>Once the actor is distributed, "the batch" is no longer a single object seen by one process. There are several batch units, and they matter for loss design:</p>
 
-        <h3>What's mathematically interesting</h3>
+        <ul>
+          <li><strong>Global batch.</strong> The full collection of training examples or tokens intended to contribute to one optimizer update.</li>
+          <li><strong>Data-parallel shard.</strong> The slice of that global batch processed by one data-parallel replica.</li>
+          <li><strong>Microbatch.</strong> A smaller chunk run through forward and backward because the full shard would not fit in memory at once.</li>
+          <li><strong>Packed token batch.</strong> A tensor layout where several variable-length sequences may be concatenated, with metadata telling attention and loss code where sequence boundaries are.</li>
+        </ul>
 
-        <p>The communication overlapping flags are an exercise in hiding latency behind compute — a kind of staggered evaluation. Pipeline parallelism's "1F1B" schedule (one forward, one backward, interleaved) recovers most of the bubble in a fully-synchronous pipeline; the math of why this works is straightforward but writing it down clarifies why Megatron's MFU stays high even with PP.</p>
+        <p>With that vocabulary, one actor update reads as a sequence of execution phases:</p>
 
-        <p>The dynamic context parallelism shipped in January 2026 (1.48× speedup for variable-length sequences) is a nice example of treating CP size as a runtime variable rather than a static config. The "right" CP size depends on the sequence length of the current batch — adapting it dynamically is essentially online load balancing.</p>
+<pre><code>RL batch with tokens, masks, rewards / advantages
+  -> split into data-parallel shards and microbatches
+  -> run distributed forward passes across the parallel dimensions
+  -> compute token loss on the positions selected by the mask
+  -> run backward passes and accumulate gradients
+  -> synchronize the gradients that must agree across replicas
+  -> optimizer step: theta changes
+</code></pre>
 
-        <p>The GRPO loss as written in <code>rl_utils.py</code> is the cleanest place in any open codebase to see all three "correction" terms (truncated importance sampling, KL, entropy) composed together with diagnostic metrics. Reading it answers a question that papers leave ambiguous: which corrections are mandatory and which are heuristics. The Megatron version's answer: the truncation clip is mandatory at scale (without it, off-policy ρ explodes); the KL is mandatory for reference anchoring (without it, the policy walks away from coherence); the entropy bonus is the tunable knob.</p>
+        <p>The word <strong>microbatch</strong> is the key one. A large RL batch may be too large to run in one forward/backward pass, so Megatron slices it into smaller pieces. Gradients from several microbatches can be accumulated before the optimizer step. During accumulation, the policy parameters have not changed. The actor becomes a new policy only when the optimizer step is applied.</p>
 
-        <h3>Recommended reading order</h3>
-
-        <p>If you want to actually read the Megatron RL code rather than treat it as an opaque substrate, the cleanest path:</p>
-
-        <ol>
-          <li><code>megatron/rl/train_rl.py</code> — top-level entrypoint. See how it differs from <code>pretrain.py</code>: same outer loop, different forward-step function.</li>
-          <li><code>megatron/rl/rl_utils.py</code> — the GRPO loss with all corrections inline. The single best file in any codebase for the "what does GRPO actually compute" question.</li>
-          <li><code>megatron/rl/sequence_packing_utils.py</code> — the packing transformation. Short file, easy to misread; the point is the boundary mask, not the packing itself.</li>
-          <li><code>megatron/rl/server/</code> — the <code>MegatronLocal</code> bridge. Read it after you've read slime's or Miles's framework code so you know what's calling it.</li>
-          <li><code>megatron/post_training/</code> — the quantization paths covered in <a href="#quantization">the next section</a>. Read it after you've seen the FP8 / INT4 discussion below.</li>
-        </ol>
+        <div class="primer-box">
+          <p><strong>Gradient accumulation.</strong> If a global batch is too large to fit on the GPUs at once, the trainer can run several smaller microbatches one after another. Each microbatch contributes gradients to the same parameter buffers. The optimizer does not step after every microbatch; it waits until the configured accumulation window is complete. This makes several small forward/backward passes behave like one larger batch update, up to details such as loss scaling, normalization, and numerical order.</p>
+        </div>
 
         <div class="study">
           <div class="study-title">Study resources — Megatron-LM</div>
           <ul>
             <li><a href="https://github.com/NVIDIA/Megatron-LM" target="_blank">NVIDIA/Megatron-LM</a> — repo root</li>
             <li><a href="https://docs.nvidia.com/megatron-core/developer-guide/latest/index.html" target="_blank">Megatron Core docs</a> — parallelism guide, mixed precision, quickstart</li>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM/blob/main/train_rl.py" target="_blank"><code>train_rl.py</code></a> — top-level RL entrypoint</li>
             <li><a href="https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/rl" target="_blank"><code>megatron/rl/</code></a> — Megatron's own RL module (the native RL stack)</li>
             <li><a href="https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/rl/rl_utils.py" target="_blank"><code>rl_utils.py</code></a> — the GRPO loss with all corrections</li>
             <li><a href="https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/rl/sequence_packing_utils.py" target="_blank"><code>sequence_packing_utils.py</code></a> — the packing logic</li>
@@ -3880,43 +3869,93 @@ where ρ = exp( π_θ(a|s) - π_old(a|s) ),
         </div>
       </section>
 
+
       <section id="quantization">
         <h2>Quantization and the numerical-alignment problem</h2>
 
-        <p>If you're reading the Miles paper or the DeepSeek-V3 technical report and wondering why so much engineering effort goes into <em>making FP8 training work correctly</em>, this section is for you. Quantization is where the abstract algorithm meets the concrete number system, and getting it wrong silently corrupts the policy.</p>
+        <p>If you're reading the Miles paper or the DeepSeek-V3 technical report and wondering why so much engineering effort goes into <em>making FP8 training work correctly</em>, this section is for you. Quantization matters here because rollout and training may compute related quantities in different numerical formats, and RL only remains interpretable when those quantities stay aligned.</p>
 
         <h3>The numerical formats</h3>
 
-        <p>Three families are worth knowing:</p>
+        <p>Before the aggressive formats, it helps to name the ordinary floating-point types used in training:</p>
 
         <ul>
-          <li><strong>FP8</strong> (E4M3 and E5M2) — IEEE-754-style 8-bit floats with two variants: E4M3 has 4 exponent bits and 3 mantissa bits (used for forward activations, weights); E5M2 has 5/2 (used for gradients, with their wider dynamic range). H100-and-newer hardware has native FP8 tensor cores. The two variants exist because forward and backward have different statistical profiles.</li>
-          <li><strong>INT4 / INT8</strong> — fixed-point integers. INT4 weight-only quantization (W4A16) is the workhorse for inference of large models (Llama-70B fits on a single H100 at INT4). Quantization-aware training in INT4 is hard; post-training quantization with GPTQ / AWQ is more common.</li>
-          <li><strong>MXFP4 / MXFP8 / NVFP4</strong> — block-scaled formats. Each block of 16 or 32 values shares a single scale; the per-value representation is small (4 or 8 bits) but the dynamic range is large. NVFP4 is NVIDIA Blackwell-specific (the B200 and beyond); MXFP4 is the OCP standard.</li>
+          <li><strong>FP32</strong> is the classic 32-bit floating-point format. It has enough precision and dynamic range to be numerically comfortable, but it is expensive in memory and bandwidth for large models.</li>
+          <li><strong>FP16</strong> uses 16 bits. It is faster and smaller than FP32, but its narrower dynamic range makes overflow and underflow easier, especially in gradients.</li>
+          <li><strong>BF16</strong> also uses 16 bits, but keeps an FP32-like exponent range with fewer mantissa bits. In practice, this makes BF16 more forgiving than FP16 for large-model training, while still saving memory and bandwidth compared with FP32.</li>
+        </ul>
+
+        <div class="primer-box">
+          <p><strong>BF16 vs FP16.</strong> Both formats use 16 bits, but they spend those bits differently. FP16 keeps more fraction bits, so it can represent nearby numbers more finely, but it has a smaller exponent range. BF16 keeps the same 8-bit exponent size as FP32 and uses fewer fraction bits, so it is less precise locally but much harder to overflow or underflow. This is why BF16 is often preferred for training large models: it gives up some decimal precision to keep a safer dynamic range.</p>
+        </div>
+
+        <p>Modern training systems often keep some quantities in higher precision for stability while running large matrix operations in lower precision for speed. Examples include FP32 master weights or optimizer states, higher-precision gradient reductions, loss scaling bookkeeping, and sometimes numerically sensitive normalization or logprob computations. Quantization pushes this idea further: can inference, training, or weight storage use even fewer bits without changing the quantities the RL update depends on?</p>
+
+        <p>To read the lower-precision formats, keep three small ideas in mind. A floating-point number spends some bits on the <strong>exponent</strong>, which controls the scale or range of the number, and some bits on the <strong>mantissa</strong>, which controls how finely nearby values can be distinguished. A fixed-point integer format stores small integers plus a scale that says what real values those integers mean. A block-scaled format shares one scale across a small block of values, so the per-value storage can be tiny while the block still covers a useful numeric range.</p>
+
+        <p>With that vocabulary, three families are worth knowing:</p>
+
+        <ul>
+          <li><strong>FP8</strong> is an 8-bit floating-point family. The common variants are <strong>E4M3</strong> and <strong>E5M2</strong>: E4M3 uses more mantissa bits, so it keeps a little more local precision; E5M2 uses more exponent bits, so it covers a wider range. In practice, systems may use E4M3 for forward activations or weights and E5M2 for gradients, because gradients often need more range. H100-and-newer NVIDIA GPUs have hardware support for FP8 tensor-core operations.</li>
+          <li><strong>INT4 / INT8</strong> store values as small integers plus scales. <strong>Weight-only quantization</strong> means the model weights are stored in low precision, while activations may still be computed in a higher precision such as FP16 or BF16; <strong>W4A16</strong> means 4-bit weights and 16-bit activations. This is common for inference because it reduces model memory, but training directly with INT4 weights is much harder, so post-training quantization methods such as GPTQ and AWQ are more common.</li>
+          <li><strong>MXFP4 / MXFP8 / NVFP4</strong> are block-scaled formats. Instead of giving every value its own full floating-point scale, a small block of values shares one scale. Each value then needs only 4 or 8 bits, but the shared scale lets the block cover a larger dynamic range than raw tiny integers would. MXFP4 is an OCP standard; NVFP4 is NVIDIA's Blackwell-era variant.</li>
         </ul>
 
         <h3>QAT vs PTQ</h3>
 
-        <p>Two strategies for converting a model to a lower-precision format:</p>
+        <p>There are two broad routes from a high-precision model to a lower-precision one.</p>
 
-        <ul>
-          <li><strong>Quantization-Aware Training (QAT)</strong> — simulate the quantization during training, so the optimizer learns weights that are robust to the lower precision. Expensive but produces the highest-quality models. Miles' INT4-QAT pipeline is the most aggressive example in this survey.</li>
-          <li><strong>Post-Training Quantization (PTQ)</strong> — train in full precision, quantize at the end. Algorithms include GPTQ (one-shot, second-order weight rounding), AWQ (activation-aware weight quantization), GGUF (llama.cpp's format), and ModelOpt (NVIDIA's toolkit). Cheap but lossy.</li>
-        </ul>
+        <p><strong>Post-Training Quantization (PTQ)</strong> starts from a trained model and converts it after the fact. The model is not retrained end to end. A PTQ method usually takes a small calibration dataset, observes how weights and activations behave, chooses scales, and tries to round weights so that the quantized layer behaves close to the original layer. This is attractive for inference because it is much cheaper than training again, but it can lose quality if the approximation is too coarse.</p>
+
+        <p>Two PTQ algorithms are useful to recognize. <strong>GPTQ</strong> quantizes weights while trying to minimize the layer's reconstruction error, using approximate second-order information about how weight changes affect the layer output. <strong>AWQ</strong> starts from a different observation: not every weight matters equally, because some activation channels are much more important for preserving the model's outputs. AWQ uses activation statistics to protect those important channels while quantizing the rest more aggressively.</p>
+
+        <p><strong>Quantization-Aware Training (QAT)</strong> puts quantization into the training loop itself. During the forward pass, the model simulates low-precision weights or activations, so the optimizer sees the noise that the deployed model will face. During the backward pass, systems often use a straight-through estimator: the quantization operation is treated as if it had a usable gradient. QAT is more expensive than PTQ, but it can produce models that are more robust to very low precision. Miles' INT4-QAT pipeline is the most aggressive example in this survey.</p>
 
         <p>For RL specifically, the question is whether the inference engine can be in a lower precision than the trainer without breaking learning. The answer turns out to be "yes, but only with care."</p>
+
+        <h3>Counting parameters and bytes</h3>
+
+        <p>Quantization changes how many bytes parameters occupy; it does not change how many parameters the network has. To estimate the parameter count of a dense decoder-only Transformer, the most useful quantities are the number of layers <code>L</code>, hidden size <code>d</code>, MLP hidden size <code>d<sub>ff</sub></code>, and vocabulary size <code>V</code>. Ignoring small layernorm and bias terms, a SwiGLU-style model with a tied output head is roughly:</p>
+
+<pre><code>embedding params      ≈ V · d
+attention per layer  ≈ 4 · d²          # Q, K, V, output projections
+MLP per layer        ≈ 3 · d · d_ff    # gate, up, down projections
+
+total params         ≈ V · d + L · (4 · d² + 3 · d · d_ff)</code></pre>
+
+        <p>For example, take <code>L = 32</code>, <code>d = 4096</code>, <code>d<sub>ff</sub> = 11008</code>, and <code>V = 32000</code>. The embedding has about <code>0.13B</code> parameters. Each layer has about <code>0.20B</code> parameters. The total is therefore about <code>6.6B</code> parameters, close to the familiar 7B model scale.</p>
+
+        <p>Once the parameter count is known, precision gives a first memory estimate:</p>
+
+<pre><code>parameter bytes ≈ number_of_parameters · bits_per_parameter / 8
+
+6.6B parameters in BF16 or FP16 ≈ 13.2 GB
+6.6B parameters in FP8          ≈  6.6 GB
+6.6B parameters in INT4         ≈  3.3 GB, plus scales and metadata</code></pre>
+
+        <p>Training needs more memory than the parameter tensor itself. Gradients and optimizer states also occupy memory. For Adam-style optimizers, the usual extra states are two moment buffers, often called <code>m</code> and <code>v</code>. A rough full-precision training estimate is therefore:</p>
+
+<pre><code>model weights     ≈ N · bytes(weight)
+gradients         ≈ N · bytes(grad)
+Adam moments      ≈ 2 · N · bytes(moment)
+
+Example with N = 6.6B:
+BF16 weights       ≈ 13.2 GB
+BF16 gradients     ≈ 13.2 GB
+FP32 Adam moments  ≈ 52.8 GB
+total              ≈ 79.2 GB, before activations, KV cache, and fragmentation</code></pre>
+
+        <p>This is why training memory is much larger than inference memory. Inference may only need weights plus KV cache and runtime buffers; training also has to keep gradients, optimizer state, and activations for backward. Distributed optimizers and ZeRO/FSDP-style sharding reduce this by splitting some of those states across data-parallel ranks.</p>
+
+        <p>MoE models add one more distinction. <strong>Total parameters</strong> count every expert stored in the model. <strong>Active parameters</strong> count only the experts selected for a token. Quantization reduces the storage cost of the total parameter set, while routing decides how many expert parameters are active for a given token. This is why MoE reports often say things like "large total parameters, smaller active parameters per token."</p>
 
         <h3>The MoE routing divergence problem</h3>
 
         <p>This is the deep reason Miles exists. In a Mixture-of-Experts model, each token is routed to k experts based on the output of a small gating network. The gating decision is a top-k over k experts' affinity scores. Under floating-point arithmetic, the affinity scores are computed in a specific precision. If the inference engine computes them in FP8 and the trainer in BF16, two scores that are equal in BF16 can be unequal in FP8 (or vice versa), <em>and the top-k decision can flip</em>. The token routes to a different expert at inference than it did at training time. The gradient signal becomes random noise with respect to which expert actually generated the token.</p>
 
-        <p>This is the "BERT-era unsolved bug" that Chenyang's tutorial flags — the existence of a numerical-precision-induced routing divergence has been known for years. The brute-force fix is to make inference and training share the same precision and the same kernels for the routing computation. That's what Miles' <strong>Unified FP8 Pipeline</strong> does. The cleverer fix is to <em>replay</em> the routing decision: record which experts inference picked, force training to use the same picks. This is <strong>R3 — Rollout Routing Replay</strong>, Miles' signature contribution. It guarantees the routing is identical regardless of precision.</p>
+        <p>This is the "BERT-era unsolved bug" that <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/sys-design/readme-1-EN.md" target="_blank">Chenyang's tutorial</a> flags — the existence of a numerical-precision-induced routing divergence has been known for years. The brute-force fix is to make inference and training share the same precision and the same kernels for the routing computation. That's what Miles' <strong>Unified FP8 Pipeline</strong> does. The cleverer fix is to <em>replay</em> the routing decision: record which experts inference picked, force training to use the same picks. This is <strong>R3 — Rollout Routing Replay</strong>, Miles' signature contribution. It guarantees the routing is identical regardless of precision.</p>
 
-        <blockquote class="pull">
-          The mathematical invariant: routing(x, θ, fp8) ≡ routing(x, θ, bf16) by replay, not by approximation. Without it, every gradient update in an MoE model is partially noise.
-        </blockquote>
-
-        <p>For non-MoE models the problem is milder but still present: numerical drift in logprobs accumulates batch-to-batch. The safe practice (every framework in this survey follows it) is to <em>never</em> use the inference engine's logprobs for loss computation. Always recompute logprobs with the training engine, even at the cost of an extra forward pass. The inference engine generates the tokens; the trainer recomputes their probabilities.</p>
+        <p>For non-MoE models the problem is usually milder, but numerical drift in logprobs can still matter. A common conservative design is to let the inference engine generate tokens, then have the training engine recompute the probabilities used in the loss, even at the cost of an extra forward pass. Other systems may cache or correct rollout-side logprobs, but they still need an explicit rule for which numerical view enters the loss.</p>
 
         <div class="study">
           <div class="study-title">Study resources — quantization</div>
@@ -3929,6 +3968,7 @@ where ρ = exp( π_θ(a|s) - π_old(a|s) ),
           </ul>
         </div>
       </section>
+
 
       <section id="parallelism">
         <h2>Model and data parallelism</h2>
@@ -4638,6 +4678,146 @@ Forward-only paths can often use larger microbatches
 than actor/critic training paths.</code></pre>
 
         <p>Gradient accumulation is the mechanism that lets the algorithm speak in global update units while the engine executes memory-sized pieces. In RL infrastructure, the distinction protects three invariants: the loss should be normalized over the intended update batch, the optimizer should step only after all pieces of that update have contributed gradients, and rollout weight sync should happen after the actor truly changed.</p>
+      </section>
+
+
+      <section id="fsdp">
+        <h2>Case study — FSDP, the other training backbone</h2>
+
+        <p>The training sections of this survey ran on Megatron-LM. But look at the landscape table: verl's default training backend is FSDP, and OpenRLHF, SkyRL, and AReaL reach for it too. This survey has used the name nine times without defining it. This case study closes that gap: what FSDP actually does, why RL frameworks pick it first, and where RL specifically presses on it. The code is verl's, which the previous case study already introduced.</p>
+
+        <p>FSDP stands for <strong>Fully Sharded Data Parallel</strong>. It is PyTorch's built-in implementation of an idea published as ZeRO (<a href="https://arxiv.org/abs/1910.02054">arxiv 1910.02054</a>): keep data parallelism's simple mental model — every rank runs the whole model on its own slice of the batch — but stop paying data parallelism's memory price.</p>
+
+        <h3>The idea: shard everything, gather just in time</h3>
+
+        <p>Recall plain data parallelism from the Megatron section: several ranks hold the same logical replica, each processes different examples, and gradients are synchronized before the optimizer step. The memory cost is that <em>every</em> rank holds <em>everything</em>: the parameters, the gradients, and the optimizer states. For mixed-precision Adam training, that is roughly 16 bytes per parameter before a single activation is stored — the arithmetic from <a href="#memory">Primitive ②</a>. A 70B model needs about 1.1&nbsp;TB of state per replica. No single GPU holds that.</p>
+
+        <p>The observation behind ZeRO and FSDP: nothing requires all of that state to be resident at once. The optimizer states are only touched at the optimizer step. The gradients of layer 40 are not needed while layer 3 computes. Even the parameters of layer 40 are not needed while layer 3 runs forward. So shard all three kinds of state across the data-parallel ranks — each rank permanently owns <code>1/N</code> of every layer — and materialize full parameters only for the layer that is currently executing:</p>
+
+<pre><code>plain DP:  every rank holds   full params + full grads + full optimizer states
+FSDP:      every rank holds   1/N params  + 1/N grads  + 1/N optimizer states
+
+forward, layer by layer:
+  all-gather layer i's params  -&gt;  run layer i  -&gt;  free the gathered params
+backward, layer by layer:
+  all-gather layer i's params  -&gt;  compute grads  -&gt;  reduce-scatter grads  -&gt;  free
+optimizer step:
+  each rank updates only the 1/N shard it owns
+</code></pre>
+
+        <p>Two of the collective operations here are new names for familiar shapes. An <strong>all-gather</strong> collects the shards from all ranks so that each rank temporarily holds the full tensor. A <strong>reduce-scatter</strong> is the reverse composed with a sum: gradients are summed across ranks, and each rank keeps only the <code>1/N</code> piece it owns. Peak memory per rank drops from "the whole model" to "my shard, plus one layer's worth of gathered parameters."</p>
+
+        <p>The price is communication volume. Plain DP moves each gradient once through an all-reduce, which costs about <code>2×</code> the parameter volume per step. FSDP all-gathers parameters twice (forward and backward) and reduce-scatters gradients once, roughly <code>3×</code> the parameter volume — about 1.5 times more traffic than plain DP, in exchange for an N-fold memory reduction. The bandwidth is affordable precisely because the gathers are per-layer and can be prefetched: while layer <code>i</code> computes, the parameters of layer <code>i+1</code> are already in flight.</p>
+
+        <h3>Why RL frameworks reach for it first</h3>
+
+        <p>The deep difference from Megatron is not the sharding arithmetic. It is <em>where the parallelism lives</em>. Megatron's parallelism is intrusive: TP splits the inside of a layer, so the model must be written in Megatron's building blocks, and a HuggingFace checkpoint must be converted into Megatron's format before training (that is what Megatron-Bridge exists for). FSDP's parallelism is a wrapper: it takes an ordinary <code>nn.Module</code>, walks its submodules, and replaces their parameters with shards. The model code does not change. verl's FSDP engine shows this directly — <code>module</code> here is a plain HuggingFace transformer:</p>
+
+<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/transformer_impl.py" target="_blank"><span class="file-path">verl/workers/engine/fsdp/transformer_impl.py</span><span class="file-meta">· wrapping a HuggingFace module</span></a>
+<pre class="with-source"><code class="language-python">module = FSDP(
+    module,                                  # an ordinary HF nn.Module
+    auto_wrap_policy=auto_wrap_policy,       # which submodules become shard units
+    sharding_strategy=sharding_strategy,
+    mixed_precision=mixed_precision,
+    device_mesh=self.device_mesh,
+    cpu_offload=cpu_offload,
+)</code></pre>
+
+        <p>This is why RL frameworks default to FSDP. RL post-training starts from a HuggingFace checkpoint — the SFT model someone just produced. With FSDP, that checkpoint loads directly and training starts; with Megatron, a conversion step and a Megatron-compatible model definition stand in between. For a research team iterating on algorithms with dense models in the 1B–100B range, FSDP is the shortest path from checkpoint to gradient.</p>
+
+        <p>The honest ceiling: FSDP shards along the data-parallel axis only. There is no pipeline stage, no expert parallelism, and in the basic story no tensor parallelism (FSDP2 can compose with TP through DTensor, but that is the frontier, not the default). For MoE giants like DeepSeek-V3, where expert parallelism and its routing invariants dominate the design, the Megatron path is the practical one — which is exactly why slime and Miles are Megatron-based while verl offers both and defaults to FSDP.</p>
+
+        <h3>FSDP1, FSDP2, and DTensor</h3>
+
+        <p>PyTorch has shipped two generations of the idea, and production RL code currently handles both. <strong>FSDP1</strong> flattens all parameters of a shard unit into one <code>FlatParameter</code> buffer and shards that buffer — efficient, but the flattening makes individual parameters awkward to address, which matters when weight sync needs to iterate them by name. <strong>FSDP2</strong> (the <code>fully_shard</code> API) shards each parameter separately as a <strong>DTensor</strong> — a tensor that knows its device mesh and placement, i.e., which ranks hold which slice of it. A DTensor can reconstruct its full value on demand: <code>full_tensor()</code> performs the all-gather and returns the assembled tensor. Keep that method in mind; it is the hinge of the next subsection.</p>
+
+        <p>verl supports both generations, and its utility file records the migration honestly — the same names import from three different places depending on the PyTorch version:</p>
+
+<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/utils/fsdp_utils.py" target="_blank"><span class="file-path">verl/utils/fsdp_utils.py</span><span class="file-meta">· the FSDP2 import dance</span></a>
+<pre class="with-source"><code class="language-python">if version.parse(torch.__version__) &gt;= version.parse("2.6"):
+    from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
+    from torch.distributed.tensor import DTensor, Shard
+elif version.parse(torch.__version__) &gt;= version.parse("2.4"):
+    from torch.distributed._composable.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard</code></pre>
+
+        <h3>RL pressure point 1: materializing weights for rollout sync</h3>
+
+        <p>After the optimizer step, the new policy has to reach the rollout engine — the trainer-side half of <a href="#weight-sync">Primitive ③</a>. Under FSDP, no rank holds a full parameter, so materializing the weights means all-gathering them, parameter by parameter. verl builds this as a generator over named parameters, calling <code>full_tensor()</code> on each shard and downcasting to BF16 to halve the sync traffic:</p>
+
+<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/transformer_impl.py" target="_blank"><span class="file-path">verl/workers/engine/fsdp/transformer_impl.py</span><span class="file-meta">· per-tensor weight materialization</span></a>
+<pre class="with-source"><code class="language-python">per_tensor_param = (
+    (
+        name,
+        param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+        if isinstance(param, DTensor)
+        else param,
+    )
+    for name, param in params.items()
+)</code></pre>
+
+        <p>This snippet finally explains an invariant that the <a href="#verl-pipeline">verl case study</a> could only state as a rule: <em>every rank must walk this generator, even though only one rank sends the result to SGLang</em>. Now the reason is visible. Each <code>full_tensor()</code> call is an all-gather — a collective operation in which every rank of the FSDP group must participate, because each rank holds a shard that the others need. If one rank skips the walk, the remaining ranks wait forever for its shard, and the sync deadlocks. The invariant is not a framework convention; it is the arithmetic of sharding.</p>
+
+        <h3>RL pressure point 2: getting out of rollout's way</h3>
+
+        <p>In a sleep-mode hybrid engine (<a href="#memory">Primitive ②</a>), trainer and rollout engine time-share the same GPUs. During rollout, the trainer's memory — even the sharded <code>1/N</code> — is dead weight that the inference engine needs for KV cache. verl's utilities move the FSDP shards and optimizer states to host memory and back around each phase: <code>offload_fsdp_model_to_cpu()</code> / <code>load_fsdp_model_to_gpu()</code> for parameters, <code>offload_fsdp_optimizer()</code> / <code>load_fsdp_optimizer()</code> for Adam states, with FSDP2 variants alongside.</p>
+
+        <p>One comment in the engine code is worth quoting because it shows how sharp the memory choreography is. verl <em>forces</em> CPU offload on for the reference policy and <em>forces</em> it off for the actor:</p>
+
+<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/transformer_impl.py" target="_blank"><span class="file-path">verl/workers/engine/fsdp/transformer_impl.py</span><span class="file-meta">· offload: forced on for ref, forced off for actor</span></a>
+<pre class="with-source"><code class="language-python"># We force reference policy to use CPUOffload to save memory.
+# We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
+cpu_offload = None
+if self.engine_config.forward_only:
+    cpu_offload = CPUOffload(offload_params=True)</code></pre>
+
+        <p>The logic: the reference policy <code>π<sub>ref</sub></code> only ever runs forward (to supply the KL anchor), so its parameters can live on CPU and stream in per layer — slower, but it frees GPU memory for the actor. The actor cannot use the same trick, because FSDP1's automatic offload interacts incorrectly with gradient accumulation: gradients accumulated across microbatches must stay resident between backward passes. One flag, two opposite settings, both load-bearing.</p>
+
+        <p>The logprob recompute — <a href="#megatron">Obligation 1</a> from the Megatron section — runs under this same machinery, as a forward-only pass over the rollout tokens: one all-gather sweep through the layers, no backward, no gradient memory. verl marks these engines with the same <code>forward_only</code> flag shown above.</p>
+
+        <h3>Choosing between the backbones</h3>
+
+        <table>
+          <thead><tr><th>Question</th><th>FSDP</th><th>Megatron</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Starting from a HuggingFace checkpoint?</td>
+              <td>Loads directly; the model code is unchanged</td>
+              <td>Requires conversion (Megatron-Bridge) and a Megatron model definition</td>
+            </tr>
+            <tr>
+              <td>Parallelism dimensions</td>
+              <td>Sharded DP only (FSDP2 + TP via DTensor is emerging)</td>
+              <td>TP · PP · DP · EP · CP, freely composed</td>
+            </tr>
+            <tr>
+              <td>Dense models, ~1B–100B</td>
+              <td>The comfortable default</td>
+              <td>Works, with more setup than the problem needs</td>
+            </tr>
+            <tr>
+              <td>MoE at DeepSeek scale</td>
+              <td>Out of reach — no expert parallelism</td>
+              <td>Native EP, plus the routing-replay invariants RL needs</td>
+            </tr>
+            <tr>
+              <td>Who uses it in this survey</td>
+              <td>verl (default), OpenRLHF, SkyRL, AReaL</td>
+              <td>slime, Miles, verl (as an option), Megatron's own <code>megatron/rl/</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>The two backbones are not competitors so much as two answers to "where should parallelism live": inside the model definition (Megatron — maximal control, maximal ceiling) or wrapped around it (FSDP — minimal friction, DP-shaped ceiling). The four obligations from the Megatron section apply to both unchanged; only the machinery underneath differs. That is the real lesson of verl's backend-switch design: recompute, loss, packing, and weight materialization are the stable interface, and the training backbone behind them is a config flag.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — FSDP</div>
+          <ul>
+            <li><a href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/transformer_impl.py" target="_blank"><code>verl/workers/engine/fsdp/transformer_impl.py</code></a> — the full FSDP training engine: wrapping, offload, weight materialization</li>
+            <li><a href="https://github.com/verl-project/verl/blob/main/verl/utils/fsdp_utils.py" target="_blank"><code>verl/utils/fsdp_utils.py</code></a> — offload/load utilities, FSDP1/FSDP2 version handling</li>
+            <li><a href="https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html" target="_blank">PyTorch <code>fully_shard</code> docs</a> — the FSDP2 API and DTensor sharding</li>
+            <li><a href="https://arxiv.org/abs/1910.02054" target="_blank">ZeRO paper (arxiv 1910.02054)</a> — the original memory-sharding analysis</li>
+          </ul>
+        </div>
       </section>
 
 
@@ -5498,6 +5678,7 @@ future = rollout_engine.update_weights_from_distributed(meta, param_specs, async
       <li><a href="#miles-pipeline">Miles · DeepSeek-V3</a></li>
       <li><a href="#verl-pipeline">verl · HybridFlow</a></li>
       <li><a href="#gradient-accumulation">Gradient accumulation</a></li>
+      <li><a href="#fsdp">FSDP · backbone contrast</a></li>
       <li><a href="#deepseek-v4">DeepSeek V4 · OPD</a></li>
       <li><a href="#sglang-internals">SGLang internals</a></li>
       <li><a href="#vllm-internals">vLLM · block-paging</a></li>

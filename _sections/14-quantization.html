@@ -3,40 +3,89 @@
       <section id="quantization">
         <h2>Quantization and the numerical-alignment problem</h2>
 
-        <p>If you're reading the Miles paper or the DeepSeek-V3 technical report and wondering why so much engineering effort goes into <em>making FP8 training work correctly</em>, this section is for you. Quantization is where the abstract algorithm meets the concrete number system, and getting it wrong silently corrupts the policy.</p>
+        <p>If you're reading the Miles paper or the DeepSeek-V3 technical report and wondering why so much engineering effort goes into <em>making FP8 training work correctly</em>, this section is for you. Quantization matters here because rollout and training may compute related quantities in different numerical formats, and RL only remains interpretable when those quantities stay aligned.</p>
 
         <h3>The numerical formats</h3>
 
-        <p>Three families are worth knowing:</p>
+        <p>Before the aggressive formats, it helps to name the ordinary floating-point types used in training:</p>
 
         <ul>
-          <li><strong>FP8</strong> (E4M3 and E5M2) — IEEE-754-style 8-bit floats with two variants: E4M3 has 4 exponent bits and 3 mantissa bits (used for forward activations, weights); E5M2 has 5/2 (used for gradients, with their wider dynamic range). H100-and-newer hardware has native FP8 tensor cores. The two variants exist because forward and backward have different statistical profiles.</li>
-          <li><strong>INT4 / INT8</strong> — fixed-point integers. INT4 weight-only quantization (W4A16) is the workhorse for inference of large models (Llama-70B fits on a single H100 at INT4). Quantization-aware training in INT4 is hard; post-training quantization with GPTQ / AWQ is more common.</li>
-          <li><strong>MXFP4 / MXFP8 / NVFP4</strong> — block-scaled formats. Each block of 16 or 32 values shares a single scale; the per-value representation is small (4 or 8 bits) but the dynamic range is large. NVFP4 is NVIDIA Blackwell-specific (the B200 and beyond); MXFP4 is the OCP standard.</li>
+          <li><strong>FP32</strong> is the classic 32-bit floating-point format. It has enough precision and dynamic range to be numerically comfortable, but it is expensive in memory and bandwidth for large models.</li>
+          <li><strong>FP16</strong> uses 16 bits. It is faster and smaller than FP32, but its narrower dynamic range makes overflow and underflow easier, especially in gradients.</li>
+          <li><strong>BF16</strong> also uses 16 bits, but keeps an FP32-like exponent range with fewer mantissa bits. In practice, this makes BF16 more forgiving than FP16 for large-model training, while still saving memory and bandwidth compared with FP32.</li>
+        </ul>
+
+        <div class="primer-box">
+          <p><strong>BF16 vs FP16.</strong> Both formats use 16 bits, but they spend those bits differently. FP16 keeps more fraction bits, so it can represent nearby numbers more finely, but it has a smaller exponent range. BF16 keeps the same 8-bit exponent size as FP32 and uses fewer fraction bits, so it is less precise locally but much harder to overflow or underflow. This is why BF16 is often preferred for training large models: it gives up some decimal precision to keep a safer dynamic range.</p>
+        </div>
+
+        <p>Modern training systems often keep some quantities in higher precision for stability while running large matrix operations in lower precision for speed. Examples include FP32 master weights or optimizer states, higher-precision gradient reductions, loss scaling bookkeeping, and sometimes numerically sensitive normalization or logprob computations. Quantization pushes this idea further: can inference, training, or weight storage use even fewer bits without changing the quantities the RL update depends on?</p>
+
+        <p>To read the lower-precision formats, keep three small ideas in mind. A floating-point number spends some bits on the <strong>exponent</strong>, which controls the scale or range of the number, and some bits on the <strong>mantissa</strong>, which controls how finely nearby values can be distinguished. A fixed-point integer format stores small integers plus a scale that says what real values those integers mean. A block-scaled format shares one scale across a small block of values, so the per-value storage can be tiny while the block still covers a useful numeric range.</p>
+
+        <p>With that vocabulary, three families are worth knowing:</p>
+
+        <ul>
+          <li><strong>FP8</strong> is an 8-bit floating-point family. The common variants are <strong>E4M3</strong> and <strong>E5M2</strong>: E4M3 uses more mantissa bits, so it keeps a little more local precision; E5M2 uses more exponent bits, so it covers a wider range. In practice, systems may use E4M3 for forward activations or weights and E5M2 for gradients, because gradients often need more range. H100-and-newer NVIDIA GPUs have hardware support for FP8 tensor-core operations.</li>
+          <li><strong>INT4 / INT8</strong> store values as small integers plus scales. <strong>Weight-only quantization</strong> means the model weights are stored in low precision, while activations may still be computed in a higher precision such as FP16 or BF16; <strong>W4A16</strong> means 4-bit weights and 16-bit activations. This is common for inference because it reduces model memory, but training directly with INT4 weights is much harder, so post-training quantization methods such as GPTQ and AWQ are more common.</li>
+          <li><strong>MXFP4 / MXFP8 / NVFP4</strong> are block-scaled formats. Instead of giving every value its own full floating-point scale, a small block of values shares one scale. Each value then needs only 4 or 8 bits, but the shared scale lets the block cover a larger dynamic range than raw tiny integers would. MXFP4 is an OCP standard; NVFP4 is NVIDIA's Blackwell-era variant.</li>
         </ul>
 
         <h3>QAT vs PTQ</h3>
 
-        <p>Two strategies for converting a model to a lower-precision format:</p>
+        <p>There are two broad routes from a high-precision model to a lower-precision one.</p>
 
-        <ul>
-          <li><strong>Quantization-Aware Training (QAT)</strong> — simulate the quantization during training, so the optimizer learns weights that are robust to the lower precision. Expensive but produces the highest-quality models. Miles' INT4-QAT pipeline is the most aggressive example in this survey.</li>
-          <li><strong>Post-Training Quantization (PTQ)</strong> — train in full precision, quantize at the end. Algorithms include GPTQ (one-shot, second-order weight rounding), AWQ (activation-aware weight quantization), GGUF (llama.cpp's format), and ModelOpt (NVIDIA's toolkit). Cheap but lossy.</li>
-        </ul>
+        <p><strong>Post-Training Quantization (PTQ)</strong> starts from a trained model and converts it after the fact. The model is not retrained end to end. A PTQ method usually takes a small calibration dataset, observes how weights and activations behave, chooses scales, and tries to round weights so that the quantized layer behaves close to the original layer. This is attractive for inference because it is much cheaper than training again, but it can lose quality if the approximation is too coarse.</p>
+
+        <p>Two PTQ algorithms are useful to recognize. <strong>GPTQ</strong> quantizes weights while trying to minimize the layer's reconstruction error, using approximate second-order information about how weight changes affect the layer output. <strong>AWQ</strong> starts from a different observation: not every weight matters equally, because some activation channels are much more important for preserving the model's outputs. AWQ uses activation statistics to protect those important channels while quantizing the rest more aggressively.</p>
+
+        <p><strong>Quantization-Aware Training (QAT)</strong> puts quantization into the training loop itself. During the forward pass, the model simulates low-precision weights or activations, so the optimizer sees the noise that the deployed model will face. During the backward pass, systems often use a straight-through estimator: the quantization operation is treated as if it had a usable gradient. QAT is more expensive than PTQ, but it can produce models that are more robust to very low precision. Miles' INT4-QAT pipeline is the most aggressive example in this survey.</p>
 
         <p>For RL specifically, the question is whether the inference engine can be in a lower precision than the trainer without breaking learning. The answer turns out to be "yes, but only with care."</p>
+
+        <h3>Counting parameters and bytes</h3>
+
+        <p>Quantization changes how many bytes parameters occupy; it does not change how many parameters the network has. To estimate the parameter count of a dense decoder-only Transformer, the most useful quantities are the number of layers <code>L</code>, hidden size <code>d</code>, MLP hidden size <code>d<sub>ff</sub></code>, and vocabulary size <code>V</code>. Ignoring small layernorm and bias terms, a SwiGLU-style model with a tied output head is roughly:</p>
+
+<pre><code>embedding params      ≈ V · d
+attention per layer  ≈ 4 · d²          # Q, K, V, output projections
+MLP per layer        ≈ 3 · d · d_ff    # gate, up, down projections
+
+total params         ≈ V · d + L · (4 · d² + 3 · d · d_ff)</code></pre>
+
+        <p>For example, take <code>L = 32</code>, <code>d = 4096</code>, <code>d<sub>ff</sub> = 11008</code>, and <code>V = 32000</code>. The embedding has about <code>0.13B</code> parameters. Each layer has about <code>0.20B</code> parameters. The total is therefore about <code>6.6B</code> parameters, close to the familiar 7B model scale.</p>
+
+        <p>Once the parameter count is known, precision gives a first memory estimate:</p>
+
+<pre><code>parameter bytes ≈ number_of_parameters · bits_per_parameter / 8
+
+6.6B parameters in BF16 or FP16 ≈ 13.2 GB
+6.6B parameters in FP8          ≈  6.6 GB
+6.6B parameters in INT4         ≈  3.3 GB, plus scales and metadata</code></pre>
+
+        <p>Training needs more memory than the parameter tensor itself. Gradients and optimizer states also occupy memory. For Adam-style optimizers, the usual extra states are two moment buffers, often called <code>m</code> and <code>v</code>. A rough full-precision training estimate is therefore:</p>
+
+<pre><code>model weights     ≈ N · bytes(weight)
+gradients         ≈ N · bytes(grad)
+Adam moments      ≈ 2 · N · bytes(moment)
+
+Example with N = 6.6B:
+BF16 weights       ≈ 13.2 GB
+BF16 gradients     ≈ 13.2 GB
+FP32 Adam moments  ≈ 52.8 GB
+total              ≈ 79.2 GB, before activations, KV cache, and fragmentation</code></pre>
+
+        <p>This is why training memory is much larger than inference memory. Inference may only need weights plus KV cache and runtime buffers; training also has to keep gradients, optimizer state, and activations for backward. Distributed optimizers and ZeRO/FSDP-style sharding reduce this by splitting some of those states across data-parallel ranks.</p>
+
+        <p>MoE models add one more distinction. <strong>Total parameters</strong> count every expert stored in the model. <strong>Active parameters</strong> count only the experts selected for a token. Quantization reduces the storage cost of the total parameter set, while routing decides how many expert parameters are active for a given token. This is why MoE reports often say things like "large total parameters, smaller active parameters per token."</p>
 
         <h3>The MoE routing divergence problem</h3>
 
         <p>This is the deep reason Miles exists. In a Mixture-of-Experts model, each token is routed to k experts based on the output of a small gating network. The gating decision is a top-k over k experts' affinity scores. Under floating-point arithmetic, the affinity scores are computed in a specific precision. If the inference engine computes them in FP8 and the trainer in BF16, two scores that are equal in BF16 can be unequal in FP8 (or vice versa), <em>and the top-k decision can flip</em>. The token routes to a different expert at inference than it did at training time. The gradient signal becomes random noise with respect to which expert actually generated the token.</p>
 
-        <p>This is the "BERT-era unsolved bug" that Chenyang's tutorial flags — the existence of a numerical-precision-induced routing divergence has been known for years. The brute-force fix is to make inference and training share the same precision and the same kernels for the routing computation. That's what Miles' <strong>Unified FP8 Pipeline</strong> does. The cleverer fix is to <em>replay</em> the routing decision: record which experts inference picked, force training to use the same picks. This is <strong>R3 — Rollout Routing Replay</strong>, Miles' signature contribution. It guarantees the routing is identical regardless of precision.</p>
+        <p>This is the "BERT-era unsolved bug" that <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/sys-design/readme-1-EN.md" target="_blank">Chenyang's tutorial</a> flags — the existence of a numerical-precision-induced routing divergence has been known for years. The brute-force fix is to make inference and training share the same precision and the same kernels for the routing computation. That's what Miles' <strong>Unified FP8 Pipeline</strong> does. The cleverer fix is to <em>replay</em> the routing decision: record which experts inference picked, force training to use the same picks. This is <strong>R3 — Rollout Routing Replay</strong>, Miles' signature contribution. It guarantees the routing is identical regardless of precision.</p>
 
-        <blockquote class="pull">
-          The mathematical invariant: routing(x, θ, fp8) ≡ routing(x, θ, bf16) by replay, not by approximation. Without it, every gradient update in an MoE model is partially noise.
-        </blockquote>
-
-        <p>For non-MoE models the problem is milder but still present: numerical drift in logprobs accumulates batch-to-batch. The safe practice (every framework in this survey follows it) is to <em>never</em> use the inference engine's logprobs for loss computation. Always recompute logprobs with the training engine, even at the cost of an extra forward pass. The inference engine generates the tokens; the trainer recomputes their probabilities.</p>
+        <p>For non-MoE models the problem is usually milder, but numerical drift in logprobs can still matter. A common conservative design is to let the inference engine generate tokens, then have the training engine recompute the probabilities used in the loss, even at the cost of an extra forward pass. Other systems may cache or correct rollout-side logprobs, but they still need an explicit rule for which numerical view enters the loss.</p>
 
         <div class="study">
           <div class="study-title">Study resources — quantization</div>

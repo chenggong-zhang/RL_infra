@@ -449,6 +449,53 @@
     color: #1d3557;
     white-space: nowrap;
   }
+  .glossary {
+    position: relative;
+    display: inline-flex;
+    align-items: baseline;
+    border-bottom: 1px dotted var(--purple);
+    color: var(--purple-dark);
+    cursor: help;
+    outline: none;
+  }
+  .glossary::after {
+    content: "?";
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 13px;
+    height: 13px;
+    margin-left: 3px;
+    border-radius: 50%;
+    background: var(--purple-soft);
+    color: var(--purple-dark);
+    font-family: var(--font-sans);
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .glossary .glossary-panel {
+    display: none;
+    position: absolute;
+    left: 0;
+    bottom: calc(100% + 8px);
+    width: min(300px, 78vw);
+    padding: 10px 12px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--purple);
+    border-radius: 6px;
+    box-shadow: 0 14px 36px rgba(28, 29, 35, 0.16);
+    color: var(--text-body);
+    font-size: 13px;
+    line-height: 1.45;
+    z-index: 20;
+  }
+  .glossary:hover .glossary-panel,
+  .glossary:focus .glossary-panel,
+  .glossary:focus-within .glossary-panel {
+    display: block;
+  }
   .question-box {
     margin: 18px 0 22px;
     padding: 14px 16px;
@@ -784,6 +831,7 @@
     <li><a href="#miles-pipeline" class="nav-link">Miles · DeepSeek-V3</a></li>
     <li><a href="#verl-pipeline" class="nav-link">verl · HybridFlow</a></li>
     <li><a href="#gradient-accumulation" class="nav-link">Gradient accumulation</a></li>
+    <li><a href="#fsdp" class="nav-link">FSDP · training backbone</a></li>
     <li><a href="#deepseek-v4" class="nav-link">DeepSeek V4 · OPD-heavy</a></li>
     <li><a href="#sglang-internals" class="nav-link">SGLang · inference substrate</a></li>
     <li><a href="#vllm-internals" class="nav-link">vLLM · block-paging contrast</a></li>
@@ -846,6 +894,7 @@
       <li><a href="#miles-pipeline">Miles · DeepSeek-V3</a></li>
       <li><a href="#verl-pipeline">verl · HybridFlow</a></li>
       <li><a href="#gradient-accumulation">Gradient accumulation</a></li>
+      <li><a href="#fsdp">FSDP · backbone contrast</a></li>
       <li><a href="#deepseek-v4">DeepSeek V4 · OPD</a></li>
       <li><a href="#sglang-internals">SGLang internals</a></li>
       <li><a href="#vllm-internals">vLLM · block-paging</a></li>

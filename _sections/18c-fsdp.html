@@ -1,0 +1,140 @@
+
+
+      <section id="fsdp">
+        <h2>Case study — FSDP, the other training backbone</h2>
+
+        <p>The training sections of this survey ran on Megatron-LM. But look at the landscape table: verl's default training backend is FSDP, and OpenRLHF, SkyRL, and AReaL reach for it too. This survey has used the name nine times without defining it. This case study closes that gap: what FSDP actually does, why RL frameworks pick it first, and where RL specifically presses on it. The code is verl's, which the previous case study already introduced.</p>
+
+        <p>FSDP stands for <strong>Fully Sharded Data Parallel</strong>. It is PyTorch's built-in implementation of an idea published as ZeRO (<a href="https://arxiv.org/abs/1910.02054">arxiv 1910.02054</a>): keep data parallelism's simple mental model — every rank runs the whole model on its own slice of the batch — but stop paying data parallelism's memory price.</p>
+
+        <h3>The idea: shard everything, gather just in time</h3>
+
+        <p>Recall plain data parallelism from the Megatron section: several ranks hold the same logical replica, each processes different examples, and gradients are synchronized before the optimizer step. The memory cost is that <em>every</em> rank holds <em>everything</em>: the parameters, the gradients, and the optimizer states. For mixed-precision Adam training, that is roughly 16 bytes per parameter before a single activation is stored — the arithmetic from <a href="#memory">Primitive ②</a>. A 70B model needs about 1.1&nbsp;TB of state per replica. No single GPU holds that.</p>
+
+        <p>The observation behind ZeRO and FSDP: nothing requires all of that state to be resident at once. The optimizer states are only touched at the optimizer step. The gradients of layer 40 are not needed while layer 3 computes. Even the parameters of layer 40 are not needed while layer 3 runs forward. So shard all three kinds of state across the data-parallel ranks — each rank permanently owns <code>1/N</code> of every layer — and materialize full parameters only for the layer that is currently executing:</p>
+
+<pre><code>plain DP:  every rank holds   full params + full grads + full optimizer states
+FSDP:      every rank holds   1/N params  + 1/N grads  + 1/N optimizer states
+
+forward, layer by layer:
+  all-gather layer i's params  -&gt;  run layer i  -&gt;  free the gathered params
+backward, layer by layer:
+  all-gather layer i's params  -&gt;  compute grads  -&gt;  reduce-scatter grads  -&gt;  free
+optimizer step:
+  each rank updates only the 1/N shard it owns
+</code></pre>
+
+        <p>Two of the collective operations here are new names for familiar shapes. An <strong>all-gather</strong> collects the shards from all ranks so that each rank temporarily holds the full tensor. A <strong>reduce-scatter</strong> is the reverse composed with a sum: gradients are summed across ranks, and each rank keeps only the <code>1/N</code> piece it owns. Peak memory per rank drops from "the whole model" to "my shard, plus one layer's worth of gathered parameters."</p>
+
+        <p>The price is communication volume. Plain DP moves each gradient once through an all-reduce, which costs about <code>2×</code> the parameter volume per step. FSDP all-gathers parameters twice (forward and backward) and reduce-scatters gradients once, roughly <code>3×</code> the parameter volume — about 1.5 times more traffic than plain DP, in exchange for an N-fold memory reduction. The bandwidth is affordable precisely because the gathers are per-layer and can be prefetched: while layer <code>i</code> computes, the parameters of layer <code>i+1</code> are already in flight.</p>
+
+        <h3>Why RL frameworks reach for it first</h3>
+
+        <p>The deep difference from Megatron is not the sharding arithmetic. It is <em>where the parallelism lives</em>. Megatron's parallelism is intrusive: TP splits the inside of a layer, so the model must be written in Megatron's building blocks, and a HuggingFace checkpoint must be converted into Megatron's format before training (that is what Megatron-Bridge exists for). FSDP's parallelism is a wrapper: it takes an ordinary <code>nn.Module</code>, walks its submodules, and replaces their parameters with shards. The model code does not change. verl's FSDP engine shows this directly — <code>module</code> here is a plain HuggingFace transformer:</p>
+
+<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/transformer_impl.py" target="_blank"><span class="file-path">verl/workers/engine/fsdp/transformer_impl.py</span><span class="file-meta">· wrapping a HuggingFace module</span></a>
+<pre class="with-source"><code class="language-python">module = FSDP(
+    module,                                  # an ordinary HF nn.Module
+    auto_wrap_policy=auto_wrap_policy,       # which submodules become shard units
+    sharding_strategy=sharding_strategy,
+    mixed_precision=mixed_precision,
+    device_mesh=self.device_mesh,
+    cpu_offload=cpu_offload,
+)</code></pre>
+
+        <p>This is why RL frameworks default to FSDP. RL post-training starts from a HuggingFace checkpoint — the SFT model someone just produced. With FSDP, that checkpoint loads directly and training starts; with Megatron, a conversion step and a Megatron-compatible model definition stand in between. For a research team iterating on algorithms with dense models in the 1B–100B range, FSDP is the shortest path from checkpoint to gradient.</p>
+
+        <p>The honest ceiling: FSDP shards along the data-parallel axis only. There is no pipeline stage, no expert parallelism, and in the basic story no tensor parallelism (FSDP2 can compose with TP through DTensor, but that is the frontier, not the default). For MoE giants like DeepSeek-V3, where expert parallelism and its routing invariants dominate the design, the Megatron path is the practical one — which is exactly why slime and Miles are Megatron-based while verl offers both and defaults to FSDP.</p>
+
+        <h3>FSDP1, FSDP2, and DTensor</h3>
+
+        <p>PyTorch has shipped two generations of the idea, and production RL code currently handles both. <strong>FSDP1</strong> flattens all parameters of a shard unit into one <code>FlatParameter</code> buffer and shards that buffer — efficient, but the flattening makes individual parameters awkward to address, which matters when weight sync needs to iterate them by name. <strong>FSDP2</strong> (the <code>fully_shard</code> API) shards each parameter separately as a <strong>DTensor</strong> — a tensor that knows its device mesh and placement, i.e., which ranks hold which slice of it. A DTensor can reconstruct its full value on demand: <code>full_tensor()</code> performs the all-gather and returns the assembled tensor. Keep that method in mind; it is the hinge of the next subsection.</p>
+
+        <p>verl supports both generations, and its utility file records the migration honestly — the same names import from three different places depending on the PyTorch version:</p>
+
+<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/utils/fsdp_utils.py" target="_blank"><span class="file-path">verl/utils/fsdp_utils.py</span><span class="file-meta">· the FSDP2 import dance</span></a>
+<pre class="with-source"><code class="language-python">if version.parse(torch.__version__) &gt;= version.parse("2.6"):
+    from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
+    from torch.distributed.tensor import DTensor, Shard
+elif version.parse(torch.__version__) &gt;= version.parse("2.4"):
+    from torch.distributed._composable.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard</code></pre>
+
+        <h3>RL pressure point 1: materializing weights for rollout sync</h3>
+
+        <p>After the optimizer step, the new policy has to reach the rollout engine — the trainer-side half of <a href="#weight-sync">Primitive ③</a>. Under FSDP, no rank holds a full parameter, so materializing the weights means all-gathering them, parameter by parameter. verl builds this as a generator over named parameters, calling <code>full_tensor()</code> on each shard and downcasting to BF16 to halve the sync traffic:</p>
+
+<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/transformer_impl.py" target="_blank"><span class="file-path">verl/workers/engine/fsdp/transformer_impl.py</span><span class="file-meta">· per-tensor weight materialization</span></a>
+<pre class="with-source"><code class="language-python">per_tensor_param = (
+    (
+        name,
+        param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+        if isinstance(param, DTensor)
+        else param,
+    )
+    for name, param in params.items()
+)</code></pre>
+
+        <p>This snippet finally explains an invariant that the <a href="#verl-pipeline">verl case study</a> could only state as a rule: <em>every rank must walk this generator, even though only one rank sends the result to SGLang</em>. Now the reason is visible. Each <code>full_tensor()</code> call is an all-gather — a collective operation in which every rank of the FSDP group must participate, because each rank holds a shard that the others need. If one rank skips the walk, the remaining ranks wait forever for its shard, and the sync deadlocks. The invariant is not a framework convention; it is the arithmetic of sharding.</p>
+
+        <h3>RL pressure point 2: getting out of rollout's way</h3>
+
+        <p>In a sleep-mode hybrid engine (<a href="#memory">Primitive ②</a>), trainer and rollout engine time-share the same GPUs. During rollout, the trainer's memory — even the sharded <code>1/N</code> — is dead weight that the inference engine needs for KV cache. verl's utilities move the FSDP shards and optimizer states to host memory and back around each phase: <code>offload_fsdp_model_to_cpu()</code> / <code>load_fsdp_model_to_gpu()</code> for parameters, <code>offload_fsdp_optimizer()</code> / <code>load_fsdp_optimizer()</code> for Adam states, with FSDP2 variants alongside.</p>
+
+        <p>One comment in the engine code is worth quoting because it shows how sharp the memory choreography is. verl <em>forces</em> CPU offload on for the reference policy and <em>forces</em> it off for the actor:</p>
+
+<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/transformer_impl.py" target="_blank"><span class="file-path">verl/workers/engine/fsdp/transformer_impl.py</span><span class="file-meta">· offload: forced on for ref, forced off for actor</span></a>
+<pre class="with-source"><code class="language-python"># We force reference policy to use CPUOffload to save memory.
+# We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
+cpu_offload = None
+if self.engine_config.forward_only:
+    cpu_offload = CPUOffload(offload_params=True)</code></pre>
+
+        <p>The logic: the reference policy <code>π<sub>ref</sub></code> only ever runs forward (to supply the KL anchor), so its parameters can live on CPU and stream in per layer — slower, but it frees GPU memory for the actor. The actor cannot use the same trick, because FSDP1's automatic offload interacts incorrectly with gradient accumulation: gradients accumulated across microbatches must stay resident between backward passes. One flag, two opposite settings, both load-bearing.</p>
+
+        <p>The logprob recompute — <a href="#megatron">Obligation 1</a> from the Megatron section — runs under this same machinery, as a forward-only pass over the rollout tokens: one all-gather sweep through the layers, no backward, no gradient memory. verl marks these engines with the same <code>forward_only</code> flag shown above.</p>
+
+        <h3>Choosing between the backbones</h3>
+
+        <table>
+          <thead><tr><th>Question</th><th>FSDP</th><th>Megatron</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Starting from a HuggingFace checkpoint?</td>
+              <td>Loads directly; the model code is unchanged</td>
+              <td>Requires conversion (Megatron-Bridge) and a Megatron model definition</td>
+            </tr>
+            <tr>
+              <td>Parallelism dimensions</td>
+              <td>Sharded DP only (FSDP2 + TP via DTensor is emerging)</td>
+              <td>TP · PP · DP · EP · CP, freely composed</td>
+            </tr>
+            <tr>
+              <td>Dense models, ~1B–100B</td>
+              <td>The comfortable default</td>
+              <td>Works, with more setup than the problem needs</td>
+            </tr>
+            <tr>
+              <td>MoE at DeepSeek scale</td>
+              <td>Out of reach — no expert parallelism</td>
+              <td>Native EP, plus the routing-replay invariants RL needs</td>
+            </tr>
+            <tr>
+              <td>Who uses it in this survey</td>
+              <td>verl (default), OpenRLHF, SkyRL, AReaL</td>
+              <td>slime, Miles, verl (as an option), Megatron's own <code>megatron/rl/</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>The two backbones are not competitors so much as two answers to "where should parallelism live": inside the model definition (Megatron — maximal control, maximal ceiling) or wrapped around it (FSDP — minimal friction, DP-shaped ceiling). The four obligations from the Megatron section apply to both unchanged; only the machinery underneath differs. That is the real lesson of verl's backend-switch design: recompute, loss, packing, and weight materialization are the stable interface, and the training backbone behind them is a config flag.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — FSDP</div>
+          <ul>
+            <li><a href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/transformer_impl.py" target="_blank"><code>verl/workers/engine/fsdp/transformer_impl.py</code></a> — the full FSDP training engine: wrapping, offload, weight materialization</li>
+            <li><a href="https://github.com/verl-project/verl/blob/main/verl/utils/fsdp_utils.py" target="_blank"><code>verl/utils/fsdp_utils.py</code></a> — offload/load utilities, FSDP1/FSDP2 version handling</li>
+            <li><a href="https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html" target="_blank">PyTorch <code>fully_shard</code> docs</a> — the FSDP2 API and DTensor sharding</li>
+            <li><a href="https://arxiv.org/abs/1910.02054" target="_blank">ZeRO paper (arxiv 1910.02054)</a> — the original memory-sharding analysis</li>
+          </ul>
+        </div>
+      </section>

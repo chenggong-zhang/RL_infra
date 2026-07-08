@@ -3,129 +3,70 @@
       <section id="megatron">
         <h2>The training backbone: Megatron-LM</h2>
 
-        <p><a href="https://github.com/NVIDIA/Megatron-LM">Megatron-LM</a> is the training engine sitting under almost every RL framework in this survey. The repository contains two parts: <strong>Megatron Core</strong> (a composable library of GPU-optimized building blocks — kernels, parallelism strategies, mixed-precision support) and <strong>Megatron-LM</strong> proper (reference training scripts using the core). Performance numbers from NVIDIA's benchmarks: 462B-parameter models trained on 6144 H100 GPUs, reaching 47% Model FLOP Utilization. For comparison, naïve PyTorch DDP on a 70B model typically achieves 30-35% MFU.</p>
+        <p>By this point, the training object is visible: response tokens, masks, rewards or advantages, and policy logprobs have to line up before the actor loss is meaningful. The next question sits one layer lower. Once that object reaches the training engine, how is one actor update actually executed on a GPU cluster?</p>
 
-        <p>From the survey's point of view, Megatron plays <em>two distinct roles</em> at once. As a <strong>substrate</strong>, it is the engine that Miles, slime, and verl wrap to do the actual gradient work — recomputing logprobs, computing the GRPO loss, running backward, stepping the optimizer, and materializing rollout weights. As a <strong>native RL framework</strong>, it ships its own complete first-party RL stack at <code>megatron/rl/</code>, with <code>train_rl.py</code>, <code>rl_utils.py</code>, <code>sequence_packing_utils.py</code>, and an SGLang-server bridge. Knowing both roles is what lets you read the verl/slime/Miles code without losing track of which abstraction owns which invariant.</p>
-
-        <figure>
-          <img src="diagrams/11-megatron-rl-role.svg" alt="Megatron-LM's dual role: substrate (recompute logprobs, compute GRPO loss, backward, materialize weights) versus native RL stack (train_rl.py, rl_utils.py, sequence_packing_utils.py, MegatronLocal, verify_model_weights_swap). Below: 5D parallelism strip — TP, PP, DP, EP, CP — each with its RL meaning. Bottom: communication intensity ordering.">
-          <figcaption><span class="fig-label">Figure 10.</span> Megatron's two roles. Left: the substrate role used by Miles, slime, and verl. Right: the native RL stack at <code>megatron/rl/</code>. Bottom: 5D parallelism, each axis with its concrete RL meaning.</figcaption>
-        </figure>
-
-        <h3>Role 1: substrate for Miles / slime / verl</h3>
-
-        <p>When a framework above wraps Megatron, it asks Megatron for four things, in this order:</p>
-
-        <ol>
-          <li><strong>Recompute logprobs</strong> for the rollout tokens. The inference engine produced its own logprobs but they cannot be trusted for the loss — different precision, different kernels, sometimes different operator order. The trainer must recompute them in the training precision, with the training kernels, on the training parallel layout. This is one forward pass per microbatch, no backward.</li>
-          <li><strong>Compute the loss</strong>. Given recomputed logprobs π<sub>θ</sub>, rollout logprobs π<sub>old</sub>, advantages Â, and a KL reference π<sub>ref</sub>, build the GRPO objective and a few diagnostic scalars. The next subsection has the explicit formula.</li>
-          <li><strong>Backward + optimizer step</strong>. Standard Megatron, but with a quirk: at RL scale, the parallelism layout chosen for backward (favoring DP for throughput) is usually not the same one that's fastest for the rollout forward (favoring TP for low latency). The framework above arbitrates.</li>
-          <li><strong>Materialize weights for rollout sync</strong>. After the optimizer step, the new policy has to flow back into SGLang. The trainer exposes a method (parameter iteration with DTensor → full_tensor() bucketing, or an offload-to-disk path) that yields named tensors in a form the inference engine can ingest. <a href="#weight-sync">Primitive ③</a> covers this.</li>
-        </ol>
-
-        <p>Three of the four jobs above are exactly what a normal pretraining loop does. The one that distinguishes RL is #1, the recompute. Every RL framework eats this cost because the alternative — trusting inference-engine logprobs — produces silent training-time drift that the gradient cannot detect.</p>
-
-        <h3>Role 2: Megatron's own RL stack</h3>
-
-        <p>The directory <code>megatron/rl/</code> is a complete RL framework in its own right, hidden inside what is nominally a pretraining library. The headline files are worth knowing by name:</p>
-
-        <ul>
-          <li><strong><code>train_rl.py</code></strong> — the top-level entrypoint. Builds the model with the standard Megatron <code>pretrain()</code> harness, then swaps the forward-step function for an RL-aware one and the data iterator for a rollout-driven one. The training loop is <em>identical</em> to pretraining at the outer level; only the inner step differs.</li>
-          <li><strong><code>megatron/rl/rl_utils.py</code></strong> — the GRPO loss, the truncated-importance-sampling clip, the KL penalty, the entropy bonus, and the precision-mismatch diagnostics. This is the file to read if you want to see what a GRPO step <em>actually</em> computes, with all corrections inline rather than spread across a framework.</li>
-          <li><strong><code>megatron/rl/sequence_packing_utils.py</code></strong> — the packing logic that lets variable-length rollouts share a microbatch without attention leaking across sequence boundaries. Produces a <code>PackedSeqParams</code> object holding <code>cu_seqlens</code> (cumulative lengths) which the Transformer Engine attention kernels honor as a hard mask. The packing prevents O(n²) attention waste on the tail of short rollouts.</li>
-          <li><strong><code>megatron/rl/agent/</code> · <code>inference/</code> · <code>server/</code></strong> — the three modules that bridge Megatron to an external sampler. <code>server/</code> exposes a <code>MegatronLocal</code> handle that the SGLang RL backend uses for parameter transfer and <code>verify_model_weights_swap()</code> checks. <code>inference/</code> hosts the rollout client. <code>agent/</code> hosts the environment interface.</li>
-          <li><strong><code>verify_model_weights_swap()</code></strong> — a small but load-bearing invariant. After a sync, it asserts that the inference engine and trainer hold the same weights up to a tolerance, by sampling parameters and comparing reductions. Failures here are the canonical staleness bug. Without this check, a missed sync drifts silently until rewards crater.</li>
-        </ul>
-
-        <h3>The GRPO loss as Megatron writes it</h3>
-
-        <p>GRPO drops PPO's critic and replaces it with a group-relative baseline: for a prompt, sample G completions, compute the reward for each, normalize within the group, and use the normalized reward as the advantage. The Megatron implementation builds the loss as:</p>
-
-<pre><code>L_GRPO = -E[ min( ρ · Â, clip(ρ, 1-ε, 1+ε) · Â ) ]   # truncated importance sampling
-       + β · KL( π_θ || π_ref )                       # reference penalty
-       - α · H( π_θ )                                 # entropy bonus
-
-where ρ = exp( π_θ(a|s) - π_old(a|s) ),
-      Â = group-normalized reward within G samples for the same prompt,
-      π_old = logprobs at sampling time (from the rollout engine, NOT trusted as numerics
-              but trusted as the policy that generated the action),
-      π_θ   = recomputed logprobs from the trainer in the training precision.</code></pre>
-
-        <p>The mathematically delicate term is ρ. In on-policy PPO/GRPO, ρ should be ≈ 1 because the same model generates and trains. In practice it is not, for three reasons: (a) partial rollouts replay older policy actions, (b) numerical drift between FP8 inference and BF16 training, (c) MoE routing divergence when low-precision routing flips top-k picks. Megatron's <code>rl_utils.py</code> exposes <strong>mismatch metrics</strong> that compute |ρ - 1| moments per batch — when those grow beyond a threshold, the training is no longer on-policy in the empirical sense and the gradient estimator's bias has eaten the trust region.</p>
+        <p>Megatron-LM is a good example for this layer because several RL infrastructure stacks use it directly as the training-side backend. Miles and slime wrap Megatron-style training workers around SGLang rollout, and verl can run its actor backend on Megatron as one of its supported training choices. It also exposes the central fact about this layer clearly, so we state it up front.</p>
 
         <blockquote class="pull">
-          The mismatch metric is the <em>empirical</em> answer to "is my training on-policy?". The math says ρ should be 1; the metric tells you what it actually is. Every production GRPO run watches this number.
+          Megatron-LM is a reference training example built on Megatron Core. Megatron Core is the reusable layer: transformer building blocks, advanced parallelism strategies (TP, PP, DP, EP, and CP), mixed precision support (FP16, BF16, FP8, and FP4), and model architectures for custom training frameworks.
         </blockquote>
 
-        <h3>Sequence packing — why attention leakage matters</h3>
+        <p>This quote tells us where to look. Megatron Core is the layer that owns the distributed training machinery: how the model is partitioned, how forward and backward are scheduled, how gradients are synchronized, and how the optimizer step is applied. RL infrastructure builds around that machinery. It supplies rollout data instead of ordinary pretraining text, computes an RL loss instead of next-token cross entropy, and then sends the updated actor back to the rollout side.</p>
 
-        <p>Rollouts vary in length wildly: a math problem may finish in 200 tokens, a long-horizon code task in 8000. A naïve batch pads to the longest sequence and burns FLOPs on padding. Packing concatenates several rollouts end-to-end into a single packed sequence and tells the attention kernel where the boundaries are. Done wrong — without the boundary mask — tokens at position 250 in rollout B attend to tokens at position 200 in rollout A, and the gradient learns to mix unrelated trajectories. <code>PackedSeqParams</code> with <code>cu_seqlens = [0, 200, 4500, 4700, …]</code> is the data structure that Transformer Engine's flash attention uses to enforce the boundary. The packing transformation is <em>not</em> just a memory optimization; it is a correctness primitive. The bug it prevents (cross-sequence attention) is the kind that produces a coherent-looking loss curve and a quietly-broken policy.</p>
+        <p>For someone already comfortable designing RL losses, this section is not mainly about the formula. It is about what happens after the formula enters a distributed training engine. Megatron decides which ranks see which slice of the batch, how large batches are broken into microbatches, when gradients are accumulated or synchronized, and which optimizer step actually creates the next policy version.</p>
 
-        <h3>The four-layer Megatron ↔ SGLang interface</h3>
+        <h3>Background: the actor as a distributed object</h3>
 
-        <p>When a framework above (slime, Miles) connects Megatron to SGLang, the interface decomposes into four layers, each enforcing one invariant:</p>
+        <p>A <strong>rank</strong> is one participating training process, usually associated with one GPU. A <strong>process group</strong> is a selected set of ranks that communicate for one purpose. Megatron builds several overlapping process groups because different parts of training need different communication patterns.</p>
 
-        <ol>
-          <li><strong>Process layer.</strong> Ray spawns a Megatron worker group and an SGLang scheduler group. They live on the same GPUs (sleep-mode time-sharing) or different GPUs (disaggregated). Invariant: every Megatron rank knows which SGLang rank it talks to, and vice versa.</li>
-          <li><strong>Memory layer.</strong> <code>release_memory_occupation()</code> on SGLang frees the engine's KV cache before backward; <code>resume_memory_occupation()</code> reclaims it after. Invariant: at any instant, exactly one of {trainer activations, inference KV} occupies the shared GPU memory pool. <a href="#memory">Primitive ②</a> made this concrete.</li>
-          <li><strong>Weight layer.</strong> <code>update_weights_from_distributed()</code> (or its IPC / disk variant) streams parameters from trainer to engine, bucket by bucket, NCCL-overlapped. Invariant: <code>verify_model_weights_swap()</code> must pass before the next rollout begins.</li>
-          <li><strong>Token layer.</strong> SGLang generates, Megatron recomputes logprobs, the framework above stitches the tuples. Invariant: the <code>π_old</code> stored on disk for the loss is the engine's logprob; the <code>π_θ</code> used for the loss is always the recompute.</li>
-        </ol>
+        <p>The algorithm can treat the actor as one policy <code>π<sub>θ</sub></code>. The training engine has to represent that policy through many partial states: one rank may hold a shard of a weight matrix, another may hold a later range of layers, and another replica may work on a different slice of the batch. Megatron coordinates those partial states so the optimizer step still updates one logical actor.</p>
 
-        <p>Bugs at each layer have different symptoms: process-layer bugs hang; memory-layer bugs OOM; weight-layer bugs drift; token-layer bugs corrupt gradients. The right invariant to assert at each layer is what makes the four layers cleanly decomposable.</p>
-
-        <h3>5D parallelism in the RL setting</h3>
-
-        <p>The product space TP × PP × DP × EP × CP is huge. Below is how each axis interacts specifically with RL — what makes RL different from pretraining is that the <em>same model</em> has to run in both rollout and training modes, with different optimal layouts.</p>
+        <p>The ways of splitting the work are named by what is being split:</p>
 
         <ul>
-          <li><strong>TP (Tensor Parallel)</strong> — split each layer's weight matrices across GPUs. Within-machine, NVLink-bound. RL setting: TP is the dimension most often shared between rollout and training (because the rollout engine is also TP-sharded). Sleep-mode hybrid engines (verl, slime) typically use <em>identical</em> TP for trainer and engine, which makes the weight handoff a no-op in layout.</li>
-          <li><strong>PP (Pipeline Parallel)</strong> — split layers across GPUs. Cross-machine, InfiniBand-bound. RL setting: PP is rarely matched between trainer and engine — SGLang prefers TP-only for low decode latency, while the trainer benefits from PP for the backward. The mismatch is handled at the weight-sync layer with explicit gather and scatter steps.</li>
-          <li><strong>DP (Data Parallel)</strong> — replicate the model, split the batch. RL setting: DP scales the trainer cheaply but does <em>nothing</em> for the rollout (the rollout is bottlenecked by single-sample latency, not per-batch throughput). High-DP layouts therefore over-provision the trainer relative to the engine, which is fine if rollout dominates wall time but wasteful otherwise.</li>
-          <li><strong>EP (Expert Parallel)</strong> — split MoE experts across GPUs. Required for DeepSeek-V3, Qwen3-MoE, GPT-OSS. RL setting: EP is where the R3 routing-replay invariant lives. The trainer's EP layout and the engine's EP layout must agree on which expert handles which token, or the gradient signal corrupts. Miles' contribution is the EP-aware replay.</li>
-          <li><strong>CP (Context Parallel)</strong> — split the sequence dimension across GPUs. RL setting: CP is what makes V4's million-token RL possible. The 2026 dynamic-CP work (1.48× on variable-length) is precisely the RL setting — rollouts have wildly variable lengths, so a static CP wastes capacity on short sequences.</li>
+          <li><strong>Tensor parallelism (TP)</strong> splits tensors inside a layer — for example, different ranks hold different columns or rows of a weight matrix, and must communicate while computing one logical layer. Because this communication happens inside many layers, systems usually keep a TP group within one node, where GPUs can use fast links such as <span class="glossary" tabindex="0">NVLink<span class="glossary-panel">NVLink is NVIDIA's high-bandwidth connection between GPUs inside the same server. It is much faster than sending tensor data through ordinary cross-machine networking, so it is a natural fit for tensor-parallel communication.</span></span>.</li>
+          <li><strong>Pipeline parallelism (PP)</strong> splits the transformer by layers. Earlier layers live on one group of ranks, later layers on another, and activations move from stage to stage. The communication is sparse and can cross machines.</li>
+          <li><strong>Data parallelism (DP)</strong> splits examples. Several ranks hold the same logical replica, each processes a different slice of the batch, and their gradients are synchronized before the optimizer step.</li>
+          <li><strong>Expert parallelism (EP)</strong> splits MoE experts. Different ranks own different experts, so token routing becomes part of the distributed execution plan.</li>
+          <li><strong>Context parallelism (CP)</strong> splits the sequence dimension itself across ranks, so one very long sequence can be processed by several GPUs at once.</li>
         </ul>
 
-        <blockquote class="pull">
-          Communication intensity falls along TP &gt; CP &gt; EP &gt; DP &gt; PP. Place the densest communication on the fastest hardware (NVLink within a node) and the sparsest on the slowest (cross-rack InfiniBand). This is the structure principle of every distributed training topology — Megatron, vLLM, SGLang, DeepSpeed, all the same.
-        </blockquote>
+        <p>These dimensions compose. A rank can be part of a TP group, a PP stage, and a DP replica at the same time. That is why "training on 128 GPUs" is not enough information. The important question is how those GPUs are grouped, because the grouping decides which parameters are local, which activations must be sent, and when gradients are synchronized.</p>
 
-        <h3>Six engineering invariants Megatron enforces</h3>
+        <h3>Batch units: global batch, DP shard, microbatch</h3>
 
-        <ol>
-          <li><strong>Logprob recompute</strong> — never use inference-engine logprobs for the loss; recompute them in the trainer's precision and kernels.</li>
-          <li><strong>Mismatch metrics</strong> — track |ρ - 1| moments per batch; if they grow, the training is no longer empirically on-policy.</li>
-          <li><strong>Sequence-packing boundary mask</strong> — <code>cu_seqlens</code> is mandatory whenever variable-length rollouts share a microbatch.</li>
-          <li><strong>Weight-swap verification</strong> — <code>verify_model_weights_swap()</code> must pass before each new rollout.</li>
-          <li><strong>EP routing agreement</strong> — trainer's expert assignment must match the engine's, either by shared routing or by R3 replay.</li>
-          <li><strong>Communication-overlap flags</strong> — <code>--overlap-grad-reduce</code>, <code>--overlap-param-gather</code>, <code>--tp-comm-overlap</code> are not optional at scale; they hide the all-reduce behind compute and are why 47% MFU is achievable.</li>
-        </ol>
+        <p>Once the actor is distributed, "the batch" is no longer a single object seen by one process. There are several batch units, and they matter for loss design:</p>
 
-        <h3>What's mathematically interesting</h3>
+        <ul>
+          <li><strong>Global batch.</strong> The full collection of training examples or tokens intended to contribute to one optimizer update.</li>
+          <li><strong>Data-parallel shard.</strong> The slice of that global batch processed by one data-parallel replica.</li>
+          <li><strong>Microbatch.</strong> A smaller chunk run through forward and backward because the full shard would not fit in memory at once.</li>
+          <li><strong>Packed token batch.</strong> A tensor layout where several variable-length sequences may be concatenated, with metadata telling attention and loss code where sequence boundaries are.</li>
+        </ul>
 
-        <p>The communication overlapping flags are an exercise in hiding latency behind compute — a kind of staggered evaluation. Pipeline parallelism's "1F1B" schedule (one forward, one backward, interleaved) recovers most of the bubble in a fully-synchronous pipeline; the math of why this works is straightforward but writing it down clarifies why Megatron's MFU stays high even with PP.</p>
+        <p>With that vocabulary, one actor update reads as a sequence of execution phases:</p>
 
-        <p>The dynamic context parallelism shipped in January 2026 (1.48× speedup for variable-length sequences) is a nice example of treating CP size as a runtime variable rather than a static config. The "right" CP size depends on the sequence length of the current batch — adapting it dynamically is essentially online load balancing.</p>
+<pre><code>RL batch with tokens, masks, rewards / advantages
+  -> split into data-parallel shards and microbatches
+  -> run distributed forward passes across the parallel dimensions
+  -> compute token loss on the positions selected by the mask
+  -> run backward passes and accumulate gradients
+  -> synchronize the gradients that must agree across replicas
+  -> optimizer step: theta changes
+</code></pre>
 
-        <p>The GRPO loss as written in <code>rl_utils.py</code> is the cleanest place in any open codebase to see all three "correction" terms (truncated importance sampling, KL, entropy) composed together with diagnostic metrics. Reading it answers a question that papers leave ambiguous: which corrections are mandatory and which are heuristics. The Megatron version's answer: the truncation clip is mandatory at scale (without it, off-policy ρ explodes); the KL is mandatory for reference anchoring (without it, the policy walks away from coherence); the entropy bonus is the tunable knob.</p>
+        <p>The word <strong>microbatch</strong> is the key one. A large RL batch may be too large to run in one forward/backward pass, so Megatron slices it into smaller pieces. Gradients from several microbatches can be accumulated before the optimizer step. During accumulation, the policy parameters have not changed. The actor becomes a new policy only when the optimizer step is applied.</p>
 
-        <h3>Recommended reading order</h3>
-
-        <p>If you want to actually read the Megatron RL code rather than treat it as an opaque substrate, the cleanest path:</p>
-
-        <ol>
-          <li><code>megatron/rl/train_rl.py</code> — top-level entrypoint. See how it differs from <code>pretrain.py</code>: same outer loop, different forward-step function.</li>
-          <li><code>megatron/rl/rl_utils.py</code> — the GRPO loss with all corrections inline. The single best file in any codebase for the "what does GRPO actually compute" question.</li>
-          <li><code>megatron/rl/sequence_packing_utils.py</code> — the packing transformation. Short file, easy to misread; the point is the boundary mask, not the packing itself.</li>
-          <li><code>megatron/rl/server/</code> — the <code>MegatronLocal</code> bridge. Read it after you've read slime's or Miles's framework code so you know what's calling it.</li>
-          <li><code>megatron/post_training/</code> — the quantization paths covered in <a href="#quantization">the next section</a>. Read it after you've seen the FP8 / INT4 discussion below.</li>
-        </ol>
+        <div class="primer-box">
+          <p><strong>Gradient accumulation.</strong> If a global batch is too large to fit on the GPUs at once, the trainer can run several smaller microbatches one after another. Each microbatch contributes gradients to the same parameter buffers. The optimizer does not step after every microbatch; it waits until the configured accumulation window is complete. This makes several small forward/backward passes behave like one larger batch update, up to details such as loss scaling, normalization, and numerical order.</p>
+        </div>
 
         <div class="study">
           <div class="study-title">Study resources — Megatron-LM</div>
           <ul>
             <li><a href="https://github.com/NVIDIA/Megatron-LM" target="_blank">NVIDIA/Megatron-LM</a> — repo root</li>
             <li><a href="https://docs.nvidia.com/megatron-core/developer-guide/latest/index.html" target="_blank">Megatron Core docs</a> — parallelism guide, mixed precision, quickstart</li>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM/blob/main/train_rl.py" target="_blank"><code>train_rl.py</code></a> — top-level RL entrypoint</li>
             <li><a href="https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/rl" target="_blank"><code>megatron/rl/</code></a> — Megatron's own RL module (the native RL stack)</li>
             <li><a href="https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/rl/rl_utils.py" target="_blank"><code>rl_utils.py</code></a> — the GRPO loss with all corrections</li>
             <li><a href="https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/rl/sequence_packing_utils.py" target="_blank"><code>sequence_packing_utils.py</code></a> — the packing logic</li>
