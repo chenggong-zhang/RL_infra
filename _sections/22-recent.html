@@ -12,7 +12,7 @@
         <p>The first-principles design described in the previous section. One rollout function, two domains, full decoupling between sampling logic and environment. <a href="https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/blob/main/rlhf/slime/vlm-multi-turn/readme.md" target="_blank">Blog</a>.</p>
 
         <h4>Rollout Router Replay (R3) for MoE stability</h4>
-        <p>Already covered as Miles' signature contribution to the quantization section. Captures expert-routing decisions during SGLang inference, replays them during Megatron training. Makes MoE RL stable under low-precision routing.</p>
+        <p>Already covered in the quantization section. Captures expert-routing decisions during SGLang inference, replays them during Megatron training, and makes MoE RL stable under low-precision routing.</p>
 
         <h4>Full-flow FP8 training and sampling</h4>
         <p>The follow-on to R3. <a href="https://lmsys.org/blog/2025-11-25-fp8-rl/">"Unified FP8: Moving Beyond Mixed Precision for Stable and Accelerated MoE RL"</a> walks through hardware foundations, scale selection, and MoE experiment results. The headline: FP8 inference + FP8 training + R3-style routing replay gives bit-identical numerics and ~2× rollout throughput on H100/H200.</p>

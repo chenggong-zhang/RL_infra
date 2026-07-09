@@ -617,6 +617,74 @@
     border: 1px solid var(--border);
     color: var(--text-body);
   }
+  .wall-solution-label {
+    display: inline-block;
+    padding: 2px 8px 3px;
+    margin-right: 4px;
+    border-radius: 5px;
+    background: #d9f99d;
+    color: #234300;
+    border: 1px solid #a3e635;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-weight: 750;
+    line-height: 1.35;
+  }
+  .wall-solution {
+    margin: 16px 0 24px;
+    padding: 0;
+  }
+  .wall-problem {
+    margin: 14px 0 16px;
+    padding: 16px 18px;
+    border-radius: 8px;
+    border: 1px solid #fbbf24;
+    background: #fffbeb;
+  }
+  .wall-problem p {
+    margin: 0;
+  }
+  .wall-solution p {
+    margin: 0 0 12px;
+  }
+  .wall-solution p:last-child {
+    margin-bottom: 0;
+  }
+  .technique-pill {
+    display: inline-block;
+    padding: 2px 7px 3px;
+    margin-right: 5px;
+    border-radius: 999px;
+    border: 1px solid #86efac;
+    background: #ffffff;
+    color: #14532d;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-weight: 750;
+    line-height: 1.35;
+  }
+  .technique-card {
+    margin: 12px 0;
+    padding: 14px 16px;
+    border-radius: 8px;
+    border: 1px solid #86efac;
+    background: #ecfdf5;
+  }
+  .technique-card p {
+    margin: 0;
+  }
+  .technique-card .formula-display {
+    margin: 10px 0;
+    padding: 10px 12px;
+    overflow-x: auto;
+    background: #ffffff;
+    border: 1px solid #bbf7d0;
+    border-radius: 6px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: #14532d;
+    white-space: nowrap;
+  }
 
   /* Figures with SVG diagrams */
   figure {
@@ -825,13 +893,13 @@
 
   <div class="nav-heading">Case studies</div>
   <ul>
-    <li><a href="#parallelism" class="nav-link">Model/data parallelism</a></li>
+    <li><a href="#megatron-core-moe" class="nav-link">Megatron-Core MoE</a></li>
+    <li><a href="#triton-flash-attention" class="nav-link">FlashAttention · Triton tutorial</a></li>
+    <li><a href="#fsdp" class="nav-link">FSDP · training backbone</a></li>
     <li><a href="#multi-turn" class="nav-link">Multi-turn agentic RL</a></li>
     <li><a href="#slime-pipeline" class="nav-link">slime · upstream framework</a></li>
     <li><a href="#miles-pipeline" class="nav-link">Miles · DeepSeek-V3</a></li>
     <li><a href="#verl-pipeline" class="nav-link">verl · HybridFlow</a></li>
-    <li><a href="#gradient-accumulation" class="nav-link">Gradient accumulation</a></li>
-    <li><a href="#fsdp" class="nav-link">FSDP · training backbone</a></li>
     <li><a href="#deepseek-v4" class="nav-link">DeepSeek V4 · OPD-heavy</a></li>
     <li><a href="#sglang-internals" class="nav-link">SGLang · inference substrate</a></li>
     <li><a href="#vllm-internals" class="nav-link">vLLM · block-paging contrast</a></li>
@@ -888,13 +956,13 @@
 
     <h4>④ Case studies</h4>
     <ul>
-      <li><a href="#parallelism">Model/data parallelism</a></li>
+      <li><a href="#megatron-core-moe">Megatron-Core MoE</a></li>
+      <li><a href="#triton-flash-attention">FlashAttention · Triton tutorial</a></li>
+      <li><a href="#fsdp">FSDP · backbone contrast</a></li>
       <li><a href="#multi-turn">Multi-turn agentic RL</a></li>
       <li><a href="#slime-pipeline">slime · upstream framework</a></li>
       <li><a href="#miles-pipeline">Miles · DeepSeek-V3</a></li>
       <li><a href="#verl-pipeline">verl · HybridFlow</a></li>
-      <li><a href="#gradient-accumulation">Gradient accumulation</a></li>
-      <li><a href="#fsdp">FSDP · backbone contrast</a></li>
       <li><a href="#deepseek-v4">DeepSeek V4 · OPD</a></li>
       <li><a href="#sglang-internals">SGLang internals</a></li>
       <li><a href="#vllm-internals">vLLM · block-paging</a></li>

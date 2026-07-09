@@ -1,0 +1,518 @@
+
+
+      <section id="triton-flash-attention">
+        <h2>FlashAttention: basic tutorial of Triton</h2>
+
+        <p>This section uses <a href="https://cs336.stanford.edu/lectures/?trace=lecture_06" target="_blank">Stanford CS336 lecture 6</a> and <a href="https://github.com/stanford-cs336/assignment2-systems/blob/main/cs336_assignment2_systems.pdf" target="_blank">CS336 Assignment 2: Systems and Parallelism</a> as the learning path. The concrete target is the assignment's FlashAttention-2 task: replace a PyTorch attention implementation with a Triton kernel, add causal masking, implement backward, and benchmark the result.</p>
+
+        <p>The order matters. We should not start from attention. First we need enough Triton literacy to read a kernel: what a program instance is, how a launch grid divides work, how pointers and strides describe tensors, how masks protect boundary loads, how block pointers describe rectangular tiles, and how a Triton kernel is wrapped back into PyTorch autograd. Only after those pieces are in place does FlashAttention become readable.</p>
+
+        <a class="source-badge" href="https://github.com/stanford-cs336/assignment2-systems/blob/main/cs336_assignment2_systems.pdf" target="_blank"><span class="file-path">cs336_assignment2_systems.pdf</span><span class="file-meta">· FlashAttention-2 Triton assignment</span></a>
+
+        <h3>Part I. Triton from zero</h3>
+
+        <p>Triton is a Python-embedded language for GPU kernels. The kernel body is written in Python-like syntax, but a function marked with <code>@triton.jit</code> is compiled into GPU code. It is called from Python, usually with PyTorch tensors as inputs, but the actual work happens on the GPU.</p>
+
+        <p>The simplest way to place Triton in the stack is this:</p>
+
+        <div class="primer-box">
+          <p><strong>PyTorch</strong> gives you tensor objects and high-level operations such as <code>x @ y</code>. <strong>CUDA</strong> is NVIDIA's underlying GPU programming/runtime platform. <strong>Triton</strong> lets you write custom GPU kernels from Python, while still lowering to GPU execution through the CUDA/NVIDIA stack.</p>
+        </div>
+
+        <p>For this section, the key idea is tile-level programming. In ordinary Python, you may write a loop over individual elements. In CUDA C++, you often think about individual GPU threads. In Triton, the first useful mental unit is a <strong>program instance</strong>: one launched copy of the kernel that owns a block, or tile, of tensor positions.</p>
+
+        <h3>Program instances and launch grids</h3>
+
+        <p>A Triton kernel is launched with a grid:</p>
+
+<pre><code>add_kernel[(num_programs,)](x, y, out, n_elements, BLOCK=1024)</code></pre>
+
+        <p>This means: create <code>num_programs</code> program instances. Inside the kernel, each instance can ask for its own id:</p>
+
+<pre><code>pid = tl.program_id(0)</code></pre>
+
+        <p>If <code>BLOCK = 1024</code>, then program instance <code>pid = 0</code> can handle elements <code>0..1023</code>, <code>pid = 1</code> can handle <code>1024..2047</code>, and so on. This is the first Triton reading skill: <code>tl.program_id</code> usually tells you which tile this program instance owns.</p>
+
+        <h3>A first Triton kernel</h3>
+
+        <p>Here is vector addition, written in the style of the official Triton tutorial:</p>
+
+<pre><code>@triton.jit
+def add_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets &lt; n_elements
+
+    x = tl.load(x_ptr + offsets, mask=mask)
+    y = tl.load(y_ptr + offsets, mask=mask)
+    tl.store(out_ptr + offsets, x + y, mask=mask)</code></pre>
+
+        <p>Read it line by line. <code>x_ptr</code>, <code>y_ptr</code>, and <code>out_ptr</code> are pointers to GPU memory. <code>BLOCK: tl.constexpr</code> means <code>BLOCK</code> is known at compile time, so Triton can specialize the kernel for that tile size. <code>tl.arange(0, BLOCK)</code> creates a vector of offsets inside the tile. <code>mask</code> handles the last tile when the vector length is not divisible by <code>BLOCK</code>. <code>tl.load</code> reads many positions at once, and <code>tl.store</code> writes many positions at once.</p>
+
+        <p>This is the basic Triton pattern:</p>
+
+<pre><code>program id -> tile offsets -> boundary mask -> load tile -> compute -> store tile</code></pre>
+
+        <h3>Why pointers and strides appear</h3>
+
+        <p>PyTorch tensors carry metadata: shape, dtype, device, and strides. A stride tells how far you move in memory when an index increases by one along a dimension. Triton kernels often receive raw pointers plus stride values because the kernel must compute addresses explicitly.</p>
+
+        <p>For a 2D tensor <code>X</code>, the logical element <code>X[row, col]</code> lives at:</p>
+
+<pre><code>X_ptr + row * stride_row + col * stride_col</code></pre>
+
+        <p>If the tensor is contiguous in row-major order, <code>stride_col</code> is usually <code>1</code> and <code>stride_row</code> is the width of the row. If the tensor is transposed or sliced, the strides can be different. This is why a correct Triton kernel is partly a memory-layout program. It does not only know the formula; it knows how to find the values.</p>
+
+        <h3>Two-dimensional tiles</h3>
+
+        <p>Once the reader understands one-dimensional offsets, the two-dimensional version is natural. A program instance may own a rectangular tile:</p>
+
+<pre><code>rows = row_start + tl.arange(0, BLOCK_M)
+cols = col_start + tl.arange(0, BLOCK_N)
+offsets = rows[:, None] * stride_m + cols[None, :] * stride_n</code></pre>
+
+        <p>The notation <code>rows[:, None]</code> turns row offsets into a column vector; <code>cols[None, :]</code> turns column offsets into a row vector. Together they form a <code>BLOCK_M x BLOCK_N</code> matrix of addresses. This pattern appears everywhere in tiled kernels: matrix multiply, attention, normalization, and loss kernels.</p>
+
+        <h3>Block pointers</h3>
+
+        <p>The CS336 assignment uses Triton's block pointer abstraction, <code>tl.make_block_ptr</code>, because FlashAttention loads rectangular tiles from <code>Q</code>, <code>K</code>, <code>V</code>, and writes rectangular tiles to <code>O</code>. A block pointer packages the pointer arithmetic into one object:</p>
+
+<pre><code>Q_block_ptr = tl.make_block_ptr(
+    Q_ptr + batch_index * stride_qb,
+    shape=(N_QUERIES, D),
+    strides=(stride_qq, stride_qd),
+    offsets=(query_tile_index * Q_TILE_SIZE, 0),
+    block_shape=(Q_TILE_SIZE, D),
+    order=(1, 0),
+)</code></pre>
+
+        <p>Read the fields this way:</p>
+
+        <ul>
+          <li><code>Q_ptr + batch_index * stride_qb</code>: start at the current batch element.</li>
+          <li><code>shape=(N_QUERIES, D)</code>: the logical matrix seen by this batch element.</li>
+          <li><code>strides=(stride_qq, stride_qd)</code>: how to move along query positions and feature positions.</li>
+          <li><code>offsets=(query_tile_index * Q_TILE_SIZE, 0)</code>: where this tile starts.</li>
+          <li><code>block_shape=(Q_TILE_SIZE, D)</code>: the tile size to load.</li>
+          <li><code>order=(1, 0)</code>: the memory-order hint Triton uses for efficient loading.</li>
+        </ul>
+
+        <p>After creating a block pointer, the kernel can load the whole tile:</p>
+
+<pre><code>Q_tile = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")</code></pre>
+
+        <p>That line says: load a <code>Q_TILE_SIZE x D</code> tile, and if the tile crosses the tensor boundary, pad invalid entries with zero. For the assignment, many test shapes are powers of two, but real kernels still need boundary logic.</p>
+
+        <h3>Matrix multiply inside a kernel</h3>
+
+        <p>Triton provides <code>tl.dot</code> for tile matrix multiplication. If <code>Q_tile</code> has shape <code>Bq x D</code> and <code>K_tile</code> has shape <code>Bk x D</code>, the attention score tile is:</p>
+
+<pre><code>S = tl.dot(Q_tile, tl.trans(K_tile)) * scale</code></pre>
+
+        <p>This is still small tile arithmetic. The full attention matrix is never created. Each program instance creates one score tile at a time, uses it, then moves on.</p>
+
+        <p>For accumulation, use float32 unless you have a careful reason not to:</p>
+
+<pre><code>acc = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)</code></pre>
+
+        <p>This matters because attention combines exponentials, reductions, and matrix multiplies. The inputs may be BF16 or FP16, but running maxima, denominators, and accumulators are usually kept in FP32 for stability.</p>
+
+        <h3>Wrapping Triton back into PyTorch</h3>
+
+        <p>A Triton kernel by itself is not enough for a PyTorch model. PyTorch's autograd system needs a Python object that says how to run forward and backward. The assignment uses <code>torch.autograd.Function</code>:</p>
+
+<pre><code>class MyOp(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        y = torch.empty_like(x)
+        my_kernel[(grid,)](x, y, ...)
+        ctx.save_for_backward(x, y)
+        return y
+
+    @staticmethod
+    def backward(ctx, dy):
+        x, y = ctx.saved_tensors
+        dx = my_backward(x, y, dy)
+        return dx</code></pre>
+
+        <p>For FlashAttention, the forward will save <code>Q</code>, <code>K</code>, <code>V</code>, <code>O</code>, and <code>L</code>. It will not save the full attention probability matrix. That design choice will make sense once we introduce attention.</p>
+
+        <h3>Part II. Attention after Triton</h3>
+
+        <p>Now we have the needed Triton pieces: program instances, launch grids, offsets, masks, strides, block pointers, <code>tl.dot</code>, accumulators, and autograd wrapping. We can finally ask what FlashAttention is optimizing.</p>
+
+        <p>For one batch/head, ordinary attention is:</p>
+
+        <div class="primer-box">
+          <div class="formula-display">S = QK^T / sqrt(d)</div>
+          <div class="formula-display">P = softmax(mask(S))</div>
+          <div class="formula-display">O = PV</div>
+        </div>
+
+        <p>In naive PyTorch attention, <code>S</code> and <code>P</code> are materialized as tensors. If the sequence length is <code>N</code>, each has shape <code>N x N</code> per batch/head. At long context length, this becomes the memory wall. At <code>N = 32768</code>, the attention matrix has more than one billion entries per head. Backward makes this worse because ordinary formulas also want the probability matrix <code>P</code>.</p>
+
+        <p>FlashAttention keeps the mathematical result exact while changing the memory schedule. It computes attention in tiles, keeps temporary score/probability tiles on chip, and writes only the final output <code>O</code> plus a compact row-wise statistic <code>L</code>.</p>
+
+        <h3>The four ideas behind FlashAttention</h3>
+
+        <p>The assignment names tiling, recomputation, and operator fusion; online softmax is the mechanism that makes tiled softmax possible.</p>
+
+        <ul>
+          <li><strong>Tiling.</strong> Handle one block of query rows and stream over key/value blocks. A small score tile exists temporarily inside the kernel.</li>
+          <li><strong>Online softmax.</strong> Keep a running row maximum <code>m</code> and denominator proxy <code>l</code>, so softmax can be accumulated over key tiles without seeing the full row at once.</li>
+          <li><strong>Recomputation.</strong> Save <code>L = logsumexp(S)</code> instead of saving <code>P</code>. Backward recomputes local probability tiles from <code>Q</code>, <code>K</code>, and <code>L</code>.</li>
+          <li><strong>Fusion.</strong> Combine score computation, softmax update, and multiplication by <code>V</code> in one kernel so intermediate tiles are not written to HBM between PyTorch operations.</li>
+        </ul>
+
+        <h3>Step 1. Write a tiled PyTorch reference</h3>
+
+        <p>The first concrete answer is not Triton. Write a slow PyTorch version that follows the FlashAttention loop. It gives you a trusted reference for <code>O</code> and <code>L</code> before pointer arithmetic enters.</p>
+
+<pre><code>def flash_forward_tiled_pytorch(Q, K, V, is_causal=False, Bq=16, Bk=16):
+    # Q, K, V: [batch, seq, d]
+    batch, Nq, d = Q.shape
+    Nk = K.shape[1]
+    scale = d ** -0.5
+
+    O = torch.empty_like(Q)
+    L = torch.empty((batch, Nq), device=Q.device, dtype=torch.float32)
+
+    for b in range(batch):
+        for q0 in range(0, Nq, Bq):
+            q1 = min(q0 + Bq, Nq)
+            Qi = Q[b, q0:q1].float()
+
+            Oi = torch.zeros((q1 - q0, d), device=Q.device, dtype=torch.float32)
+            m = torch.full((q1 - q0,), -float("inf"), device=Q.device)
+            l = torch.zeros((q1 - q0,), device=Q.device)
+
+            q_idx = torch.arange(q0, q1, device=Q.device)
+            for k0 in range(0, Nk, Bk):
+                k1 = min(k0 + Bk, Nk)
+                Kj = K[b, k0:k1].float()
+                Vj = V[b, k0:k1].float()
+
+                S = Qi @ Kj.T * scale
+                if is_causal:
+                    k_idx = torch.arange(k0, k1, device=Q.device)
+                    S = S.masked_fill(q_idx[:, None] &lt; k_idx[None, :], -1e6)
+
+                m_new = torch.maximum(m, S.max(dim=1).values)
+                P_tilde = torch.exp(S - m_new[:, None])
+                alpha = torch.exp(m - m_new)
+                l_new = alpha * l + P_tilde.sum(dim=1)
+                Oi = alpha[:, None] * Oi + P_tilde @ Vj
+                m, l = m_new, l_new
+
+            O[b, q0:q1] = (Oi / l[:, None]).to(Q.dtype)
+            L[b, q0:q1] = m + torch.log(l)
+
+    return O, L</code></pre>
+
+        <p>This code is the algorithm in executable form. The output accumulator <code>Oi</code>, running max <code>m</code>, and running denominator <code>l</code> are per query row. The loop over <code>Kj,Vj</code> streams across key/value tiles. The full <code>N x N</code> score matrix is never allocated.</p>
+
+        <p>Verification at this step should compare against ordinary PyTorch attention at small sizes:</p>
+
+<pre><code>def attention_reference(Q, K, V, is_causal=False):
+    d = Q.shape[-1]
+    S = Q @ K.transpose(-1, -2) / math.sqrt(d)
+    if is_causal:
+        Nq, Nk = Q.shape[-2], K.shape[-2]
+        q = torch.arange(Nq, device=Q.device)
+        k = torch.arange(Nk, device=Q.device)
+        S = S.masked_fill(q[None, :, None] &lt; k[None, None, :], -1e6)
+    P = torch.softmax(S, dim=-1)
+    return P @ V, torch.logsumexp(S.float(), dim=-1)</code></pre>
+
+        <p>The assignment's first milestone, <code>test_flash_forward_pass_pytorch</code>, is exactly this stage: make the tiled algorithm correct before making it fast.</p>
+
+        <h3>Step 2. Translate the reference into a Triton forward kernel</h3>
+
+        <p>Now map the same loop to Triton. The launch grid is <code>(Tq, batch_size)</code>: one program instance owns one query tile for one batch item.</p>
+
+<pre><code># Python-side launch
+Tq = triton.cdiv(N_QUERIES, Q_TILE_SIZE)
+grid = (Tq, batch_size)
+
+flash_fwd_kernel[grid](
+    Q, K, V, O, L,
+    Q.stride(0), Q.stride(1), Q.stride(2),
+    K.stride(0), K.stride(1), K.stride(2),
+    V.stride(0), V.stride(1), V.stride(2),
+    O.stride(0), O.stride(1), O.stride(2),
+    L.stride(0), L.stride(1),
+    N_QUERIES: tl.constexpr,
+    N_KEYS: tl.constexpr,
+    scale,
+    D=d, Q_TILE_SIZE=64, K_TILE_SIZE=64,
+    is_causal=is_causal,
+)</code></pre>
+
+        <p>The kernel skeleton mirrors the PyTorch reference. This is the shape to fill in:</p>
+
+<pre><code>@triton.jit
+def flash_fwd_kernel(
+    Q_ptr, K_ptr, V_ptr, O_ptr, L_ptr,
+    stride_qb, stride_qq, stride_qd,
+    stride_kb, stride_kk, stride_kd,
+    stride_vb, stride_vk, stride_vd,
+    stride_ob, stride_oq, stride_od,
+    stride_lb, stride_lq,
+    N_QUERIES, N_KEYS, scale,
+    D: tl.constexpr,
+    Q_TILE_SIZE: tl.constexpr,
+    K_TILE_SIZE: tl.constexpr,
+    is_causal: tl.constexpr,
+):
+    query_tile_index = tl.program_id(0)
+    batch_index = tl.program_id(1)
+
+    Q_block = tl.make_block_ptr(
+        Q_ptr + batch_index * stride_qb,
+        shape=(N_QUERIES, D),
+        strides=(stride_qq, stride_qd),
+        offsets=(query_tile_index * Q_TILE_SIZE, 0),
+        block_shape=(Q_TILE_SIZE, D),
+        order=(1, 0),
+    )
+    O_block = tl.make_block_ptr(
+        O_ptr + batch_index * stride_ob,
+        shape=(N_QUERIES, D),
+        strides=(stride_oq, stride_od),
+        offsets=(query_tile_index * Q_TILE_SIZE, 0),
+        block_shape=(Q_TILE_SIZE, D),
+        order=(1, 0),
+    )
+    L_block = tl.make_block_ptr(
+        L_ptr + batch_index * stride_lb,
+        shape=(N_QUERIES,),
+        strides=(stride_lq,),
+        offsets=(query_tile_index * Q_TILE_SIZE,),
+        block_shape=(Q_TILE_SIZE,),
+        order=(0,),
+    )
+
+    Qi = tl.load(Q_block, boundary_check=(0, 1), padding_option="zero")
+    Oi = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)
+    m = tl.full((Q_TILE_SIZE,), -float("inf"), dtype=tl.float32)
+    l = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)
+
+    q_offsets = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
+
+    for k0 in range(0, N_KEYS, K_TILE_SIZE):
+        K_block = tl.make_block_ptr(
+            K_ptr + batch_index * stride_kb,
+            shape=(N_KEYS, D),
+            strides=(stride_kk, stride_kd),
+            offsets=(k0, 0),
+            block_shape=(K_TILE_SIZE, D),
+            order=(1, 0),
+        )
+        V_block = tl.make_block_ptr(
+            V_ptr + batch_index * stride_vb,
+            shape=(N_KEYS, D),
+            strides=(stride_vk, stride_vd),
+            offsets=(k0, 0),
+            block_shape=(K_TILE_SIZE, D),
+            order=(1, 0),
+        )
+
+        Kj = tl.load(K_block, boundary_check=(0, 1), padding_option="zero")
+        Vj = tl.load(V_block, boundary_check=(0, 1), padding_option="zero")
+
+        S = tl.dot(Qi, tl.trans(Kj)) * scale
+
+        k_offsets = k0 + tl.arange(0, K_TILE_SIZE)
+        valid_k = k_offsets &lt; N_KEYS
+        S = tl.where(valid_k[None, :], S, -1.0e6)
+        if is_causal:
+            S = tl.where(q_offsets[:, None] &gt;= k_offsets[None, :], S, -1.0e6)
+
+        m_new = tl.maximum(m, tl.max(S, axis=1))
+        P_tilde = tl.exp(S - m_new[:, None])
+        alpha = tl.exp(m - m_new)
+        l_new = alpha * l + tl.sum(P_tilde, axis=1)
+        Oi = alpha[:, None] * Oi + tl.dot(P_tilde.to(Vj.dtype), Vj)
+        m = m_new
+        l = l_new
+
+    Oi = Oi / l[:, None]
+    L = m + tl.log(l)
+
+    tl.store(O_block, Oi.to(O_block.type.element_ty), boundary_check=(0, 1))
+    tl.store(L_block, L, boundary_check=(0,))</code></pre>
+
+        <p>This is not just pseudocode. It is the complete control structure the assignment wants. In this teaching version, <code>N_QUERIES</code> and <code>N_KEYS</code> are marked as <code>tl.constexpr</code> because the loop over key tiles should be known when Triton compiles the kernel. You may still adjust exact tile sizes and signatures to match your adapter, but the algorithmic content is fixed: one query tile, loop over key/value tiles, online-softmax update, store <code>O</code> and <code>L</code>.</p>
+
+        <h3>Step 3. Wrap the Triton forward in <code>autograd.Function</code></h3>
+
+        <p>The Python wrapper allocates outputs, launches the kernel, saves what backward needs, and returns only <code>O</code>:</p>
+
+<pre><code>class FlashAttentionTriton(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, Q, K, V, is_causal=False):
+        batch, Nq, d = Q.shape
+        Nk = K.shape[1]
+        O = torch.empty_like(Q)
+        L = torch.empty((batch, Nq), device=Q.device, dtype=torch.float32)
+
+        Q_TILE_SIZE = 64
+        K_TILE_SIZE = 64
+        grid = (triton.cdiv(Nq, Q_TILE_SIZE), batch)
+
+        flash_fwd_kernel[grid](
+            Q, K, V, O, L,
+            Q.stride(0), Q.stride(1), Q.stride(2),
+            K.stride(0), K.stride(1), K.stride(2),
+            V.stride(0), V.stride(1), V.stride(2),
+            O.stride(0), O.stride(1), O.stride(2),
+            L.stride(0), L.stride(1),
+            Nq, Nk, d ** -0.5,
+            D=d,
+            Q_TILE_SIZE=Q_TILE_SIZE,
+            K_TILE_SIZE=K_TILE_SIZE,
+            is_causal=is_causal,
+        )
+
+        ctx.save_for_backward(Q, K, V, O, L)
+        ctx.is_causal = is_causal
+        return O
+
+    @staticmethod
+    def backward(ctx, dO):
+        Q, K, V, O, L = ctx.saved_tensors
+        dQ, dK, dV = flash_backward_pytorch(Q, K, V, O, dO, L, ctx.is_causal)
+        return dQ, dK, dV, None</code></pre>
+
+        <p>For the forward-only test, the backward can temporarily raise <code>NotImplementedError</code>. Once the forward passes, replace it with the PyTorch backward below.</p>
+
+        <h3>Step 4. Add causal masking correctly</h3>
+
+        <p>Causal masking belongs inside the score-tile update, before softmax. The rule is simple: query row <code>q</code> can see key column <code>k</code> only when <code>k &lt;= q</code>.</p>
+
+<pre><code>q_offsets = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
+k_offsets = k0 + tl.arange(0, K_TILE_SIZE)
+causal_mask = q_offsets[:, None] &gt;= k_offsets[None, :]
+S = tl.where(causal_mask, S, -1.0e6)</code></pre>
+
+        <p>Also keep the non-causal boundary mask for <code>k_offsets &lt; N_KEYS</code>. Causal masking removes future positions; boundary masking removes positions outside the actual sequence length. They solve different problems.</p>
+
+        <h3>Step 5. Implement backward with recomputation</h3>
+
+        <p>The assignment first asks for backward in PyTorch, optionally compiled. The computation uses <code>L</code> saved from forward, so it does not need the stored attention matrix:</p>
+
+        <div class="primer-box">
+          <div class="formula-display">S = QK^T / sqrt(d)</div>
+          <div class="formula-display">P = exp(S - L)</div>
+          <div class="formula-display">D = rowsum(O * dO)</div>
+          <div class="formula-display">dP = dO V^T</div>
+          <div class="formula-display">dS = P * (dP - D)</div>
+          <div class="formula-display">dQ = dS K / sqrt(d), dK = dS^T Q / sqrt(d), dV = P^T dO</div>
+        </div>
+
+<pre><code>@torch.compile
+def flash_backward_pytorch(Q, K, V, O, dO, L, is_causal=False):
+    d = Q.shape[-1]
+    scale = d ** -0.5
+
+    S = Q.float() @ K.float().transpose(-1, -2) * scale
+    if is_causal:
+        Nq, Nk = Q.shape[-2], K.shape[-2]
+        q = torch.arange(Nq, device=Q.device)
+        k = torch.arange(Nk, device=Q.device)
+        S = S.masked_fill(q[None, :, None] &lt; k[None, None, :], -1e6)
+
+    P = torch.exp(S - L[:, :, None])
+    D = (O.float() * dO.float()).sum(dim=-1)
+    dP = dO.float() @ V.float().transpose(-1, -2)
+    dS = P * (dP - D[:, :, None])
+
+    dQ = dS @ K.float() * scale
+    dK = dS.transpose(-1, -2) @ Q.float() * scale
+    dV = P.transpose(-1, -2) @ dO.float()
+    return dQ.to(Q.dtype), dK.to(K.dtype), dV.to(V.dtype)</code></pre>
+
+        <p>This backward is not memory-optimal for very long sequences because it materializes <code>S</code> and <code>P</code> again, but it is a good correctness bridge. It lets the assignment test the custom forward with real gradients before you write a tiled Triton backward.</p>
+
+        <h3>Step 6. Understand the optional Triton backward</h3>
+
+        <p>The optional backward is not a mystery; it is the same formulas tiled. The trick is work partitioning. One pass loops over key tiles and accumulates <code>dK</code> and <code>dV</code>. Another pass loops over query tiles and accumulates <code>dQ</code>. That means <code>P</code> is recomputed twice.</p>
+
+<pre><code># pass A: one program owns a K/V tile
+for each K_j, V_j:
+    dK_j = 0
+    dV_j = 0
+    for each Q_i:
+        recompute S_ij and P_ij from Q_i, K_j, L_i
+        dV_j += P_ij.T @ dO_i
+        dS_ij = P_ij * (dO_i @ V_j.T - D_i)
+        dK_j += dS_ij.T @ Q_i * scale
+    store dK_j, dV_j
+
+# pass B: one program owns a Q tile
+for each Q_i:
+    dQ_i = 0
+    for each K_j, V_j:
+        recompute S_ij and P_ij
+        dS_ij = P_ij * (dO_i @ V_j.T - D_i)
+        dQ_i += dS_ij @ K_j * scale
+    store dQ_i</code></pre>
+
+        <p>Why compute <code>P</code> twice? Because avoiding atomics can be worth more than avoiding extra matmul/exp work. If many program instances tried to update the same gradient tile, they would need slow coordination. Two organized passes give each output tile a clear owner.</p>
+
+        <h3>Step 7. Benchmark the result</h3>
+
+        <p>Use <code>triton.testing.do_bench</code>, not naive wall-clock timing, and warm up before measuring. A minimal benchmark has this shape:</p>
+
+<pre><code>def bench_flash(batch=1, N=4096, d=64, dtype=torch.bfloat16, causal=True):
+    Q = torch.randn(batch, N, d, device="cuda", dtype=dtype, requires_grad=True)
+    K = torch.randn(batch, N, d, device="cuda", dtype=dtype, requires_grad=True)
+    V = torch.randn(batch, N, d, device="cuda", dtype=dtype, requires_grad=True)
+
+    def forward_only():
+        return FlashAttentionTriton.apply(Q, K, V, causal)
+
+    def forward_backward():
+        O = FlashAttentionTriton.apply(Q, K, V, causal)
+        loss = O.float().sum()
+        loss.backward()
+        Q.grad = K.grad = V.grad = None
+
+    fwd_ms = triton.testing.do_bench(forward_only)
+    bwd_ms = triton.testing.do_bench(forward_backward)
+    return fwd_ms, bwd_ms</code></pre>
+
+        <p>The assignment sweep uses sequence lengths up to <code>65536</code>, head dimensions up to <code>128</code>, BF16 and FP32, batch size 1, and causal masking. For a blog reader, the important observation is how the curves change with <code>N</code>. Naive attention eventually fails because of the <code>N x N</code> matrix. FlashAttention should keep running much longer because it never stores that matrix.</p>
+
+        <h3>Step 8. Optimize after correctness</h3>
+
+        <p>Once the tests pass, optimize in this order:</p>
+
+        <ul>
+          <li><strong>Tile sizes.</strong> Tune <code>Q_TILE_SIZE</code> and <code>K_TILE_SIZE</code>. Bigger tiles improve reuse but use more registers and on-chip resources; smaller tiles may launch too much work.</li>
+          <li><strong>Causal early exit.</strong> Skip key tiles that are guaranteed to be fully masked.</li>
+          <li><strong>Diagonal separation.</strong> Compute fully visible tiles without index comparisons; use square masking only on diagonal tiles.</li>
+          <li><strong>Triton backward.</strong> Use two organized passes to avoid atomics: one for <code>dK</code>/<code>dV</code>, one for <code>dQ</code>.</li>
+          <li><strong>Autotuning budget.</strong> Triton autotune can find better tile shapes, but too many candidates can make first-run compilation too slow.</li>
+          <li><strong>TMA on newer GPUs.</strong> Tensor Memory Accelerator can move tiles efficiently on supported architectures, but it belongs after the basic kernel is correct.</li>
+        </ul>
+
+        <p>The clean mental model is: first remove the <code>N x N</code> HBM object, then improve the tile schedule. FlashAttention's main win comes from IO awareness. The later wins come from reducing wasted tile work, avoiding atomics, choosing hardware-friendly tile shapes, and lowering launch overhead.</p>
+
+        <h3>Why this matters for RL infrastructure</h3>
+
+        <p>At the framework level, attention looks like one operator inside rollout or training. At the systems level, the implementation decides whether long-context rollout is feasible. If the kernel materializes the attention matrix, memory grows quadratically in sequence length. If the kernel streams tiles and saves only compact summaries, much longer prompts and trajectories fit.</p>
+
+        <p>This connects directly to earlier sections. RadixAttention reduces repeated prefill by reusing cached prefixes. FlashAttention reduces the cost of computing attention over the tokens that still must be processed. Memory choreography makes room for inference and training phases. Triton is one of the languages engineers use when PyTorch-level composition cannot express the memory schedule they need.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources</div>
+          <ul>
+            <li><a href="https://cs336.stanford.edu/lectures/?trace=lecture_06" target="_blank">CS336 lecture 6</a> - systems and GPU-kernel context for the assignment.</li>
+            <li><a href="https://github.com/stanford-cs336/assignment2-systems/blob/main/cs336_assignment2_systems.pdf" target="_blank">CS336 Assignment 2 PDF</a> - the concrete FlashAttention-2 Triton task and benchmarking requirements.</li>
+            <li><a href="https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html" target="_blank">Triton vector-add tutorial</a> - the minimal <code>@triton.jit</code>, launch-grid, pointer, and mask pattern.</li>
+            <li><a href="https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html" target="_blank">Triton fused-attention tutorial</a> - a production-style reference for attention kernels.</li>
+            <li><a href="https://arxiv.org/abs/2307.08691" target="_blank">FlashAttention-2</a> and <a href="https://openreview.net/forum?id=H4DqfPSibmx" target="_blank">FlashAttention</a> - the original algorithmic references.</li>
+          </ul>
+        </div>
+      </section>
