@@ -399,6 +399,10 @@
   }
   tr:hover td { background: rgba(245,242,255,.4); }
 
+  section[id], h3[id], h4[id] {
+    scroll-margin-top: 72px;
+  }
+
   /* Pull quotes (sidebar/inline emphasis) */
   blockquote.pull {
     margin: 28px 0;
@@ -699,6 +703,11 @@
     background: #fff;
     padding: 12px;
   }
+  .diagram-scroll {
+    width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
   .photo-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -830,11 +839,24 @@
   @media (max-width: 820px) {
     .site-nav { display: none; }
     .main-wrap { margin-left: 0; }
-    main { padding: 32px 22px; }
+    main { padding: 32px 22px; overflow-x: hidden; }
     .search-bar { display: none; }
     article > header h1 { font-size: 30px; }
     article > header .subtitle { font-size: 17px; }
     article h2 { font-size: 24px; }
+    article table {
+      display: block;
+      max-width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .fsdp-lifecycle-figure .diagram-scroll svg,
+    .fsdp-strategy-figure .diagram-scroll svg,
+    .hsdp-layout-figure .diagram-scroll svg,
+    .fsdp-export-figure .diagram-scroll svg,
+    .fsdp-memory-switch-figure .diagram-scroll svg {
+      min-width: 700px;
+    }
   }
 </style>
 </head>
@@ -895,7 +917,7 @@
   <ul>
     <li><a href="#megatron-core-moe" class="nav-link">Megatron-Core MoE</a></li>
     <li><a href="#triton-flash-attention" class="nav-link">FlashAttention · Triton tutorial</a></li>
-    <li><a href="#fsdp" class="nav-link">FSDP · training backbone</a></li>
+    <li><a href="#fsdp" class="nav-link">FSDP · ZeRO · HSDP</a></li>
     <li><a href="#multi-turn" class="nav-link">Multi-turn agentic RL</a></li>
     <li><a href="#slime-pipeline" class="nav-link">slime · upstream framework</a></li>
     <li><a href="#miles-pipeline" class="nav-link">Miles · DeepSeek-V3</a></li>
@@ -958,7 +980,7 @@
     <ul>
       <li><a href="#megatron-core-moe">Megatron-Core MoE</a></li>
       <li><a href="#triton-flash-attention">FlashAttention · Triton tutorial</a></li>
-      <li><a href="#fsdp">FSDP · backbone contrast</a></li>
+      <li><a href="#fsdp">FSDP · ZeRO · HSDP</a></li>
       <li><a href="#multi-turn">Multi-turn agentic RL</a></li>
       <li><a href="#slime-pipeline">slime · upstream framework</a></li>
       <li><a href="#miles-pipeline">Miles · DeepSeek-V3</a></li>

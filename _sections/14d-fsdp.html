@@ -1,140 +1,962 @@
 
-
       <section id="fsdp">
-        <h2>Case study — FSDP, the other training backbone</h2>
+        <h2>Case study &mdash; FSDP, ZeRO, and HSDP: where training state lives</h2>
 
-        <p>The training sections of this survey ran on Megatron-LM. But look at the landscape table: verl's default training backend is FSDP, and OpenRLHF, SkyRL, and AReaL reach for it too. This survey has used the name nine times without defining it. This case study closes that gap: what FSDP actually does, why RL frameworks pick it first, and where RL specifically presses on it. The code is verl's, which the previous case study already introduced.</p>
+        <p>Large-model training has more GPU-resident state than the model weights alone. Every update also produces gradients and maintains optimizer state. Data parallelism normally replicates all three on every rank, even though different ranks process different examples. ZeRO and FSDP reduce that replication. Their variants differ in one concrete question: which training states remain replicated, which are sharded, and when must a sharded parameter be reconstructed for computation?</p>
 
-        <p>FSDP stands for <strong>Fully Sharded Data Parallel</strong>. It is PyTorch's built-in implementation of an idea published as ZeRO (<a href="https://arxiv.org/abs/1910.02054">arxiv 1910.02054</a>): keep data parallelism's simple mental model — every rank runs the whole model on its own slice of the batch — but stop paying data parallelism's memory price.</p>
+        <p>This question is especially visible in RL infrastructure. The actor must fit during training, but its updated weights must also be materialized for the rollout engine. A sharding strategy therefore changes both the training memory budget and the cost of crossing the train/rollout boundary.</p>
 
-        <h3>The idea: shard everything, gather just in time</h3>
+        <h3>Start with the objects that occupy training memory</h3>
 
-        <p>Recall plain data parallelism from the Megatron section: several ranks hold the same logical replica, each processes different examples, and gradients are synchronized before the optimizer step. The memory cost is that <em>every</em> rank holds <em>everything</em>: the parameters, the gradients, and the optimizer states. For mixed-precision Adam training, that is roughly 16 bytes per parameter before a single activation is stored — the arithmetic from <a href="#memory">Primitive ②</a>. A 70B model needs about 1.1&nbsp;TB of state per replica. No single GPU holds that.</p>
+        <p>Let <code>P</code> denote model parameters, <code>G</code> gradients, <code>O</code> optimizer state, and <code>A</code> activations saved for backward. These symbols refer to bytes, not parameter counts. Plain data parallelism gives each of <code>N</code> ranks a complete model replica:</p>
 
-        <p>The observation behind ZeRO and FSDP: nothing requires all of that state to be resident at once. The optimizer states are only touched at the optimizer step. The gradients of layer 40 are not needed while layer 3 computes. Even the parameters of layer 40 are not needed while layer 3 runs forward. So shard all three kinds of state across the data-parallel ranks — each rank permanently owns <code>1/N</code> of every layer — and materialize full parameters only for the layer that is currently executing:</p>
+        <div class="primer-box">
+          <p><strong>Training-state ledger.</strong></p>
+          <div class="formula-display">memory per rank in DDP &asymp; P + G + O + A<sub>local</sub></div>
+          <p><code>A<sub>local</sub></code> depends on the local microbatch, sequence lengths, checkpointing, and activation precision. ZeRO's stages primarily reorganize <code>P</code>, <code>G</code>, and <code>O</code>; they do not automatically divide activation memory by the data-parallel world size.</p>
+        </div>
 
-<pre><code>plain DP:  every rank holds   full params + full grads + full optimizer states
-FSDP:      every rank holds   1/N params  + 1/N grads  + 1/N optimizer states
+        <p>For a common mixed-precision Adam configuration, one parameter may correspond to 2 bytes of BF16 model weight, 2 bytes of gradient, a 4-byte FP32 master weight, and two 4-byte Adam moments. That gives roughly 16 bytes per parameter before activations and temporary communication buffers. The exact number changes with optimizer, precision, quantization, and offloading, so the useful habit is to keep the three state classes separate rather than memorize one constant.</p>
 
-forward, layer by layer:
-  all-gather layer i's params  -&gt;  run layer i  -&gt;  free the gathered params
-backward, layer by layer:
-  all-gather layer i's params  -&gt;  compute grads  -&gt;  reduce-scatter grads  -&gt;  free
-optimizer step:
-  each rank updates only the 1/N shard it owns
-</code></pre>
+        <h3>The ZeRO ladder: shard one state class at a time</h3>
 
-        <p>Two of the collective operations here are new names for familiar shapes. An <strong>all-gather</strong> collects the shards from all ranks so that each rank temporarily holds the full tensor. A <strong>reduce-scatter</strong> is the reverse composed with a sum: gradients are summed across ranks, and each rank keeps only the <code>1/N</code> piece it owns. Peak memory per rank drops from "the whole model" to "my shard, plus one layer's worth of gathered parameters."</p>
+        <p><a href="https://arxiv.org/abs/1910.02054" target="_blank">ZeRO</a> is a family of data-parallel memory layouts. All ranks still run the same logical model on different data, and their gradients still have to represent one global update. Each stage removes another form of redundant training state.</p>
 
-        <p>The price is communication volume. Plain DP moves each gradient once through an all-reduce, which costs about <code>2×</code> the parameter volume per step. FSDP all-gathers parameters twice (forward and backward) and reduce-scatters gradients once, roughly <code>3×</code> the parameter volume — about 1.5 times more traffic than plain DP, in exchange for an N-fold memory reduction. The bandwidth is affordable precisely because the gathers are per-layer and can be prefetched: while layer <code>i</code> computes, the parameters of layer <code>i+1</code> are already in flight.</p>
+        <table>
+          <thead>
+            <tr><th>Strategy</th><th>Parameters</th><th>Gradients</th><th>Optimizer state</th><th>Persistent state per rank</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>DDP / ZeRO-0</td>
+              <td>replicated</td>
+              <td>replicated</td>
+              <td>replicated</td>
+              <td><code>P + G + O</code></td>
+            </tr>
+            <tr>
+              <td>ZeRO-1</td>
+              <td>replicated</td>
+              <td>replicated</td>
+              <td>sharded</td>
+              <td><code>P + G + O/N</code></td>
+            </tr>
+            <tr>
+              <td>ZeRO-2</td>
+              <td>replicated</td>
+              <td>sharded</td>
+              <td>sharded</td>
+              <td><code>P + (G + O)/N</code></td>
+            </tr>
+            <tr>
+              <td>ZeRO-3 / full sharding</td>
+              <td>sharded outside computation</td>
+              <td>sharded</td>
+              <td>sharded</td>
+              <td><code>(P + G + O)/N</code> plus temporary gathered parameters</td>
+            </tr>
+          </tbody>
+        </table>
 
-        <h3>Why RL frameworks reach for it first</h3>
+        <p><strong>ZeRO-1</strong> assigns each rank a subset of parameters to update. Every rank still has the full parameters and full reduced gradients, but it only keeps the optimizer state for its assigned subset. After those owners apply their optimizer updates, the new parameter values must be made consistent across replicas.</p>
 
-        <p>The deep difference from Megatron is not the sharding arithmetic. It is <em>where the parallelism lives</em>. Megatron's parallelism is intrusive: TP splits the inside of a layer, so the model must be written in Megatron's building blocks, and a HuggingFace checkpoint must be converted into Megatron's format before training (that is what Megatron-Bridge exists for). FSDP's parallelism is a wrapper: it takes an ordinary <code>nn.Module</code>, walks its submodules, and replaces their parameters with shards. The model code does not change. verl's FSDP engine shows this directly — <code>module</code> here is a plain HuggingFace transformer:</p>
+        <p><strong>ZeRO-2</strong> also partitions the reduced gradients. A reduce-scatter can sum gradients across data-parallel ranks and leave each rank with only the gradient shard corresponding to the optimizer state it owns. Full model parameters remain available on every rank, so forward and backward do not need just-in-time parameter all-gathers.</p>
 
-<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/transformer_impl.py" target="_blank"><span class="file-path">verl/workers/engine/fsdp/transformer_impl.py</span><span class="file-meta">· wrapping a HuggingFace module</span></a>
-<pre class="with-source"><code class="language-python">module = FSDP(
-    module,                                  # an ordinary HF nn.Module
-    auto_wrap_policy=auto_wrap_policy,       # which submodules become shard units
-    sharding_strategy=sharding_strategy,
-    mixed_precision=mixed_precision,
-    device_mesh=self.device_mesh,
-    cpu_offload=cpu_offload,
-)</code></pre>
+        <p><strong>ZeRO-3</strong> partitions the parameters as well. A rank normally holds only its parameter shards. Before a layer can run, the ranks that collectively own that layer exchange shards and reconstruct its full parameters. Those temporary full parameters can be released after use.</p>
 
-        <p>This is why RL frameworks default to FSDP. RL post-training starts from a HuggingFace checkpoint — the SFT model someone just produced. With FSDP, that checkpoint loads directly and training starts; with Megatron, a conversion step and a Megatron-compatible model definition stand in between. For a research team iterating on algorithms with dense models in the 1B–100B range, FSDP is the shortest path from checkpoint to gradient.</p>
+        <aside class="note">
+          <strong>An eight-rank example.</strong> Using the illustrative 16-byte mixed-precision Adam ledger above, DDP stores about 16 bytes of persistent training state per parameter on every rank. ZeRO-1 reduces this to <code>2 + 2 + 12/8 = 5.5</code> bytes; ZeRO-2 to <code>2 + (2 + 12)/8 = 3.75</code> bytes; and ZeRO-3 to about <code>16/8 = 2</code> bytes. ZeRO-3 still needs temporary memory for the FSDP unit currently being computed, communication buffers, and activations.
+        </aside>
 
-        <p>The honest ceiling: FSDP shards along the data-parallel axis only. There is no pipeline stage, no expert parallelism, and in the basic story no tensor parallelism (FSDP2 can compose with TP through DTensor, but that is the frontier, not the default). For MoE giants like DeepSeek-V3, where expert parallelism and its routing invariants dominate the design, the Megatron path is the practical one — which is exactly why slime and Miles are Megatron-based while verl offers both and defaults to FSDP.</p>
+        <h3>How full sharding executes one Transformer layer</h3>
 
-        <h3>FSDP1, FSDP2, and DTensor</h3>
+        <p>PyTorch's <strong>Fully Sharded Data Parallel</strong> implementation is closest to ZeRO-3 when it uses <code>FULL_SHARD</code>, or when an FSDP2 unit uses <code>reshard_after_forward=True</code>. Suppose four ranks own four shards of a layer's weight <code>W</code>:</p>
 
-        <p>PyTorch has shipped two generations of the idea, and production RL code currently handles both. <strong>FSDP1</strong> flattens all parameters of a shard unit into one <code>FlatParameter</code> buffer and shards that buffer — efficient, but the flattening makes individual parameters awkward to address, which matters when weight sync needs to iterate them by name. <strong>FSDP2</strong> (the <code>fully_shard</code> API) shards each parameter separately as a <strong>DTensor</strong> — a tensor that knows its device mesh and placement, i.e., which ranks hold which slice of it. A DTensor can reconstruct its full value on demand: <code>full_tensor()</code> performs the all-gather and returns the assembled tensor. Keep that method in mind; it is the hinge of the next subsection.</p>
+        <figure class="fsdp-lifecycle-figure">
+          <div class="diagram-scroll">
+          <svg viewBox="0 0 760 750" role="img" aria-labelledby="fsdp-lifecycle-title fsdp-lifecycle-desc">
+            <title id="fsdp-lifecycle-title">Lifecycle of one fully sharded layer across four ranks</title>
+            <desc id="fsdp-lifecycle-desc">Four ranks begin with different parameter and optimizer-state shards. Parameter all-gather reconstructs the full weight for forward. Full sharding releases it after forward and gathers it again for backward. Each rank computes a local full-gradient contribution. Reduce-scatter sums those contributions and leaves each rank with the gradient shard used to update its local parameter shard.</desc>
+            <defs>
+              <marker id="arrow-fsdp-life" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L8,3 z" fill="#6656c8"></path>
+              </marker>
+              <style>
+                .fl-title { font: 600 17px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #27262b; }
+                .fl-rank { font: 600 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #45424d; text-anchor: middle; }
+                .fl-stage { font: 600 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #6b6673; }
+                .fl-text { font: 600 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #34313b; text-anchor: middle; }
+                .fl-small { font: 11px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #66616d; text-anchor: middle; }
+                .fl-band-title { font: 700 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #4f3fa8; text-anchor: middle; }
+                .fl-band-small { font: 11px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #655d83; text-anchor: middle; }
+                .fl-card { fill: #ffffff; stroke: #d8d3e1; stroke-width: 1.2; rx: 7; }
+                .fl-band { fill: #f4f1ff; stroke: #b8acf0; stroke-width: 1.2; rx: 7; }
+                .fl-shard0 { fill: #dbeafe; stroke: #60a5fa; }
+                .fl-shard1 { fill: #dcfce7; stroke: #4ade80; }
+                .fl-shard2 { fill: #fef3c7; stroke: #fbbf24; }
+                .fl-shard3 { fill: #ffe4e6; stroke: #fb7185; }
+                .fl-arrow { stroke: #6656c8; stroke-width: 1.8; fill: none; marker-end: url(#arrow-fsdp-life); }
+                .fl-guide { stroke: #ece8f1; stroke-width: 1; stroke-dasharray: 3 4; }
+              </style>
+            </defs>
 
-        <p>verl supports both generations, and its utility file records the migration honestly — the same names import from three different places depending on the PyTorch version:</p>
+            <text class="fl-title" x="20" y="30">One FSDP unit across four data-parallel ranks</text>
 
-<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/utils/fsdp_utils.py" target="_blank"><span class="file-path">verl/utils/fsdp_utils.py</span><span class="file-meta">· the FSDP2 import dance</span></a>
-<pre class="with-source"><code class="language-python">if version.parse(torch.__version__) &gt;= version.parse("2.6"):
-    from torch.distributed.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard
-    from torch.distributed.tensor import DTensor, Shard
-elif version.parse(torch.__version__) &gt;= version.parse("2.4"):
-    from torch.distributed._composable.fsdp import CPUOffloadPolicy, FSDPModule, MixedPrecisionPolicy, fully_shard</code></pre>
+            <text class="fl-rank" x="205" y="66">Rank 0</text>
+            <text class="fl-rank" x="350" y="66">Rank 1</text>
+            <text class="fl-rank" x="495" y="66">Rank 2</text>
+            <text class="fl-rank" x="640" y="66">Rank 3</text>
 
-        <h3>RL pressure point 1: materializing weights for rollout sync</h3>
+            <line class="fl-guide" x1="205" y1="73" x2="205" y2="725"></line>
+            <line class="fl-guide" x1="350" y1="73" x2="350" y2="725"></line>
+            <line class="fl-guide" x1="495" y1="73" x2="495" y2="725"></line>
+            <line class="fl-guide" x1="640" y1="73" x2="640" y2="725"></line>
 
-        <p>After the optimizer step, the new policy has to reach the rollout engine — the trainer-side half of <a href="#weight-sync">Primitive ③</a>. Under FSDP, no rank holds a full parameter, so materializing the weights means all-gathering them, parameter by parameter. verl builds this as a generator over named parameters, calling <code>full_tensor()</code> on each shard and downcasting to BF16 to halve the sync traffic:</p>
+            <text class="fl-stage" x="20" y="108">Persistent</text>
+            <rect class="fl-card fl-shard0" x="150" y="82" width="110" height="52"></rect>
+            <text class="fl-text" x="205" y="104">W0</text><text class="fl-small" x="205" y="122">+ optimizer O0</text>
+            <rect class="fl-card fl-shard1" x="295" y="82" width="110" height="52"></rect>
+            <text class="fl-text" x="350" y="104">W1</text><text class="fl-small" x="350" y="122">+ optimizer O1</text>
+            <rect class="fl-card fl-shard2" x="440" y="82" width="110" height="52"></rect>
+            <text class="fl-text" x="495" y="104">W2</text><text class="fl-small" x="495" y="122">+ optimizer O2</text>
+            <rect class="fl-card fl-shard3" x="585" y="82" width="110" height="52"></rect>
+            <text class="fl-text" x="640" y="104">W3</text><text class="fl-small" x="640" y="122">+ optimizer O3</text>
 
-<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/transformer_impl.py" target="_blank"><span class="file-path">verl/workers/engine/fsdp/transformer_impl.py</span><span class="file-meta">· per-tensor weight materialization</span></a>
-<pre class="with-source"><code class="language-python">per_tensor_param = (
+            <path class="fl-arrow" d="M422 137 V154"></path>
+            <rect class="fl-band" x="150" y="160" width="545" height="48"></rect>
+            <text class="fl-band-title" x="422" y="181">ALL-GATHER PARAMETERS</text>
+            <text class="fl-band-small" x="422" y="198">exchange W0, W1, W2, W3 inside the FSDP group</text>
+
+            <path class="fl-arrow" d="M422 211 V226"></path>
+            <text class="fl-stage" x="20" y="263">Forward</text>
+
+            <g transform="translate(150,232)">
+              <rect class="fl-card" width="110" height="72"></rect>
+              <rect class="fl-shard0" x="10" y="11" width="22" height="20"></rect><rect class="fl-shard1" x="32" y="11" width="22" height="20"></rect><rect class="fl-shard2" x="54" y="11" width="22" height="20"></rect><rect class="fl-shard3" x="76" y="11" width="22" height="20"></rect>
+              <text class="fl-small" x="55" y="51">full W</text><text class="fl-small" x="55" y="65">uses local X0</text>
+            </g>
+            <g transform="translate(295,232)">
+              <rect class="fl-card" width="110" height="72"></rect>
+              <rect class="fl-shard0" x="10" y="11" width="22" height="20"></rect><rect class="fl-shard1" x="32" y="11" width="22" height="20"></rect><rect class="fl-shard2" x="54" y="11" width="22" height="20"></rect><rect class="fl-shard3" x="76" y="11" width="22" height="20"></rect>
+              <text class="fl-small" x="55" y="51">full W</text><text class="fl-small" x="55" y="65">uses local X1</text>
+            </g>
+            <g transform="translate(440,232)">
+              <rect class="fl-card" width="110" height="72"></rect>
+              <rect class="fl-shard0" x="10" y="11" width="22" height="20"></rect><rect class="fl-shard1" x="32" y="11" width="22" height="20"></rect><rect class="fl-shard2" x="54" y="11" width="22" height="20"></rect><rect class="fl-shard3" x="76" y="11" width="22" height="20"></rect>
+              <text class="fl-small" x="55" y="51">full W</text><text class="fl-small" x="55" y="65">uses local X2</text>
+            </g>
+            <g transform="translate(585,232)">
+              <rect class="fl-card" width="110" height="72"></rect>
+              <rect class="fl-shard0" x="10" y="11" width="22" height="20"></rect><rect class="fl-shard1" x="32" y="11" width="22" height="20"></rect><rect class="fl-shard2" x="54" y="11" width="22" height="20"></rect><rect class="fl-shard3" x="76" y="11" width="22" height="20"></rect>
+              <text class="fl-small" x="55" y="51">full W</text><text class="fl-small" x="55" y="65">uses local X3</text>
+            </g>
+
+            <path class="fl-arrow" d="M422 307 V323"></path>
+            <rect class="fl-band" x="150" y="329" width="545" height="48"></rect>
+            <text class="fl-band-title" x="422" y="350">RESHARD AFTER FORWARD</text>
+            <text class="fl-band-small" x="422" y="367">free temporary full W; each rank keeps only its persistent shard</text>
+
+            <path class="fl-arrow" d="M422 380 V396"></path>
+            <rect class="fl-band" x="150" y="402" width="545" height="48"></rect>
+            <text class="fl-band-title" x="422" y="423">ALL-GATHER AGAIN</text>
+            <text class="fl-band-small" x="422" y="440">backward needs the same full W that forward used</text>
+
+            <path class="fl-arrow" d="M422 453 V469"></path>
+            <text class="fl-stage" x="20" y="511">Backward</text>
+            <rect class="fl-card" x="150" y="476" width="110" height="76"></rect>
+            <text class="fl-text" x="205" y="502">full W</text><text class="fl-small" x="205" y="522">local batch gives</text><text class="fl-small" x="205" y="539">full dW^(0)</text>
+            <rect class="fl-card" x="295" y="476" width="110" height="76"></rect>
+            <text class="fl-text" x="350" y="502">full W</text><text class="fl-small" x="350" y="522">local batch gives</text><text class="fl-small" x="350" y="539">full dW^(1)</text>
+            <rect class="fl-card" x="440" y="476" width="110" height="76"></rect>
+            <text class="fl-text" x="495" y="502">full W</text><text class="fl-small" x="495" y="522">local batch gives</text><text class="fl-small" x="495" y="539">full dW^(2)</text>
+            <rect class="fl-card" x="585" y="476" width="110" height="76"></rect>
+            <text class="fl-text" x="640" y="502">full W</text><text class="fl-small" x="640" y="522">local batch gives</text><text class="fl-small" x="640" y="539">full dW^(3)</text>
+
+            <path class="fl-arrow" d="M422 555 V571"></path>
+            <rect class="fl-band" x="150" y="577" width="545" height="48"></rect>
+            <text class="fl-band-title" x="422" y="598">REDUCE-SCATTER GRADIENTS</text>
+            <text class="fl-band-small" x="422" y="615">sum local dW contributions, then keep one gradient shard per rank</text>
+
+            <path class="fl-arrow" d="M422 628 V644"></path>
+            <text class="fl-stage" x="20" y="685">Optimizer</text>
+            <rect class="fl-card fl-shard0" x="150" y="650" width="110" height="58"></rect>
+            <text class="fl-text" x="205" y="675">g0 + O0</text><text class="fl-small" x="205" y="695">updates W0</text>
+            <rect class="fl-card fl-shard1" x="295" y="650" width="110" height="58"></rect>
+            <text class="fl-text" x="350" y="675">g1 + O1</text><text class="fl-small" x="350" y="695">updates W1</text>
+            <rect class="fl-card fl-shard2" x="440" y="650" width="110" height="58"></rect>
+            <text class="fl-text" x="495" y="675">g2 + O2</text><text class="fl-small" x="495" y="695">updates W2</text>
+            <rect class="fl-card fl-shard3" x="585" y="650" width="110" height="58"></rect>
+            <text class="fl-text" x="640" y="675">g3 + O3</text><text class="fl-small" x="640" y="695">updates W3</text>
+          </svg>
+          </div>
+          <figcaption><span class="fig-label">Figure.</span> The lifetime of one FSDP unit under full sharding. Colored blocks are persistent parameter shards. A four-color bar is a temporary full parameter reconstructed on that rank.</figcaption>
+        </figure>
+
+        <p><strong>Persistent state.</strong> Rank <code>j</code> begins with parameter shard <code>W<sub>j</sub></code> and the matching optimizer-state shard <code>O<sub>j</sub></code>. The four ranks collectively own one logical weight <code>W</code>; none of them needs to keep the complete weight between computations.</p>
+
+        <p><strong>Forward and reshard.</strong> The parameter all-gather gives every rank a temporary full <code>W</code>. The parameters are now identical, but the activations are not: rank <code>j</code> runs the layer on its own local microbatch <code>X<sub>j</sub></code>. Under full sharding, the temporary full weight is released after forward, leaving each rank with its original shard again.</p>
+
+        <p><strong>Backward.</strong> Computing input and parameter gradients requires the layer weights, so the ranks all-gather <code>W</code> a second time. Each rank's local examples produce a full gradient contribution <code>dW<sup>(j)</sup></code>. These four tensors differ because the ranks processed different data.</p>
+
+        <p><strong>Reduce-scatter and optimizer step.</strong> Reduce-scatter sums the local gradient contributions and partitions the result. Rank <code>j</code> receives only the slice aligned with <code>W<sub>j</sub></code>:</p>
+
+        <div class="primer-box">
+          <div class="formula-display">g<sub>j</sub> = shard<sub>j</sub>(dW<sup>(0)</sup> + dW<sup>(1)</sup> + dW<sup>(2)</sup> + dW<sup>(3)</sup>)</div>
+        </div>
+
+        <p>The local optimizer can now update <code>W<sub>j</sub></code> from <code>g<sub>j</sub></code> and <code>O<sub>j</sub></code>. After every rank updates its own slice, their four new shards together form the next logical model weight.</p>
+
+        <div class="primer-box">
+          <p><strong>Two collectives.</strong> <code>all-gather</code> starts with a different shard on each participating rank and gives every rank the concatenated tensor. <code>reduce-scatter</code> combines gradient contributions, normally by summing them, and then leaves each rank with a different shard of the result. The first operation temporarily reconstructs parameters; the second produces the sharded gradient that the local optimizer shard consumes.</p>
+        </div>
+
+        <p>The sharding strategy and the wrapping policy control two different parts of memory. Sharding determines how much parameter memory a rank keeps between computations, usually about <code>P/N</code>. The wrapping policy divides the model into <strong>FSDP units</strong> and therefore determines how many parameters are temporarily reconstructed by one all-gather. Before a unit runs, FSDP gathers the complete parameters for that unit; after the unit no longer needs them, those complete parameters can be released while the persistent shards remain.</p>
+
+        <div class="primer-box">
+          <p><strong>A concrete memory count.</strong> Suppose a 24-block Transformer has 1 GB of parameters per block, so <code>P = 24 GB</code>, and it is fully sharded over eight ranks. Each rank permanently stores about <code>P/N = 3 GB</code> of parameter shards.</p>
+          <p>If the whole model is one FSDP unit, the first all-gather reconstructs all 24 GB on every rank. Parameter memory during computation is then roughly <code>3 GB of persistent shards + 24 GB of temporary full parameters</code>. The model is sharded while idle, but most of that saving disappears while it runs.</p>
+          <p>If each Transformer block is one unit, a rank reconstructs only the current 1 GB block. When that block finishes, its full parameters are released and the next block is gathered. Parameter memory is now roughly <code>3 GB of persistent shards + 1 GB for the current full block</code>.</p>
+        </div>
+
+        <p>Making units extremely small is not free. If every weight tensor is gathered separately, one Transformer block may trigger many small collective calls. Each collective has setup and synchronization overhead, so thousands of tiny gathers can be slower than a smaller number of well-sized gathers. One Transformer block is a common compromise: small enough to limit temporary parameter memory, but large enough to batch several tensors into one collective.</p>
+
+        <p>Prefetching changes the peak slightly. While block <code>i</code> is computing, FSDP may begin gathering block <code>i + 1</code> so communication overlaps with computation. For a short interval, both units occupy memory. Ignoring activations and other buffers, peak parameter memory is therefore closer to:</p>
+
+        <div class="primer-box">
+          <div class="formula-display">P/N + U<sub>current</sub> + U<sub>prefetch</sub></div>
+          <p>Here <code>U</code> is the full parameter size of one FSDP unit. The central distinction is: sharding controls the persistent <code>P/N</code> term; wrapping controls the temporary <code>U</code> terms.</p>
+        </div>
+
+        <p>The two temporary terms above, <code>U<sub>current</sub></code> and <code>U<sub>prefetch</sub></code>, are determined by where the framework places its <code>fully_shard()</code> boundaries. verl's FSDP2 setup shows that choice directly. It first identifies the Transformer blocks that should become separate FSDP units. Calling <code>fully_shard(module)</code> on one selected block assigns that block's parameters to one gather group. Only after all selected blocks have been assigned does verl call <code>fully_shard(model)</code> on the root model:</p>
+
+        <a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/utils/fsdp_utils.py" target="_blank"><span class="file-path">verl/utils/fsdp_utils.py</span><span class="file-meta">&middot; FSDP2 units are created bottom-up</span></a>
+<pre class="with-source"><code class="language-python">modules = _select_fsdp2_wrap_targets(
+    model,
+    fsdp_transformer_layer_cls_to_wrap,
+)
+
+for module in modules:
+    <span class="code-hl">fully_shard(module, **fsdp_kwargs)</span>
+
+<span class="code-hl">fully_shard(model, **fsdp_kwargs)</span></code></pre>
+
+        <p>The loop assigns each selected Transformer block to its own FSDP unit. When block <code>i</code> is about to run, FSDP gathers the parameters of block <code>i</code>; parameters belonging to the other blocks remain sharded. The final <code>fully_shard(model)</code> call handles parameters that were not assigned by the loop, such as token embeddings or the output projection. It does not absorb the already assigned Transformer blocks into one whole-model gather.</p>
+
+        <p>All of these units normally use the same device mesh, so the same FSDP ranks participate each time. The payload changes: one collective carries block 0's parameters, the next carries block 1's parameters, and so on. In the 24-block example above, if each selected module contains one 1 GB block, then <code>U<sub>current</sub> = 1 GB</code>. Grouping four blocks into one unit would instead make each gather, and the corresponding temporary full-parameter buffer, about 4 GB.</p>
+
+        <h3>The ZeRO-2-style choice: keep parameters between forward and backward</h3>
+
+        <p>Full sharding saves the most parameter memory, but it may communicate the same layer parameters twice in one training iteration: once before forward and again before backward. If the full parameters can remain in memory between those two computations, the second all-gather can be avoided.</p>
+
+        <figure class="fsdp-strategy-figure">
+          <div class="diagram-scroll">
+          <svg viewBox="0 0 760 600" role="img" aria-labelledby="fsdp-strategy-title fsdp-strategy-desc">
+            <title id="fsdp-strategy-title">FULL_SHARD compared with ZeRO-2-style FSDP</title>
+            <desc id="fsdp-strategy-desc">Both strategies begin and end with parameter shards. FULL_SHARD gathers parameters before forward, releases them after forward, and gathers them again before backward. ZeRO-2-style FSDP keeps the full parameters after forward and reuses them in backward, avoiding the second all-gather at the cost of longer full-parameter residency.</desc>
+            <defs>
+              <marker id="arrow-fsdp-compare" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L8,3 z" fill="#b7791f"></path>
+              </marker>
+              <style>
+                .fc-title { font: 600 17px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #27262b; }
+                .fc-strategy { font: 700 14px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #3c3745; }
+                .fc-time { font: 600 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #77717e; text-anchor: middle; }
+                .fc-state { font: 700 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #35313c; text-anchor: middle; }
+                .fc-small { font: 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #625d69; text-anchor: middle; }
+                .fc-event { font: 600 11.5px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #8a5a12; text-anchor: middle; }
+                .fc-note { font: 12.5px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #57515e; }
+                .fc-card { stroke-width: 1.3; rx: 7; }
+                .fc-shard { fill: #eaf3ff; stroke: #72a8e8; }
+                .fc-full { fill: #f1edff; stroke: #9f8bea; }
+                .fc-grad { fill: #e9f9ef; stroke: #66bd83; }
+                .fc-arrow { stroke: #b7791f; stroke-width: 1.8; fill: none; marker-end: url(#arrow-fsdp-compare); }
+                .fc-guide { stroke: #e9e5ed; stroke-width: 1; stroke-dasharray: 3 4; }
+                .fc-divider { stroke: #dcd6e2; stroke-width: 1.2; }
+                .fc-resident-shard { fill: #dbeafe; }
+                .fc-resident-full { fill: #c4b5fd; }
+              </style>
+            </defs>
+
+            <text class="fc-title" x="20" y="30">One FSDP unit: memory state and communication over time</text>
+
+            <rect class="fc-card fc-shard" x="20" y="48" width="22" height="14"></rect>
+            <text class="fc-note" x="50" y="60">local parameter shard</text>
+            <rect class="fc-card fc-full" x="188" y="48" width="22" height="14"></rect>
+            <text class="fc-note" x="218" y="60">temporary full parameters</text>
+            <line class="fc-arrow" x1="405" y1="55" x2="438" y2="55"></line>
+            <text class="fc-note" x="447" y="60">collective / computation event</text>
+
+            <text class="fc-time" x="180" y="94">start</text>
+            <text class="fc-time" x="305" y="94">forward</text>
+            <text class="fc-time" x="430" y="94">between passes</text>
+            <text class="fc-time" x="555" y="94">backward</text>
+            <text class="fc-time" x="680" y="94">end</text>
+            <line class="fc-guide" x1="180" y1="101" x2="180" y2="555"></line>
+            <line class="fc-guide" x1="305" y1="101" x2="305" y2="555"></line>
+            <line class="fc-guide" x1="430" y1="101" x2="430" y2="555"></line>
+            <line class="fc-guide" x1="555" y1="101" x2="555" y2="555"></line>
+            <line class="fc-guide" x1="680" y1="101" x2="680" y2="555"></line>
+
+            <text class="fc-strategy" x="20" y="137">FULL_SHARD</text>
+            <rect class="fc-card fc-shard" x="132" y="116" width="96" height="58"></rect>
+            <text class="fc-state" x="180" y="141">Wj shard</text><text class="fc-small" x="180" y="158">persistent</text>
+            <path class="fc-arrow" d="M230 145 H255"></path><text class="fc-event" x="243" y="110">all-gather #1</text>
+            <rect class="fc-card fc-full" x="257" y="116" width="96" height="58"></rect>
+            <text class="fc-state" x="305" y="141">full W</text><text class="fc-small" x="305" y="158">run forward</text>
+            <path class="fc-arrow" d="M355 145 H380"></path><text class="fc-event" x="368" y="110">release</text>
+            <rect class="fc-card fc-shard" x="382" y="116" width="96" height="58"></rect>
+            <text class="fc-state" x="430" y="141">Wj shard</text><text class="fc-small" x="430" y="158">full W freed</text>
+            <path class="fc-arrow" d="M480 145 H505"></path><text class="fc-event" x="493" y="110">all-gather #2</text>
+            <rect class="fc-card fc-full" x="507" y="116" width="96" height="58"></rect>
+            <text class="fc-state" x="555" y="141">full W</text><text class="fc-small" x="555" y="158">run backward</text>
+            <path class="fc-arrow" d="M605 145 H630"></path><text class="fc-event" x="618" y="110">reduce-scatter</text>
+            <rect class="fc-card fc-grad" x="632" y="116" width="96" height="58"></rect>
+            <text class="fc-state" x="680" y="141">Wj + gj</text><text class="fc-small" x="680" y="158">both sharded</text>
+
+            <text class="fc-small" x="92" y="206">parameter residency</text>
+            <rect class="fc-resident-shard" x="132" y="191" width="96" height="18" rx="4"></rect>
+            <rect class="fc-resident-full" x="257" y="191" width="96" height="18" rx="4"></rect>
+            <rect class="fc-resident-shard" x="382" y="191" width="96" height="18" rx="4"></rect>
+            <rect class="fc-resident-full" x="507" y="191" width="96" height="18" rx="4"></rect>
+            <rect class="fc-resident-shard" x="632" y="191" width="96" height="18" rx="4"></rect>
+            <text class="fc-small" x="305" y="229">full parameters live only during forward</text>
+            <text class="fc-small" x="555" y="229">and backward separately</text>
+
+            <line class="fc-divider" x1="20" y1="263" x2="740" y2="263"></line>
+
+            <text class="fc-strategy" x="20" y="302">ZeRO-2-style</text>
+            <text class="fc-strategy" x="20" y="320">FSDP</text>
+            <rect class="fc-card fc-shard" x="132" y="285" width="96" height="58"></rect>
+            <text class="fc-state" x="180" y="310">Wj shard</text><text class="fc-small" x="180" y="327">outside compute</text>
+            <path class="fc-arrow" d="M230 314 H255"></path><text class="fc-event" x="243" y="278">all-gather #1</text>
+            <rect class="fc-card fc-full" x="257" y="285" width="96" height="58"></rect>
+            <text class="fc-state" x="305" y="310">full W</text><text class="fc-small" x="305" y="327">run forward</text>
+            <path class="fc-arrow" d="M355 314 H380"></path><text class="fc-event" x="368" y="278">keep</text>
+            <rect class="fc-card fc-full" x="382" y="285" width="96" height="58"></rect>
+            <text class="fc-state" x="430" y="310">full W</text><text class="fc-small" x="430" y="327">still resident</text>
+            <path class="fc-arrow" d="M480 314 H505"></path><text class="fc-event" x="493" y="278">no gather</text>
+            <rect class="fc-card fc-full" x="507" y="285" width="96" height="58"></rect>
+            <text class="fc-state" x="555" y="310">same full W</text><text class="fc-small" x="555" y="327">run backward</text>
+            <path class="fc-arrow" d="M605 314 H630"></path><text class="fc-event" x="618" y="278">reduce-scatter</text>
+            <rect class="fc-card fc-grad" x="632" y="285" width="96" height="58"></rect>
+            <text class="fc-state" x="680" y="310">Wj + gj</text><text class="fc-small" x="680" y="327">resharded</text>
+
+            <text class="fc-small" x="92" y="375">parameter residency</text>
+            <rect class="fc-resident-shard" x="132" y="360" width="96" height="18" rx="4"></rect>
+            <rect class="fc-resident-full" x="257" y="360" width="346" height="18" rx="4"></rect>
+            <rect class="fc-resident-shard" x="632" y="360" width="96" height="18" rx="4"></rect>
+            <text class="fc-small" x="430" y="398">full parameters stay resident from forward through backward</text>
+
+            <rect x="132" y="438" width="596" height="105" rx="8" fill="#faf9fc" stroke="#ded9e5"></rect>
+            <text class="fc-strategy" x="150" y="466">The tradeoff</text>
+            <text class="fc-note" x="150" y="491">FULL_SHARD: lower memory between passes, but two parameter all-gathers.</text>
+            <text class="fc-note" x="150" y="516">ZeRO-2-style: one parameter all-gather, but full W occupies memory for longer.</text>
+          </svg>
+          </div>
+          <figcaption><span class="fig-label">Figure.</span> Both strategies shard parameters outside the computation window. The difference is whether the temporary full parameters are released after forward or retained for backward.</figcaption>
+        </figure>
+
+        <p>The upper path minimizes parameter residency between the two passes. Its cost is the second all-gather before backward. The lower path keeps the full unit in memory across that interval, so backward can reuse it without another parameter collective. Both paths reduce-scatter gradients after backward and return to sharded parameters and sharded gradients for the local optimizer step.</p>
+
+        <p>FSDP1 calls this strategy <code>SHARD_GRAD_OP</code>. It is commonly described as ZeRO-2-style because gradients and optimizer states are sharded while parameters remain full through the forward/backward computation window. There is a small implementation distinction from canonical DeepSpeed ZeRO-2: FSDP may still store parameters as shards outside that window, whereas classic ZeRO-2 keeps model parameters replicated persistently. The relevant tradeoff is the same. Keeping full parameters longer uses more peak memory and removes a pre-backward all-gather.</p>
+
+        <p>verl exposes this choice as <code>self.engine_config.reshard_after_forward</code>. The first step is in the engine builder, before the strategy helper shown below. FSDP1 passes the value into <code>get_sharding_strategy</code>; FSDP2 places the same value directly in the keyword arguments later consumed by <code>fully_shard()</code>:</p>
+
+        <a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/transformer_impl.py" target="_blank"><span class="file-path">verl/workers/engine/fsdp/transformer_impl.py</span><span class="file-meta">&middot; read the reshard configuration</span></a>
+<pre class="with-source"><code class="language-python">fsdp_mesh = self.device_mesh
+
+# FSDP1: translate the boolean into a ShardingStrategy.
+sharding_strategy = get_sharding_strategy(
+    fsdp_mesh,
+    <span class="code-hl">zero3_enable=self.engine_config.reshard_after_forward</span>,
+)
+
+if self.engine_config.strategy == "fsdp":
+    module = FSDP(
+        module,
+        <span class="code-hl">sharding_strategy=sharding_strategy</span>,
+        device_mesh=self.device_mesh,
+        ...
+    )
+
+elif self.engine_config.strategy == "fsdp2":
+    fsdp_kwargs = {
+        "mesh": fsdp_mesh,
+        "mp_policy": mp_policy,
+        "offload_policy": offload_policy,
+        <span class="code-hl">"reshard_after_forward": self.engine_config.reshard_after_forward</span>,
+    }
+    apply_fsdp2(module, fsdp_kwargs, self.engine_config)</code></pre>
+
+        <p>The naming change in the FSDP1 path is easy to miss. The configuration is called <code>reshard_after_forward</code>, but the helper receives it under the local name <code>zero3_enable</code>. Inside that helper, <code>True</code> means the full-shard behavior associated with ZeRO-3, while <code>False</code> selects the ZeRO-2-style behavior. The helper also chooses the corresponding hybrid strategy when the device mesh is two-dimensional:</p>
+
+        <a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/utils.py" target="_blank"><span class="file-path">verl/workers/engine/fsdp/utils.py</span><span class="file-meta">&middot; full-shard and ZeRO-2-style strategies</span></a>
+<pre class="with-source"><code class="language-python">def get_sharding_strategy(device_mesh, zero3_enable=True):
+    if zero3_enable:
+        fsdp_strategy = <span class="code-hl">ShardingStrategy.FULL_SHARD</span>
+        hsdp_strategy = <span class="code-hl">ShardingStrategy.HYBRID_SHARD</span>
+    else:
+        fsdp_strategy = <span class="code-hl">ShardingStrategy.SHARD_GRAD_OP</span>
+        hsdp_strategy = <span class="code-hl">ShardingStrategy._HYBRID_SHARD_ZERO2</span>
+
+    if device_mesh.ndim == 1:
+        return fsdp_strategy
+    elif device_mesh.ndim == 2:
+        return hsdp_strategy</code></pre>
+
+        <p>For a one-dimensional mesh, the complete chain is therefore:</p>
+
+<pre><code>engine_config.reshard_after_forward = True
+  -> zero3_enable = True
+  -> ShardingStrategy.FULL_SHARD
+  -> release full parameters after forward and gather again before backward
+
+engine_config.reshard_after_forward = False
+  -> zero3_enable = False
+  -> ShardingStrategy.SHARD_GRAD_OP
+  -> retain full parameters through backward and avoid the second gather</code></pre>
+
+        <p>FSDP2 does not perform this renaming. Its <code>fsdp_kwargs</code> passes <code>reshard_after_forward</code> into <code>fully_shard()</code> directly, using the same time-memory choice described in the <a href="https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html" target="_blank">PyTorch FSDP2 documentation</a>.</p>
+
+        <h3>HSDP: shard inside a group, replicate the group</h3>
+
+        <p>Full sharding over every GPU minimizes persistent state per rank, but it also makes every parameter gather span the full sharding group. That becomes unattractive when a cluster has fast links within each node and slower links between nodes. <strong>Hybrid Sharded Data Parallel</strong> (HSDP) introduces two data-parallel dimensions:</p>
+
+        <ul>
+          <li>A <strong>shard dimension</strong> jointly holds one model replica. Parameter all-gathers and gradient reduce-scatters occur inside this group.</li>
+          <li>A <strong>replicate dimension</strong> creates several copies of that sharded model. The replicas process different data and synchronize their corresponding gradient shards.</li>
+        </ul>
+
+        <p>Consider 16 GPUs arranged as two nodes with eight GPUs each. Choose a shard-group size <code>S=8</code> and a replica count <code>R=2</code>:</p>
+
+        <figure class="hsdp-layout-figure">
+          <div class="diagram-scroll">
+          <svg viewBox="0 0 900 650" role="img" aria-labelledby="hsdp-layout-title hsdp-layout-desc">
+            <title id="hsdp-layout-title">HSDP with two replicas and eight-way sharding</title>
+            <desc id="hsdp-layout-desc">Two nodes each contain eight ranks that collectively hold one model replica. Parameter all-gather and gradient reduce-scatter run horizontally within each node. After reduce-scatter, ranks at the same shard position across the two nodes all-reduce their corresponding gradient shards.</desc>
+            <defs>
+              <marker id="arrow-hsdp-horizontal" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L8,3 z" fill="#6b5bd6"></path>
+              </marker>
+              <marker id="arrow-hsdp-vertical" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L8,3 z" fill="#188266"></path>
+              </marker>
+              <style>
+                .hl-title { font: 600 18px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #27262b; }
+                .hl-panel { font: 700 14px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #3c3745; }
+                .hl-node { font: 700 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #48424f; }
+                .hl-text { font: 700 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #34313b; text-anchor: middle; }
+                .hl-small { font: 11.5px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #665f6d; text-anchor: middle; }
+                .hl-note { font: 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #57515e; }
+                .hl-hlabel { font: 600 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #5a49b7; text-anchor: middle; }
+                .hl-vlabel { font: 600 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #16745d; text-anchor: middle; }
+                .hl-box { stroke-width: 1.2; rx: 6; }
+                .hl-s0 { fill: #dbeafe; stroke: #60a5fa; }
+                .hl-s1 { fill: #cffafe; stroke: #22d3ee; }
+                .hl-s2 { fill: #dcfce7; stroke: #4ade80; }
+                .hl-s3 { fill: #ecfccb; stroke: #a3e635; }
+                .hl-s4 { fill: #fef3c7; stroke: #fbbf24; }
+                .hl-s5 { fill: #ffedd5; stroke: #fb923c; }
+                .hl-s6 { fill: #ffe4e6; stroke: #fb7185; }
+                .hl-s7 { fill: #ede9fe; stroke: #a78bfa; }
+                .hl-nodebox { fill: #fcfbfd; stroke: #ddd7e3; stroke-width: 1.2; rx: 8; }
+                .hl-band { fill: #f4f1ff; stroke: #b9acf0; stroke-width: 1.2; rx: 7; }
+                .hl-gradband { fill: #effaf6; stroke: #8acdb8; stroke-width: 1.2; rx: 7; }
+                .hl-harrow { stroke: #6b5bd6; stroke-width: 1.8; fill: none; marker-end: url(#arrow-hsdp-horizontal); }
+                .hl-varrow { stroke: #188266; stroke-width: 1.7; fill: none; marker-end: url(#arrow-hsdp-vertical); }
+                .hl-pair { stroke: #5ca991; stroke-width: 1.2; stroke-dasharray: 4 4; }
+                .hl-divider { stroke: #ddd7e3; stroke-width: 1.2; }
+              </style>
+            </defs>
+
+            <text class="hl-title" x="20" y="30">HSDP on two nodes: shard across each row, replicate across rows</text>
+
+            <text class="hl-panel" x="20" y="72">1. Persistent parameter layout</text>
+            <rect class="hl-nodebox" x="20" y="88" width="860" height="82"></rect>
+            <text class="hl-node" x="36" y="116">Replica 0 / Node 0</text>
+            <text class="hl-small" x="113" y="137">one logical model spread across eight GPUs</text>
+
+            <rect class="hl-box hl-s0" x="230" y="103" width="70" height="48"></rect><text class="hl-text" x="265" y="123">GPU 0</text><text class="hl-small" x="265" y="141">W0</text>
+            <rect class="hl-box hl-s1" x="305" y="103" width="70" height="48"></rect><text class="hl-text" x="340" y="123">GPU 1</text><text class="hl-small" x="340" y="141">W1</text>
+            <rect class="hl-box hl-s2" x="380" y="103" width="70" height="48"></rect><text class="hl-text" x="415" y="123">GPU 2</text><text class="hl-small" x="415" y="141">W2</text>
+            <rect class="hl-box hl-s3" x="455" y="103" width="70" height="48"></rect><text class="hl-text" x="490" y="123">GPU 3</text><text class="hl-small" x="490" y="141">W3</text>
+            <rect class="hl-box hl-s4" x="530" y="103" width="70" height="48"></rect><text class="hl-text" x="565" y="123">GPU 4</text><text class="hl-small" x="565" y="141">W4</text>
+            <rect class="hl-box hl-s5" x="605" y="103" width="70" height="48"></rect><text class="hl-text" x="640" y="123">GPU 5</text><text class="hl-small" x="640" y="141">W5</text>
+            <rect class="hl-box hl-s6" x="680" y="103" width="70" height="48"></rect><text class="hl-text" x="715" y="123">GPU 6</text><text class="hl-small" x="715" y="141">W6</text>
+            <rect class="hl-box hl-s7" x="755" y="103" width="70" height="48"></rect><text class="hl-text" x="790" y="123">GPU 7</text><text class="hl-small" x="790" y="141">W7</text>
+
+            <rect class="hl-nodebox" x="20" y="184" width="860" height="82"></rect>
+            <text class="hl-node" x="36" y="212">Replica 1 / Node 1</text>
+            <text class="hl-small" x="113" y="233">a second sharded copy processes different data</text>
+
+            <rect class="hl-box hl-s0" x="230" y="199" width="70" height="48"></rect><text class="hl-text" x="265" y="219">GPU 8</text><text class="hl-small" x="265" y="237">W0</text>
+            <rect class="hl-box hl-s1" x="305" y="199" width="70" height="48"></rect><text class="hl-text" x="340" y="219">GPU 9</text><text class="hl-small" x="340" y="237">W1</text>
+            <rect class="hl-box hl-s2" x="380" y="199" width="70" height="48"></rect><text class="hl-text" x="415" y="219">GPU 10</text><text class="hl-small" x="415" y="237">W2</text>
+            <rect class="hl-box hl-s3" x="455" y="199" width="70" height="48"></rect><text class="hl-text" x="490" y="219">GPU 11</text><text class="hl-small" x="490" y="237">W3</text>
+            <rect class="hl-box hl-s4" x="530" y="199" width="70" height="48"></rect><text class="hl-text" x="565" y="219">GPU 12</text><text class="hl-small" x="565" y="237">W4</text>
+            <rect class="hl-box hl-s5" x="605" y="199" width="70" height="48"></rect><text class="hl-text" x="640" y="219">GPU 13</text><text class="hl-small" x="640" y="237">W5</text>
+            <rect class="hl-box hl-s6" x="680" y="199" width="70" height="48"></rect><text class="hl-text" x="715" y="219">GPU 14</text><text class="hl-small" x="715" y="237">W6</text>
+            <rect class="hl-box hl-s7" x="755" y="199" width="70" height="48"></rect><text class="hl-text" x="790" y="219">GPU 15</text><text class="hl-small" x="790" y="237">W7</text>
+
+            <text class="hl-vlabel" x="850" y="178">replica dimension</text>
+            <line class="hl-pair" x1="265" y1="153" x2="265" y2="197"></line>
+            <line class="hl-pair" x1="340" y1="153" x2="340" y2="197"></line>
+            <line class="hl-pair" x1="415" y1="153" x2="415" y2="197"></line>
+            <line class="hl-pair" x1="490" y1="153" x2="490" y2="197"></line>
+            <line class="hl-pair" x1="565" y1="153" x2="565" y2="197"></line>
+            <line class="hl-pair" x1="640" y1="153" x2="640" y2="197"></line>
+            <line class="hl-pair" x1="715" y1="153" x2="715" y2="197"></line>
+            <line class="hl-pair" x1="790" y1="153" x2="790" y2="197"></line>
+
+            <text class="hl-panel" x="20" y="308">2. Parameter reconstruction for forward or backward</text>
+            <rect class="hl-band" x="20" y="326" width="410" height="76"></rect>
+            <text class="hl-hlabel" x="225" y="350">NODE 0 ALL-GATHER</text>
+            <text class="hl-small" x="225" y="371">W0 ... W7 are exchanged only inside replica 0</text>
+            <text class="hl-small" x="225" y="389">each rank in node 0 receives the full FSDP unit W</text>
+            <rect class="hl-band" x="470" y="326" width="410" height="76"></rect>
+            <text class="hl-hlabel" x="675" y="350">NODE 1 ALL-GATHER</text>
+            <text class="hl-small" x="675" y="371">the second replica performs its own local exchange</text>
+            <text class="hl-small" x="675" y="389">no parameter all-gather crosses between the two nodes</text>
+
+            <text class="hl-panel" x="20" y="448">3. Gradient synchronization after backward</text>
+            <rect class="hl-gradband" x="20" y="466" width="860" height="132"></rect>
+            <text class="hl-hlabel" x="225" y="491">REDUCE-SCATTER WITHIN EACH ROW</text>
+            <text class="hl-small" x="225" y="512">replica 0 keeps g0^(0) ... g7^(0)</text>
+            <text class="hl-small" x="675" y="512">replica 1 keeps g0^(1) ... g7^(1)</text>
+
+            <line class="hl-varrow" x1="265" y1="530" x2="265" y2="568"></line>
+            <line class="hl-varrow" x1="340" y1="530" x2="340" y2="568"></line>
+            <line class="hl-varrow" x1="415" y1="530" x2="415" y2="568"></line>
+            <line class="hl-varrow" x1="490" y1="530" x2="490" y2="568"></line>
+            <line class="hl-varrow" x1="565" y1="530" x2="565" y2="568"></line>
+            <line class="hl-varrow" x1="640" y1="530" x2="640" y2="568"></line>
+            <line class="hl-varrow" x1="715" y1="530" x2="715" y2="568"></line>
+            <line class="hl-varrow" x1="790" y1="530" x2="790" y2="568"></line>
+            <rect x="278" y="536" width="344" height="24" rx="12" fill="#effaf6"></rect>
+            <text class="hl-vlabel" x="450" y="553">all-reduce matching gradient shards across replicas</text>
+            <text class="hl-note" x="44" y="619">Result: corresponding shard owners receive the same synchronized g<tspan baseline-shift="sub">j</tspan>.</text>
+            <text class="hl-note" x="44" y="639">Their replicated W<tspan baseline-shift="sub">j</tspan> shards therefore stay identical after the optimizer step.</text>
+          </svg>
+          </div>
+          <figcaption><span class="fig-label">Figure.</span> HSDP creates an eight-rank shard dimension inside each node and a two-rank replica dimension between corresponding shard owners. Parameter reconstruction stays within a row; gradient agreement uses both directions.</figcaption>
+        </figure>
+
+        <p><strong>Persistent layout.</strong> One HSDP replica is the entire eight-GPU row, not one GPU. The eight ranks in node 0 collectively hold one logical model as <code>W0 ... W7</code>; node 1 holds a second copy with the same shard positions and processes different training data. Each GPU therefore stores roughly <code>1/8</code> of the persistent training state, not <code>1/16</code>.</p>
+
+        <p><strong>Parameter reconstruction.</strong> Before an FSDP unit runs, each row performs its own eight-rank all-gather. Every participating rank in node 0 reconstructs the full unit from node 0's shards, and node 1 does the same independently. When the shard groups are aligned with nodes, this high-volume parameter exchange can remain on the faster intra-node fabric.</p>
+
+        <p><strong>Gradient synchronization.</strong> Backward first produces gradient contributions inside each replica. Reduce-scatter within a row sums those contributions and leaves the owner of position <code>j</code> with a reduced shard <code>g<sub>j</sub><sup>(r)</sup></code>. The two owners at the same shard position then all-reduce across the replica dimension. After that second collective, both replicas have the same synchronized <code>g<sub>j</sub></code> and will apply the same update to their copies of <code>W<sub>j</sub></code>.</p>
+
+        <p>HSDP therefore exchanges some memory efficiency for topology-aware communication. Full sharding over all 16 ranks would store about <code>1/16</code> of the state per GPU, but parameter all-gathers would span both nodes. HSDP stores <code>1/8</code> per GPU and keeps those parameter all-gathers inside each node; cross-node communication is applied to the already reduced gradient shards.</p>
+
+        <aside class="note">
+          <strong>Do not confuse the two uses of "hybrid."</strong> A hybrid <em>engine</em> lets training and rollout time-share resources. HSDP is a training-state layout: it combines sharding and replication inside data parallelism. An RL system may use both at the same time, but they solve different problems.
+        </aside>
+
+        <p>In verl, <code>world_size</code> is the total number of training ranks, while <code>fsdp_size</code> is the number of ranks that shard one model replica. If <code>fsdp_size</code> equals <code>world_size</code> (or is <code>-1</code>), all ranks form one FSDP group. If it is a smaller divisor, verl creates a two-dimensional mesh of shape <code>(world_size / fsdp_size, fsdp_size)</code>: the first dimension counts replicas, and the second counts shards within each replica.</p>
+
+        <a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/utils.py" target="_blank"><span class="file-path">verl/workers/engine/fsdp/utils.py</span><span class="file-meta">&middot; build the HSDP device mesh</span></a>
+<pre class="with-source"><code class="language-python">def create_device_mesh(world_size, fsdp_size):
+    if fsdp_size &lt; 0 or fsdp_size &gt;= world_size:
+        device_mesh = init_device_mesh(
+            device_name,
+            mesh_shape=(world_size,),
+            mesh_dim_names=["fsdp"],
+        )
+    else:
+        device_mesh = init_device_mesh(
+            device_name,
+            <span class="code-hl">mesh_shape=(world_size // fsdp_size, fsdp_size)</span>,
+            <span class="code-hl">mesh_dim_names=["ddp", "fsdp"]</span>,
+        )
+    return device_mesh</code></pre>
+
+        <p>With <code>world_size=16</code> and <code>fsdp_size=8</code>, the mesh shape is <code>(2, 8)</code>. Along the <code>fsdp</code> dimension, eight ranks shard one model replica. Along the dimension named <code>ddp</code> in this implementation, two corresponding shard owners are replicas. Because the mesh is two-dimensional, the strategy selector above returns <code>HYBRID_SHARD</code> rather than <code>FULL_SHARD</code>. This is the concrete code path from one integer configuration to HSDP's two sets of communication groups.</p>
+
+        <h3>FSDP1 and FSDP2 represent the same idea differently</h3>
+
+        <p>PyTorch now has two FSDP APIs. They perform similar collectives, but their parameter representations matter when framework code needs to inspect, save, offload, or export individual weights.</p>
+
+        <table>
+          <thead><tr><th></th><th>FSDP1</th><th>FSDP2</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Entry point</td>
+              <td><code>FSDP(module, ...)</code> wrapper</td>
+              <td><code>fully_shard(module, ...)</code> applied in place</td>
+            </tr>
+            <tr>
+              <td>Sharded representation</td>
+              <td>parameters in a unit are commonly flattened into <code>FlatParameter</code></td>
+              <td>each original parameter remains a per-parameter <code>DTensor</code></td>
+            </tr>
+            <tr>
+              <td>Parameter names</td>
+              <td>flattening and wrapping make original parameters harder to address</td>
+              <td>original fully qualified names are preserved</td>
+            </tr>
+            <tr>
+              <td>Placement description</td>
+              <td>FSDP handles and process groups</td>
+              <td><code>DeviceMesh</code> plus placements such as <code>Shard</code> and <code>Replicate</code></td>
+            </tr>
+            <tr>
+              <td>Full parameter access</td>
+              <td>summon/full-state-dict APIs</td>
+              <td>DTensor operations such as <code>full_tensor()</code></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>DTensor matters here because FSDP2 changes what framework code sees when it asks for a parameter. FSDP1 hides sharding behind flattened internal buffers. FSDP2 keeps each named parameter visible, but represents it as a <strong>DTensor</strong>: one logical parameter whose local data is only the shard stored on the current rank.</p>
+
+        <p>For an ordinary training step, that representation can remain an implementation detail. It becomes visible at the train/rollout boundary. The rollout engine needs a complete named weight, while the trainer currently has a named DTensor shard. The DTensor remembers which mesh and placement produced that shard, so <code>full_tensor()</code> can gather the pieces and reconstruct the complete parameter. This is why verl's <code>get_per_tensor_param()</code> function in the next subsection checks <code>isinstance(param, DTensor)</code> and calls <code>full_tensor()</code> before handing each updated actor weight to the rollout side.</p>
+
+        <h3>What RL adds to the FSDP lifecycle</h3>
+
+        <p>In an ordinary FSDP training loop, parameter shards can remain inside the training runtime from one optimizer step to the next. RL post-training adds two phase boundaries. First, the policy updated by the trainer must become the policy used by the rollout engine. Second, when trainer and rollout share GPUs, the inactive training state may have to leave GPU memory so generation has room for serving weights and KV cache. The next two subsections follow these two boundaries separately.</p>
+
+        <h4>1. Exporting a sharded actor to rollout</h4>
+
+        <p>After the optimizer step, the new actor exists collectively across the FSDP ranks: rank <code>j</code> holds the updated shard <code>W<sub>j</sub></code>, but no rank necessarily holds the complete parameter <code>W</code>. Before the rollout engine can load the new actor, the trainer side has to recover complete named parameters:</p>
+
+        <figure class="fsdp-export-figure">
+          <div class="diagram-scroll">
+          <svg viewBox="0 0 820 350" role="img" aria-labelledby="fsdp-export-title fsdp-export-desc">
+            <title id="fsdp-export-title">Exporting an updated FSDP actor to rollout</title>
+            <desc id="fsdp-export-desc">Updated actor weights begin as shards on trainer ranks. DTensor full_tensor all-gathers one complete named parameter. Existing weight-transfer mechanisms move that parameter toward the rollout engine, which loads it into its serving layout.</desc>
+            <defs>
+              <marker id="arrow-fsdp-export" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L8,3 z" fill="#6656c8"></path>
+              </marker>
+              <style>
+                .fe-title { font: 600 18px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #27262b; }
+                .fe-head { font: 700 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #34313b; text-anchor: middle; }
+                .fe-text { font: 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #5c5663; text-anchor: middle; }
+                .fe-small { font: 11px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #6f6875; text-anchor: middle; }
+                .fe-arrow-label { font: 600 11px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #5546ad; text-anchor: middle; }
+                .fe-card { stroke-width: 1.3; rx: 8; }
+                .fe-train { fill: #eef6ff; stroke: #82afe6; }
+                .fe-full { fill: #f3efff; stroke: #a18de9; }
+                .fe-transfer { fill: #fff8e8; stroke: #e3b75e; }
+                .fe-rollout { fill: #ecfaf4; stroke: #74bda3; }
+                .fe-s0 { fill: #dbeafe; stroke: #60a5fa; }
+                .fe-s1 { fill: #dcfce7; stroke: #4ade80; }
+                .fe-s2 { fill: #fef3c7; stroke: #fbbf24; }
+                .fe-s3 { fill: #ffe4e6; stroke: #fb7185; }
+                .fe-shard { stroke-width: 1; rx: 3; }
+                .fe-arrow { stroke: #6656c8; stroke-width: 2; fill: none; marker-end: url(#arrow-fsdp-export); }
+                .fe-focus { fill: #f5f2ff; stroke: #c6baf2; stroke-width: 1; rx: 10; }
+              </style>
+            </defs>
+
+            <text class="fe-title" x="20" y="30">Actor weight export after the optimizer step</text>
+
+            <rect class="fe-card fe-train" x="20" y="62" width="170" height="176"></rect>
+            <text class="fe-head" x="105" y="88">FSDP trainer</text>
+            <text class="fe-text" x="105" y="108">updated policy θ<tspan baseline-shift="sub">t+1</tspan></text>
+            <rect class="fe-shard fe-s0" x="42" y="126" width="58" height="34"></rect><text class="fe-small" x="71" y="147">rank 0: W0</text>
+            <rect class="fe-shard fe-s1" x="110" y="126" width="58" height="34"></rect><text class="fe-small" x="139" y="147">rank 1: W1</text>
+            <rect class="fe-shard fe-s2" x="42" y="169" width="58" height="34"></rect><text class="fe-small" x="71" y="190">rank 2: W2</text>
+            <rect class="fe-shard fe-s3" x="110" y="169" width="58" height="34"></rect><text class="fe-small" x="139" y="190">rank 3: W3</text>
+            <text class="fe-small" x="105" y="222">one logical W, no full local copy</text>
+
+            <path class="fe-arrow" d="M193 150 H230"></path>
+            <text class="fe-arrow-label" x="212" y="258">DTensor.full_tensor()</text>
+            <text class="fe-small" x="212" y="274">all-gather</text>
+
+            <rect class="fe-card fe-full" x="233" y="62" width="170" height="176"></rect>
+            <text class="fe-head" x="318" y="88">Complete named weight</text>
+            <text class="fe-small" x="318" y="109">model.layers.0.mlp.weight</text>
+            <rect class="fe-shard fe-s0" x="257" y="132" width="34" height="44"></rect>
+            <rect class="fe-shard fe-s1" x="291" y="132" width="34" height="44"></rect>
+            <rect class="fe-shard fe-s2" x="325" y="132" width="34" height="44"></rect>
+            <rect class="fe-shard fe-s3" x="359" y="132" width="20" height="44"></rect>
+            <text class="fe-head" x="318" y="199">full W</text>
+            <text class="fe-small" x="318" y="218">one parameter, processed lazily</text>
+
+            <path class="fe-arrow" d="M406 150 H443"></path>
+            <text class="fe-arrow-label" x="425" y="258">handoff</text>
+
+            <rect class="fe-card fe-transfer" x="446" y="62" width="150" height="176"></rect>
+            <text class="fe-head" x="521" y="88">Weight-transfer path</text>
+            <text class="fe-text" x="521" y="122">tensor</text>
+            <text class="fe-text" x="521" y="149">IPC handle</text>
+            <text class="fe-text" x="521" y="176">distributed group</text>
+            <text class="fe-small" x="521" y="211">Primitives ③ and ④</text>
+
+            <path class="fe-arrow" d="M599 150 H636"></path>
+            <text class="fe-arrow-label" x="618" y="258">load / repartition</text>
+
+            <rect class="fe-card fe-rollout" x="639" y="62" width="161" height="176"></rect>
+            <text class="fe-head" x="719" y="88">Rollout engine</text>
+            <text class="fe-text" x="719" y="109">serving policy θ<tspan baseline-shift="sub">t+1</tspan></text>
+            <rect class="fe-shard fe-s0" x="663" y="132" width="58" height="44"></rect>
+            <rect class="fe-shard fe-s2" x="729" y="132" width="47" height="44"></rect>
+            <text class="fe-small" x="692" y="158">serving shard 0</text>
+            <text class="fe-small" x="752" y="158">shard 1</text>
+            <text class="fe-small" x="719" y="202">layout may differ from training</text>
+            <text class="fe-small" x="719" y="220">ready for the next rollout</text>
+
+            <rect class="fe-focus" x="14" y="290" width="395" height="46"></rect>
+            <text class="fe-arrow-label" x="211" y="310">FSDP-specific boundary covered here</text>
+            <text class="fe-small" x="211" y="327">sharded actor → complete named parameter</text>
+          </svg>
+          </div>
+          <figcaption><span class="fig-label">Figure.</span> FSDP materializes one updated named parameter before the existing transfer machinery moves it into the rollout engine's serving layout.</figcaption>
+        </figure>
+
+        <p>This subsection focuses on the highlighted left-hand boundary. verl implements it lazily over the state dictionary; the FSDP2 branch calls <code>full_tensor()</code>:</p>
+
+        <a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/transformer_impl.py" target="_blank"><span class="file-path">verl/workers/engine/fsdp/transformer_impl.py</span><span class="file-meta">&middot; materialize updated actor parameters</span></a>
+<pre class="with-source"><code class="language-python">params = self.module.state_dict()
+device = get_device_id()
+
+per_tensor_param = (
     (
         name,
-        param.to(device, non_blocking=True).full_tensor().to(torch.bfloat16, non_blocking=True)
+        <span class="code-hl">param.to(device, non_blocking=True).full_tensor()</span>
+        <span class="code-hl">.to(torch.bfloat16, non_blocking=True)</span>
         if isinstance(param, DTensor)
         else param,
     )
     for name, param in params.items()
 )</code></pre>
 
-        <p>This snippet finally explains an invariant that the <a href="#verl-pipeline">verl case study</a> could only state as a rule: <em>every rank must walk this generator, even though only one rank sends the result to SGLang</em>. Now the reason is visible. Each <code>full_tensor()</code> call is an all-gather — a collective operation in which every rank of the FSDP group must participate, because each rank holds a shard that the others need. If one rank skips the walk, the remaining ranks wait forever for its shard, and the sync deadlocks. The invariant is not a framework convention; it is the arithmetic of sharding.</p>
+        <p>The generator handles one named parameter at a time instead of first assembling a second full model. For a DTensor parameter, <code>param.to(device)</code> makes the local shard available on the accelerator if it was offloaded, and <code>full_tensor()</code> all-gathers the shards into the complete parameter. The final BF16 conversion reduces the representation passed downstream, although verl's nearby comment notes that some parameters, such as an MoE gate, may eventually need more selective precision control.</p>
 
-        <h3>RL pressure point 2: getting out of rollout's way</h3>
+        <p>The generator is lazy, but the collective is not optional. When the downstream rollout adapter asks for the next tensor, all ranks participating in that DTensor operation must reach the corresponding <code>full_tensor()</code> call. The ranks along the shard dimension own different pieces of the answer. If one participant skips that parameter or traverses parameters in a different order, the others can wait for a collective that never completes.</p>
 
-        <p>In a sleep-mode hybrid engine (<a href="#memory">Primitive ②</a>), trainer and rollout engine time-share the same GPUs. During rollout, the trainer's memory — even the sharded <code>1/N</code> — is dead weight that the inference engine needs for KV cache. verl's utilities move the FSDP shards and optimizer states to host memory and back around each phase: <code>offload_fsdp_model_to_cpu()</code> / <code>load_fsdp_model_to_gpu()</code> for parameters, <code>offload_fsdp_optimizer()</code> / <code>load_fsdp_optimizer()</code> for Adam states, with FSDP2 variants alongside.</p>
+        <p>verl decides whether to gather by checking the parameter representation: a <code>DTensor</code> is sharded, so it calls <code>full_tensor()</code>. OpenRLHF's DeepSpeed backend makes the same decision from the configured ZeRO stage. ZeRO-1 and ZeRO-2 leave parameters replicated; ZeRO-3 shards them, so only ZeRO-3 enables <code>GatheredParameters</code>:</p>
 
-        <p>One comment in the engine code is worth quoting because it shows how sharp the memory choreography is. verl <em>forces</em> CPU offload on for the reference policy and <em>forces</em> it off for the actor:</p>
+        <a class="source-badge" href="https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/ppo_actor.py" target="_blank"><span class="file-path">openrlhf/trainer/ray/ppo_actor.py</span><span class="file-meta">&middot; ZeRO stage changes weight materialization</span></a>
+<pre class="with-source"><code class="language-python">def _gather_params_ctx(param):
+    if self.strategy.args.ds.tensor_parallel_size &gt; 1:
+        return GatherReplacedLayerParams([param], model, enabled=True)
 
-<a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/transformer_impl.py" target="_blank"><span class="file-path">verl/workers/engine/fsdp/transformer_impl.py</span><span class="file-meta">· offload: forced on for ref, forced off for actor</span></a>
-<pre class="with-source"><code class="language-python"># We force reference policy to use CPUOffload to save memory.
-# We force turn off CPUOffload for actor because it causes incorrect results when using grad accumulation
-cpu_offload = None
-if self.engine_config.forward_only:
-    cpu_offload = CPUOffload(offload_params=True)</code></pre>
+    return deepspeed.zero.GatheredParameters(
+        [param],
+        <span class="code-hl">enabled=self.strategy.args.ds.zero_stage == 3</span>,
+    )
 
-        <p>The logic: the reference policy <code>π<sub>ref</sub></code> only ever runs forward (to supply the KL anchor), so its parameters can live on CPU and stream in per layer — slower, but it frees GPU memory for the actor. The actor cannot use the same trick, because FSDP1's automatic offload interacts incorrectly with gradient accumulation: gradients accumulated across microbatches must stay resident between backward passes. One flag, two opposite settings, both load-bearing.</p>
+for name, param in params_to_sync:
+    with <span class="code-hl">_gather_params_ctx(param)</span>:
+        sync_fn(param, count, num_params)</code></pre>
 
-        <p>The logprob recompute — <a href="#megatron">Obligation 1</a> from the Megatron section — runs under this same machinery, as a forward-only pass over the rollout tokens: one all-gather sweep through the layers, no backward, no gradient memory. verl marks these engines with the same <code>forward_only</code> flag shown above.</p>
+        <p>The first branch handles a separate source of sharding, tensor parallelism. Without TP, <code>GatheredParameters</code> is active only for ZeRO-3; it reconstructs <code>param</code> inside the <code>with</code> block and returns it to sharded form afterward. The difference from verl is the interface, not the required operation: verl uses a DTensor method, while OpenRLHF uses a DeepSpeed context manager.</p>
 
-        <h3>Choosing between the backbones</h3>
+        <h4>2. Releasing trainer memory during rollout</h4>
+
+        <p>Weight sync makes the new actor available to rollout, but it does not remove the trainer's copy. In a colocated setup, the same GPUs may still hold FSDP parameter shards and Adam state while the rollout engine is trying to allocate serving weights, CUDA-graph buffers, and KV cache. Sharding reduces the trainer's footprint to roughly <code>1/S</code> per rank; during rollout, even that smaller footprint may be unnecessary.</p>
+
+        <figure class="fsdp-memory-switch-figure">
+          <div class="diagram-scroll">
+          <svg viewBox="0 0 820 390" role="img" aria-labelledby="fsdp-memory-switch-title fsdp-memory-switch-desc">
+            <title id="fsdp-memory-switch-title">Trainer memory moves between GPU and CPU across RL phases</title>
+            <desc id="fsdp-memory-switch-desc">During training, FSDP parameter shards and optimizer state occupy GPU memory. At the phase switch they are offloaded to CPU. During rollout, serving weights, runtime buffers, and KV cache use GPU memory while trainer state waits on CPU. Before training resumes, rollout memory is released and trainer state is loaded back to GPU.</desc>
+            <defs>
+              <marker id="arrow-fsdp-memory" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L8,3 z" fill="#6656c8"></path>
+              </marker>
+              <marker id="arrow-fsdp-offload" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L8,3 z" fill="#c27716"></path>
+              </marker>
+              <marker id="arrow-fsdp-reload" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L8,3 z" fill="#16745d"></path>
+              </marker>
+              <style>
+                .fm-title { font: 600 18px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #27262b; }
+                .fm-head { font: 700 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #37323d; text-anchor: middle; }
+                .fm-lane { font: 700 11.5px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #5e5865; }
+                .fm-text { font: 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #4f4956; text-anchor: middle; }
+                .fm-small { font: 11px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #6a6470; text-anchor: middle; }
+                .fm-action { font: 600 11.5px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; }
+                .fm-column { fill: #fcfbfd; stroke: #ddd7e3; stroke-width: 1.2; rx: 8; }
+                .fm-gpu { fill: #eef6ff; stroke: #86afe0; stroke-width: 1.1; rx: 6; }
+                .fm-cpu { fill: #fff8e8; stroke: #dfb767; stroke-width: 1.1; rx: 6; }
+                .fm-rollout { fill: #ecfaf4; stroke: #72b99f; stroke-width: 1.1; rx: 6; }
+                .fm-item-train { fill: #dbeafe; stroke: #60a5fa; stroke-width: 1; rx: 4; }
+                .fm-item-opt { fill: #ede9fe; stroke: #a78bfa; stroke-width: 1; rx: 4; }
+                .fm-item-rollout { fill: #d1fae5; stroke: #34d399; stroke-width: 1; rx: 4; }
+                .fm-item-kv { fill: #fef3c7; stroke: #fbbf24; stroke-width: 1; rx: 4; }
+                .fm-time { stroke: #6656c8; stroke-width: 1.8; fill: none; marker-end: url(#arrow-fsdp-memory); }
+                .fm-offload { stroke: #c27716; stroke-width: 2; fill: none; marker-end: url(#arrow-fsdp-offload); }
+                .fm-reload { stroke: #16745d; stroke-width: 2; fill: none; marker-end: url(#arrow-fsdp-reload); }
+              </style>
+            </defs>
+
+            <text class="fm-title" x="20" y="30">Colocated RL: trainer state gives GPU memory to rollout</text>
+            <line class="fm-time" x1="185" y1="53" x2="232" y2="53"></line>
+            <line class="fm-time" x1="385" y1="53" x2="432" y2="53"></line>
+            <line class="fm-time" x1="585" y1="53" x2="632" y2="53"></line>
+
+            <rect class="fm-column" x="20" y="66" width="175" height="286"></rect>
+            <text class="fm-head" x="108" y="91">Training phase</text>
+            <text class="fm-lane" x="34" y="116">GPU</text>
+            <rect class="fm-gpu" x="34" y="126" width="147" height="126"></rect>
+            <rect class="fm-item-train" x="47" y="140" width="121" height="28"></rect><text class="fm-small" x="108" y="158">FSDP parameter shards</text>
+            <rect class="fm-item-opt" x="47" y="176" width="121" height="28"></rect><text class="fm-small" x="108" y="194">Adam state shards</text>
+            <rect class="fm-item-train" x="47" y="212" width="121" height="27"></rect><text class="fm-small" x="108" y="230">training activations</text>
+            <text class="fm-lane" x="34" y="275">CPU</text>
+            <rect class="fm-cpu" x="34" y="285" width="147" height="48"></rect>
+            <text class="fm-small" x="108" y="314">no parked trainer state</text>
+
+            <rect class="fm-column" x="220" y="66" width="175" height="286"></rect>
+            <text class="fm-head" x="308" y="91">Switch to rollout</text>
+            <text class="fm-text" x="308" y="126">new actor already synced</text>
+            <text class="fm-small" x="308" y="145">to the rollout engine</text>
+            <path class="fm-offload" d="M308 171 V268"></path>
+            <text class="fm-action" x="308" y="198" fill="#9a5d10">offload</text>
+            <text class="fm-small" x="308" y="218">parameter shards</text>
+            <text class="fm-small" x="308" y="236">optimizer state</text>
+            <text class="fm-small" x="308" y="254">GPU → CPU</text>
+            <text class="fm-small" x="308" y="314">released GPU capacity</text>
+
+            <rect class="fm-column" x="420" y="66" width="175" height="286"></rect>
+            <text class="fm-head" x="508" y="91">Rollout phase</text>
+            <text class="fm-lane" x="434" y="116">GPU</text>
+            <rect class="fm-rollout" x="434" y="126" width="147" height="126"></rect>
+            <rect class="fm-item-rollout" x="447" y="140" width="121" height="28"></rect><text class="fm-small" x="508" y="158">serving weights</text>
+            <rect class="fm-item-kv" x="447" y="176" width="121" height="28"></rect><text class="fm-small" x="508" y="194">KV cache</text>
+            <rect class="fm-item-rollout" x="447" y="212" width="121" height="27"></rect><text class="fm-small" x="508" y="230">runtime / CUDA graphs</text>
+            <text class="fm-lane" x="434" y="275">CPU</text>
+            <rect class="fm-cpu" x="434" y="285" width="147" height="48"></rect>
+            <text class="fm-small" x="508" y="305">trainer shards + Adam</text>
+            <text class="fm-small" x="508" y="321">wait here</text>
+
+            <rect class="fm-column" x="620" y="66" width="180" height="286"></rect>
+            <text class="fm-head" x="710" y="91">Return to training</text>
+            <text class="fm-small" x="710" y="116">rollout releases KV cache</text>
+            <text class="fm-small" x="710" y="134">and serving memory</text>
+            <rect class="fm-gpu" x="642" y="150" width="136" height="58"></rect>
+            <text class="fm-small" x="710" y="174">trainer shards + Adam</text>
+            <text class="fm-small" x="710" y="192">restored on GPU</text>
+            <path class="fm-reload" d="M710 274 V212"></path>
+            <text class="fm-action" x="754" y="235" fill="#12614e">reload</text>
+            <text class="fm-small" x="754" y="252">CPU → GPU</text>
+            <rect class="fm-cpu" x="642" y="278" width="136" height="42"></rect>
+            <text class="fm-small" x="710" y="303">trainer state on CPU</text>
+            <text class="fm-small" x="710" y="340">next actor update can begin</text>
+          </svg>
+          </div>
+          <figcaption><span class="fig-label">Figure.</span> Parameter and optimizer shards move off GPU during rollout, then return when actor training resumes.</figcaption>
+        </figure>
+
+        <p>The source below implements the trainer-state offload shown in the second column, separately for model shards and optimizer state:</p>
+
+        <a class="source-badge" href="https://github.com/verl-project/verl/blob/main/verl/utils/fsdp_utils.py" target="_blank"><span class="file-path">verl/utils/fsdp_utils.py</span><span class="file-meta">&middot; offload model and optimizer shards</span></a>
+<pre class="with-source"><code class="language-python">def offload_fsdp2_model_to_cpu(model, empty_cache=True):
+    <span class="code-hl">model.cpu()</span>
+    if empty_cache:
+        get_torch_device().empty_cache()
+
+def offload_fsdp_optimizer(optimizer):
+    for param_group in optimizer.param_groups:
+        for param in param_group["params"]:
+            state = optimizer.state[param]
+            for key, value in state.items():
+                if isinstance(value, torch.Tensor):
+                    <span class="code-hl">state[key] = value.to("cpu", non_blocking=True)</span></code></pre>
+
+        <p><code>model.cpu()</code> moves the FSDP2 parameter shards; the optimizer loop moves tensor-valued state such as Adam moments. The corresponding load functions reverse these transfers before training resumes.</p>
+
+        <h3>The interfaces a training script actually calls</h3>
+
+        <p>The mechanisms above appear through a few different outer APIs. This is useful when reading an unfamiliar training stack: first identify how the model enters distributed training, then inspect the strategy and mesh passed through that interface.</p>
+
+        <p><strong>PyTorch DDP and FSDP1 wrap a model.</strong> The constructor returns a new module-like object, and the training loop calls that wrapper in place of the original model. DDP replicates the model; FSDP1 can shard it according to <code>sharding_strategy</code>. Its <code>auto_wrap_policy</code> decides which submodules become separate FSDP units.</p>
+
+<pre><code class="language-python"># Replicated data parallelism
+model = DistributedDataParallel(model, device_ids=[local_rank])
+
+# FSDP1
+model = FullyShardedDataParallel(
+    model,
+    sharding_strategy=ShardingStrategy.FULL_SHARD,
+    auto_wrap_policy=transformer_wrap_policy,
+    device_mesh=mesh,
+)</code></pre>
+
+        <p><strong>FSDP2 transforms modules in place.</strong> <code>fully_shard()</code> changes the selected module's parameters into sharded <code>DTensor</code>s and installs the hooks that gather and reshard them. Calls are made from child modules toward the root, so each Transformer block can become its own communication unit.</p>
+
+<pre><code class="language-python">for block in model.transformer_blocks:
+    fully_shard(
+        block,
+        mesh=mesh,
+        reshard_after_forward=True,
+    )
+
+fully_shard(model, mesh=mesh, reshard_after_forward=False)</code></pre>
+
+        <p>The shape of <code>mesh</code> selects the placement. A one-dimensional mesh fully shards parameters across one group. A two-dimensional mesh replicates across one dimension and shards across the other, which gives FSDP2 its HSDP layout. HSDP therefore uses the same <code>fully_shard()</code> entry point; the mesh changes which ranks share and replicate each shard.</p>
+
+        <p><strong>DeepSpeed ZeRO is selected when the training engine is initialized.</strong> The model, optimizer, and configuration enter <code>deepspeed.initialize()</code>; the <code>zero_optimization.stage</code> field chooses which state classes DeepSpeed partitions. The returned engine becomes the object used for forward, backward, and optimizer steps.</p>
+
+<pre><code class="language-python">ds_config = {
+    "zero_optimization": {
+        "stage": 3,
+    }
+}
+
+engine, optimizer, _, scheduler = deepspeed.initialize(
+    model=model,
+    optimizer=optimizer,
+    config=ds_config,
+)
+
+outputs = engine(**batch)
+loss = outputs.loss
+engine.backward(loss)
+engine.step()</code></pre>
+
+        <div class="primer-box">
+          <p><strong>How to read these interfaces.</strong> <code>DistributedDataParallel(...)</code> signals replicated parameters. <code>FullyShardedDataParallel(...)</code> signals FSDP1, with the strategy and wrapping policy in constructor arguments. <code>fully_shard(...)</code> signals FSDP2, with unit boundaries determined by which modules receive the call and placement determined by the mesh. <code>deepspeed.initialize(...)</code> moves the same decision into a DeepSpeed configuration, where the ZeRO stage is the first field to inspect.</p>
+        </div>
+
+        <h3>Choosing a sharding strategy</h3>
 
         <table>
-          <thead><tr><th>Question</th><th>FSDP</th><th>Megatron</th></tr></thead>
+          <thead><tr><th>Situation</th><th>Useful starting point</th><th>Main tradeoff</th></tr></thead>
           <tbody>
             <tr>
-              <td>Starting from a HuggingFace checkpoint?</td>
-              <td>Loads directly; the model code is unchanged</td>
-              <td>Requires conversion (Megatron-Bridge) and a Megatron model definition</td>
+              <td>Complete parameters fit from forward through backward, and avoiding the backward parameter gather matters</td>
+              <td>ZeRO-2 or FSDP <code>SHARD_GRAD_OP</code> / <code>reshard_after_forward=False</code></td>
+              <td>ZeRO-2 keeps parameters replicated; FSDP may shard them outside computation but keeps them full between forward and backward. Both use more peak memory than full resharding</td>
             </tr>
             <tr>
-              <td>Parallelism dimensions</td>
-              <td>Sharded DP only (FSDP2 + TP via DTensor is emerging)</td>
-              <td>TP · PP · DP · EP · CP, freely composed</td>
+              <td>Replicated parameters do not fit, so parameter memory must also be divided across ranks</td>
+              <td>ZeRO-3, FSDP <code>FULL_SHARD</code>, or FSDP2 with <code>reshard_after_forward=True</code></td>
+              <td>Lowest persistent training-state memory; each FSDP unit is gathered for forward and gathered again for backward</td>
             </tr>
             <tr>
-              <td>Dense models, ~1B–100B</td>
-              <td>The comfortable default</td>
-              <td>Works, with more setup than the problem needs</td>
+              <td>A multi-node job has fast links within each node and slower links between nodes</td>
+              <td>HSDP, commonly sharding within a node and replicating that sharded model across nodes</td>
+              <td>Frequent parameter gathers stay inside the faster shard group, but training state is replicated across HSDP replica groups</td>
             </tr>
             <tr>
-              <td>MoE at DeepSeek scale</td>
-              <td>Out of reach — no expert parallelism</td>
-              <td>Native EP, plus the routing-replay invariants RL needs</td>
+              <td>An RL loop exports actor weights to rollout after every optimizer step</td>
+              <td>ZeRO-2 if complete parameters can remain resident; otherwise use a sharded strategy with an explicit materialization or repartition path</td>
+              <td>Replicated parameters are ready to export; sharded parameters must first be reconstructed or translated directly into serving-layout shards</td>
             </tr>
             <tr>
-              <td>Who uses it in this survey</td>
-              <td>verl (default), OpenRLHF, SkyRL, AReaL</td>
-              <td>slime, Miles, verl (as an option), Megatron's own <code>megatron/rl/</code></td>
+              <td>A new PyTorch training stack must compose sharding with TP or other mesh dimensions</td>
+              <td>FSDP2 with an explicit <code>DeviceMesh</code></td>
+              <td>The placement is easier to express and inspect, while checkpointing, offload, and integration code must work with <code>DTensor</code> parameters</td>
             </tr>
           </tbody>
         </table>
 
-        <p>The two backbones are not competitors so much as two answers to "where should parallelism live": inside the model definition (Megatron — maximal control, maximal ceiling) or wrapped around it (FSDP — minimal friction, DP-shaped ceiling). The four obligations from the Megatron section apply to both unchanged; only the machinery underneath differs. That is the real lesson of verl's backend-switch design: recompute, loss, packing, and weight materialization are the stable interface, and the training backbone behind them is a config flag.</p>
+        <p>FSDP and Megatron describe different layers of the distributed system. FSDP primarily decides how data-parallel training state is sharded and reconstructed. Megatron's TP, PP, CP, and EP decide how model computation and model structure are distributed. Modern stacks can compose these dimensions through device meshes, so the practical decision is no longer a strict choice between two mutually exclusive backbones. The useful questions are which dimension owns each parameter shard, which collective reconstructs it, and whether that collective matches the cluster topology and the RL phase schedule.</p>
 
         <div class="study">
-          <div class="study-title">Study resources — FSDP</div>
+          <div class="study-title">Study resources &mdash; FSDP, ZeRO, and HSDP</div>
           <ul>
-            <li><a href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/transformer_impl.py" target="_blank"><code>verl/workers/engine/fsdp/transformer_impl.py</code></a> — the full FSDP training engine: wrapping, offload, weight materialization</li>
-            <li><a href="https://github.com/verl-project/verl/blob/main/verl/utils/fsdp_utils.py" target="_blank"><code>verl/utils/fsdp_utils.py</code></a> — offload/load utilities, FSDP1/FSDP2 version handling</li>
-            <li><a href="https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html" target="_blank">PyTorch <code>fully_shard</code> docs</a> — the FSDP2 API and DTensor sharding</li>
-            <li><a href="https://arxiv.org/abs/1910.02054" target="_blank">ZeRO paper (arxiv 1910.02054)</a> — the original memory-sharding analysis</li>
+            <li><a href="https://arxiv.org/abs/1910.02054" target="_blank">ZeRO paper</a> &mdash; the original analysis of partitioning optimizer state, gradients, and parameters</li>
+            <li><a href="https://www.deepspeed.ai/tutorials/zero/" target="_blank">DeepSpeed ZeRO tutorial</a> &mdash; operational definitions of ZeRO stages 1, 2, and 3</li>
+            <li><a href="https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html" target="_blank">PyTorch FSDP2 documentation</a> &mdash; DTensor parameters, bottom-up grouping, HSDP meshes, and <code>reshard_after_forward</code></li>
+            <li><a href="https://docs.pytorch.org/docs/stable/fsdp.html" target="_blank">PyTorch FSDP1 documentation</a> &mdash; <code>FULL_SHARD</code>, <code>SHARD_GRAD_OP</code>, and hybrid strategies</li>
+            <li><a href="https://pytorch.org/blog/training-moes/" target="_blank">PyTorch: Training MoEs at Scale</a> &mdash; an example of composing HSDP with expert parallelism</li>
+            <li><a href="https://github.com/verl-project/verl/blob/main/verl/workers/engine/fsdp/transformer_impl.py" target="_blank"><code>verl/workers/engine/fsdp/transformer_impl.py</code></a> &mdash; FSDP1/FSDP2 construction and rollout weight materialization</li>
           </ul>
         </div>
       </section>
