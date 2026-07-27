@@ -1,0 +1,122 @@
+
+
+      <section id="four-paths">
+        <h3>④ Four <code>update_weights_from_*</code> paths, one verb</h3>
+
+        <p>Section ③ stopped at the handoff object: a bucket of updated weights may arrive as tensor handles prepared for the rollout TP group. SGLang still has to receive that object and write the new values into the serving model. The receiving side is not one fixed protocol. SGLang exposes several <code>update_weights_from_*</code> verbs because the updated weights can arrive from different places: live tensors, a checkpoint on disk, a distributed communication group, or IPC handles from nearby processes.</p>
+
+        <p>Read this section as the receiving-side taxonomy. Each path answers the same question: given a particular transport, how does the rollout engine load the updated actor and then make old cache state invalid?</p>
+
+        <figure>
+          <img src="diagrams/04-weight-update-paths.svg" alt="The four update_weights paths: from_tensor (same process, via ZMQ), from_disk (checkpoint on shared FS), from_distributed (NCCL broadcast across ranks), from_ipc (CUDA IPC same host, different processes).">
+          <figcaption><span class="fig-label">Figure 4.</span> One verb, four transports. Each maps to a real deployment topology.</figcaption>
+        </figure>
+
+        <p>The code below is the top-level receiving dispatcher. Each method delegates the physical loading to <code>tp_worker</code> or <code>draft_worker</code>, checks whether the update succeeded, and then runs the same cleanup: <code>flush_cache_after_weight_update</code>. The four transports differ in where the bytes or handles come from; the postcondition is shared.</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/managers/scheduler_components/weight_updater.py" target="_blank"><span class="file-path">python/sglang/srt/managers/scheduler_components/weight_updater.py</span><span class="file-meta">· four transports, one verb</span></a>
+<pre class="with-source"><code>class SchedulerWeightUpdaterManager:
+    def update_weights_from_disk(self, recv_req):
+        success, message = self.tp_worker.update_weights_from_disk(recv_req)
+        if success and self.draft_worker is not None:
+            success, message = self.draft_worker.update_weights_from_disk(recv_req)
+        if success:
+            self.flush_cache_after_weight_update(recv_req)
+        return UpdateWeightFromDiskReqOutput(success, message, 0)
+
+    def update_weights_from_distributed(self, recv_req):
+        success, message = self.tp_worker.update_weights_from_distributed(recv_req)
+        if success:
+            self.flush_cache_after_weight_update(recv_req)
+        return UpdateWeightsFromDistributedReqOutput(success, message)
+
+    def update_weights_from_tensor(self, recv_req):
+        worker = self.draft_worker or self.tp_worker
+        success, message = worker.update_weights_from_tensor(recv_req)
+        if success:
+            self.flush_cache_after_weight_update(recv_req)
+        torch.distributed.barrier(group=self.tp_cpu_group)
+        return UpdateWeightsFromTensorReqOutput(success, message)
+
+    def update_weights_from_ipc(self, recv_req):
+        success, message = self.tp_worker.update_weights_from_ipc(recv_req)
+        if success and self.draft_worker is not None:
+            success, message = self.draft_worker.update_weights_from_ipc(recv_req)
+        if success:
+            self.flush_cache_after_weight_update(recv_req)
+        torch.distributed.barrier(group=self.tp_cpu_group)
+        return UpdateWeightsFromIPCReqOutput(success, message)</code></pre>
+
+        <p><code>update_weights_from_disk</code> is the checkpoint path. The trainer first writes the updated actor to storage, and the rollout engine later reads it through SGLang's model loader. This path is conceptually simple: the receiving side only needs a model path and a load format. Its cost is that every update touches the storage system. The upside, as the Awesome-ML-SYS tutorial points out, is operational flexibility: a newly added rollout engine can read the same checkpoint without joining an already-created communication group.</p>
+
+        <p><code>update_weights_from_distributed</code> is the distributed communication path. The request tells SGLang the parameter names, dtypes, shapes, and group name. On the receiving side, each rollout rank allocates an empty tensor of the requested shape, receives data by <code>torch.distributed.broadcast(...)</code> from the update group, waits for the broadcasts to finish, and then calls <code>self.model.load_weights(weights)</code>:</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/model_executor/model_runner.py" target="_blank"><span class="file-path">python/sglang/srt/model_executor/model_runner.py</span><span class="file-meta">· distributed receive then load</span></a>
+<pre class="with-source"><code class="language-python">def update_weights_from_distributed(self, names, dtypes, shapes, group_name, load_format=None):
+    weights = []
+    handles = []
+    for name, dtype, shape in zip(names, dtypes, shapes):
+        weight = torch.empty(shape, dtype=target_dtype, device=self.device)
+        handles.append(torch.distributed.<span class="code-hl">broadcast</span>(
+            weight, src=0, group=self._model_update_group[group_name], async_op=True
+        ))
+        weights.append((name, weight))
+    for handle in handles:
+        handle.wait()
+    self.model.<span class="code-hl">load_weights</span>(weights)
+</code></pre>
+
+        <p>This path is useful when trainer and rollout are separate processes but have already joined the same distributed group. In plain terms, the processes have agreed on who is in the group and what rank each process has. That agreement is also the limitation: if a rollout worker is added, removed, or restarted, the group membership has to be handled again before this broadcast path can work reliably.</p>
+
+        <p><code>update_weights_from_tensor</code> is the handle path connected to Section ③. The request carries live tensor descriptors rather than a disk checkpoint. SGLang first applies <code>monkey_patch_torch_reductions()</code>, then unwraps each tensor with <code>_unwrap_tensor(..., tp_rank=self.tp_rank)</code>. If the tensor is a <code>LocalSerializedTensor</code>, that unwrap step selects the handle for the current serving TP rank and deserializes it into a tensor reference. Only after that does SGLang call <code>load_weights</code>:</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/model_executor/model_runner.py" target="_blank"><span class="file-path">python/sglang/srt/model_executor/model_runner.py</span><span class="file-meta">· tensor handles become rank-local tensors</span></a>
+<pre class="with-source"><code class="language-python">def update_weights_from_tensor(self, named_tensors, load_format=None):
+    <span class="code-hl">monkey_patch_torch_reductions</span>()
+    named_tensors = [
+        (name, <span class="code-hl">_unwrap_tensor</span>(tensor, tp_rank=self.tp_rank, device=infered_device))
+        for name, tensor in named_tensors
+    ]
+    self.model.<span class="code-hl">load_weights</span>(named_tensors)
+</code></pre>
+
+        <p>At this point the handle is no longer just a control-plane object. After <code>_unwrap_tensor(...)</code>, the current serving TP rank has a tensor it can pass to the model loader.</p>
+
+        <p><code>update_weights_from_ipc</code> is another handle-based path, but the handles come through SGLang's checkpoint-engine integration rather than the local tensor helper from Section ③.</p>
+
+        <div class="primer-box">
+          <strong>IPC handle.</strong>
+          <p>IPC means inter-process communication. Two processes on the same host cannot simply share a Python tensor object, because each process has its own Python heap and object identity. CUDA IPC gives them a lower-level option: one process exports a handle for a GPU allocation, and another process opens that handle to create its own tensor view of the same underlying GPU memory. The handle is small; the parameter values stay in GPU memory.</p>
+        </div>
+
+        <p>In this path, SGLang receives those handles over ZMQ (ZeroMQ, a small-message channel that carries handle metadata, not full tensor values) and hands them to the checkpoint-engine worker extension:</p>
+
+<a class="source-badge" href="https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/model_executor/model_runner.py" target="_blank"><span class="file-path">python/sglang/srt/model_executor/model_runner.py</span><span class="file-meta">· IPC handles through checkpoint engine</span></a>
+<pre class="with-source"><code class="language-python">def update_weights_from_ipc(self, recv_req):
+    worker = SGLangCheckpointEngineWorkerExtensionImpl(self)
+    worker.<span class="code-hl">update_weights_from_ipc</span>(recv_req.zmq_handles)</code></pre>
+
+        <p>This path is useful when the trainer-side process and rollout-side process are close enough to exchange GPU-memory handles directly, usually on the same machine. The important difference from the tensor path is where the handles come from: here they are produced and transported by the checkpoint-engine workflow, then imported by SGLang. Across all four paths, the shared idea is now visible: each transport produces rank-local tensors by a different route. Once SGLang has those tensors, it loads them into the serving model and lets the scheduler flush cache state that belonged to the old weights.</p>
+
+        <div class="extra-box">
+          <div class="extra-title">Extra case: large-cluster P2P weight transfer</div>
+
+          <p>The four SGLang paths above describe what the rollout engine can receive: tensors, disk checkpoints, distributed broadcasts, or IPC handles. The LMSYS P2P weight-transfer post looks one layer earlier in a much larger deployment: before one of those receiving paths can load the new weights, many trainer ranks and many inference ranks must decide how the updated shards travel across machines.</p>
+
+        <a class="source-badge" href="https://www.lmsys.org/blog/2026-04-29-p2p-update/" target="_blank"><span class="file-path">LMSYS: Updating 1T parameters in seconds</span><span class="file-meta">· large-scale weight transfer</span></a>
+
+        <figure>
+          <img src="diagrams/04b-lmsys-p2p-transfer.svg" alt="Broadcast-style transfer sends repeated large tensors from a small number of source ranks to many inference ranks. P2P transfer maps more source ranks to inference ranks and sends target-specific shards.">
+        </figure>
+
+        <p>The limitation appears most clearly in the distributed-broadcast path we just saw. That path is easy to integrate because SGLang can receive tensors through an existing distributed update group, but LMSYS points out what happens at larger scale. On the training side, ranks first all-gather along the tensor-parallel and expert-parallel dimensions, so a head rank for each pipeline-parallel stage holds a large gathered tensor. That head rank then broadcasts the weight to SGLang engine ranks, and each receiving engine rank loads only the shard it actually owns.</p>
+
+        <p>That explains the three bottlenecks named in the post. <strong>Redundancy</strong>: a broadcast can move data that a target inference rank will not keep after local loading. <strong>Inactivity</strong>: a few head/source ranks do most of the sending while many trainer ranks wait. <strong>Rigidity</strong>: the NCCL communication group has a fixed participant set, so adding or replacing inference engines requires managing that group again.</p>
+
+        <p>The new method changes the part after the training-side gather. It builds a transfer plan from training source ranks to SGLang target ranks, so the update is no longer concentrated on a few broadcast heads. A source-side CPU SGLang engine replica is the key adapter: it uses SGLang's serving-layout logic to turn the gathered training weight into the shard shape needed by a target engine rank, without storing an extra serving replica in GPU memory. Mooncake TransferEngine then moves those prepared shards through RDMA-style transfer. In practical terms, the transfer engine provides the data-moving channel: memory is registered for transfer, the network interface can move data with less CPU/kernel involvement than ordinary socket-style copying, and assigned peers can transfer independently instead of waiting for one global broadcast.</p>
+
+        <p>This is a tradeoff, not a free win. The CPU replica path still has to load tensors into a CPU-side model representation before sending them out. LMSYS reports the largest gains for large MoE models with high expert parallelism on the rollout side, where broadcast redundancy is severe. At smaller node counts or low expert parallelism, the local CPU loading cost can outweigh the P2P transfer benefit.</p>
+
+          <p>The takeaway is narrow but important: after the receiving API is understood, large-scale weight sync still needs a transfer plan. LMSYS improves the path by deciding which source rank prepares each serving-layout shard and which inference rank should receive it, instead of treating the update as one large broadcast.</p>
+        </div>
+      </section>

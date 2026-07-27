@@ -1,0 +1,98 @@
+
+
+      <section id="landscape">
+        <h2>The framework landscape</h2>
+
+        <p>Nine frameworks, all instantiations of the skeleton in Section 2. They differ on five axes: training backend, inference backend, orchestrator, placement policy, and target domain. Once you know the five axes, you can place every framework on a 5-dimensional map and the surface differences (DAPO vs PRIME vs GSPO vs OPD) collapse into local choices made within the same architectural envelope.</p>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Framework</th>
+              <th>Training</th>
+              <th>Inference</th>
+              <th>Orchestration</th>
+              <th>Domain</th>
+              <th>Distinctive bet</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><span class="label label-purple">Miles</span></td>
+              <td>Megatron (plugin)</td>
+              <td>SGLang</td>
+              <td>Ray</td>
+              <td>Frontier MoE</td>
+              <td>FP8/INT4 bit-identical · R3 routing replay</td>
+            </tr>
+            <tr>
+              <td><span class="label label-green">SLIME</span></td>
+              <td>Megatron</td>
+              <td>SGLang</td>
+              <td>Ray</td>
+              <td>Reasoning + agentic (GLM-5.1)</td>
+              <td>On-policy distillation · math/science graders</td>
+            </tr>
+            <tr>
+              <td><span class="label label-orange">SGLang</span></td>
+              <td>—</td>
+              <td>(itself)</td>
+              <td>—</td>
+              <td>Substrate</td>
+              <td>update_weights_from_* · RadixAttention</td>
+            </tr>
+            <tr>
+              <td><span class="label label-sky">SkyRL</span></td>
+              <td>FSDP / Megatron</td>
+              <td>vLLM / SGLang</td>
+              <td>Ray</td>
+              <td>Multi-turn agents</td>
+              <td>skyrl-gym + skyrl-agent + Tinker</td>
+            </tr>
+            <tr>
+              <td><span class="label label-nv">cosmos-rl</span></td>
+              <td>PyTorch + 6D parallel</td>
+              <td>vLLM / diffusers</td>
+              <td>Custom NCCL</td>
+              <td>Physical AI</td>
+              <td>WFM RL (DDRL) · FP8/MXFP4</td>
+            </tr>
+            <tr>
+              <td><span class="label label-rlinf">RLinf</span></td>
+              <td>FSDP + Megatron</td>
+              <td>SGLang + vLLM</td>
+              <td>Ray + M2Flow</td>
+              <td>Embodied + agentic</td>
+              <td>Macro→Micro flow: 2.43× from scheduling</td>
+            </tr>
+            <tr>
+              <td><span class="label label-verl">verl</span></td>
+              <td>FSDP / Megatron</td>
+              <td>vLLM / SGLang</td>
+              <td>Ray (HybridFlow)</td>
+              <td>Frontier LLM RL</td>
+              <td>3D-HybridEngine · DAPO/PRIME/GSPO recipes</td>
+            </tr>
+            <tr>
+              <td><span class="label label-openrlhf">OpenRLHF</span></td>
+              <td>DeepSpeed</td>
+              <td>vLLM</td>
+              <td>Centralized Ray</td>
+              <td>RLHF baseline</td>
+              <td>The OG · structurally synchronous</td>
+            </tr>
+            <tr>
+              <td><span class="label label-areal">AReaL</span></td>
+              <td>FSDP / Megatron</td>
+              <td>SGLang</td>
+              <td>Ray + async futures</td>
+              <td>Fully-async RL</td>
+              <td>_PendingWeightUpdateBucket · 2.77× speedup</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p>If you cluster these by their bet, three families emerge. <strong>LLM purists</strong> (Miles, SLIME, verl) make a tight Megatron + SGLang + Ray bet and innovate on numerics and algorithms. <strong>Agent platforms</strong> (SkyRL, RLinf) abstract environments and trade backend specificity for flexibility. The <strong>domain extender</strong> (cosmos-rl) brings RL to non-text modalities — diffusion video, robotics — and rebuilds orchestration around hardware. SGLang sits underneath all of them as substrate; AReaL and OpenRLHF are performance specialists that differ mainly in their async choice.</p>
+
+        <p>For a theorist, the useful exercise is to ask, for a given research result, which framework it was trained on and whether the framework's choices preserve the assumptions the result needs. A claim about variance reduction under GRPO needs the prefix cache to behave; a claim about MoE expert specialization needs the routing-replay invariant; a claim about off-policy correction needs the IS weights to actually be computed. The framework matters more than the algorithm name suggests.</p>
+      </section>

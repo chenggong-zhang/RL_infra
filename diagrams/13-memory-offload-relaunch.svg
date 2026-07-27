@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 900" role="img" aria-labelledby="title desc">
+  <title id="title">Offload weights to CPU or disk and relaunch inference</title>
+  <desc id="desc">Training step 1 keeps FSDP memory on GPU, offloads to disk and CPU memory, rollout step 1 reloads SGLang memory, and training step 2 reloads FSDP memory.</desc>
+  <defs>
+    <pattern id="blue-hatch" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="9" height="9" fill="#eaf6ff"/><line x1="0" y1="0" x2="0" y2="9" stroke="#8ecaf8" stroke-width="1.8"/></pattern>
+    <pattern id="green-hatch" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="9" height="9" fill="#effcee"/><line x1="0" y1="0" x2="0" y2="9" stroke="#8cdf9b" stroke-width="1.8"/></pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="#25222a"/></marker>
+    <style>
+      .bg{fill:#fbfaf7}.gpu{fill:#fff;stroke:#24222a;stroke-width:2;rx:16}.disk{fill:#fff;stroke:#24222a;stroke-width:2;rx:14}.blue{fill:url(#blue-hatch);stroke:#24222a;stroke-width:1.7;rx:12}.green{fill:url(#green-hatch);stroke:#24222a;stroke-width:1.7;rx:12}
+      .title{font:700 28px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#24222a}.phase{font:700 24px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#24222a}.label{font:700 22px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#24222a}.small{font:600 16px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#5d5862}.wire{fill:none;stroke:#24222a;stroke-width:2;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect class="bg" width="1320" height="900"/>
+  <text class="title" x="58" y="50">v1: offload one side, relaunch the other</text>
+
+  <text class="phase" x="122" y="92">Training Step 1</text>
+  <text class="phase" x="548" y="92">Rollout Step 1</text>
+  <text class="phase" x="1024" y="92">Training Step 2</text>
+
+  <rect class="gpu" x="40" y="138" width="370" height="560"/>
+  <rect class="green" x="58" y="286" width="334" height="382"/>
+  <text class="label" x="183" y="334">FSDP</text>
+  <rect class="green" x="70" y="358" width="310" height="48"/>
+  <text class="label" x="145" y="389">Training Model</text>
+  <rect class="green" x="70" y="418" width="310" height="46"/>
+  <text class="label" x="169" y="449">Gradients</text>
+  <rect class="green" x="70" y="476" width="310" height="90"/>
+  <text class="label" x="130" y="531">Optimizer States</text>
+  <rect class="green" x="70" y="580" width="310" height="78"/>
+  <text class="label" x="156" y="628">Activations</text>
+
+  <rect class="gpu" x="472" y="138" width="370" height="560"/>
+  <rect class="blue" x="492" y="150" width="330" height="386"/>
+  <text class="label" x="610" y="184">SGLang</text>
+  <rect class="blue" x="510" y="204" width="294" height="44"/>
+  <text class="label" x="591" y="235">CUDA Graph</text>
+  <rect class="blue" x="510" y="260" width="294" height="156"/>
+  <text class="label" x="612" y="346">KV Cache</text>
+  <rect class="blue" x="510" y="426" width="294" height="96"/>
+  <text class="label" x="574" y="484">Serving Model</text>
+
+  <rect class="gpu" x="910" y="138" width="370" height="560"/>
+  <rect class="green" x="928" y="290" width="334" height="382"/>
+  <text class="label" x="1053" y="338">FSDP</text>
+  <rect class="green" x="940" y="362" width="310" height="48"/>
+  <text class="label" x="1015" y="393">Training Model</text>
+  <rect class="green" x="940" y="422" width="310" height="46"/>
+  <text class="label" x="1039" y="453">Gradients</text>
+  <rect class="green" x="940" y="480" width="310" height="90"/>
+  <text class="label" x="1000" y="535">Optimizer States</text>
+  <rect class="green" x="940" y="584" width="310" height="78"/>
+  <text class="label" x="1026" y="632">Activations</text>
+
+  <rect class="disk" x="52" y="730" width="1210" height="122"/>
+  <text class="label" x="540" y="802">DISK and CPU Memory</text>
+  <path class="wire" d="M258 668 C364 716,520 726,624 730"/>
+  <path class="wire" d="M656 730 V538"/>
+  <path class="wire" d="M740 730 C850 720,955 705,1038 672"/>
+  <text class="small" x="476" y="870">Lower simultaneous GPU residency, but reload and CUDA graph setup sit on the phase boundary.</text>
+</svg>

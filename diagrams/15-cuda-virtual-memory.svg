@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1310 656" role="img" aria-labelledby="title desc">
+  <title id="title">CUDA virtual memory allocation metadata</title>
+  <desc id="desc">Physical memory is created with cuMemCreate, virtual memory is reserved with cuMemAddressReserve, cuMemMap maps the physical memory to the virtual address, and a metadata map stores pointer to metadata.</desc>
+  <defs>
+    <pattern id="green-hatch" width="9" height="9" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="9" height="9" fill="#effcee"/><line x1="0" y1="0" x2="0" y2="9" stroke="#8cdf9b" stroke-width="1.7"/></pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="#24222a"/></marker>
+    <style>
+      .bg{fill:#fbfaf7}.box{fill:#fff;stroke:#24222a;stroke-width:2;rx:14}.green{fill:url(#green-hatch);stroke:#24222a;stroke-width:1.6;rx:10}.line{stroke:#24222a;stroke-width:1.8}.wire{fill:none;stroke:#24222a;stroke-width:2;marker-end:url(#arrow)}.wire-no{fill:none;stroke:#24222a;stroke-width:2}
+      .title{font:700 19px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#24222a}.label{font:700 21px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#24222a}.small{font:600 16px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#24222a}.addr{font:700 19px ui-monospace,SFMono-Regular,Menlo,monospace;fill:#24222a}
+    </style>
+  </defs>
+  <rect class="bg" width="1310" height="656"/>
+
+  <text class="title" x="908" y="150">1. create handler</text>
+  <text class="title" x="908" y="176">and call cuMemCreate</text>
+  <rect class="box" x="908" y="204" width="350" height="268"/>
+  <rect class="green" x="922" y="220" width="320" height="72"/>
+  <text class="small" x="1044" y="264">occupied</text>
+  <line class="line" x1="918" y1="300" x2="1250" y2="300"/>
+  <text class="small" x="1028" y="354">available</text>
+  <line class="line" x1="918" y1="396" x2="1250" y2="396"/>
+  <text class="small" x="1028" y="444">available</text>
+  <text class="label" x="1004" y="610">Physical Memory</text>
+
+  <text class="title" x="500" y="86">2. cuMemAddressReserve</text>
+  <rect class="box" x="430" y="104" width="332" height="440"/>
+  <rect class="green" x="442" y="126" width="306" height="80"/>
+  <text class="small" x="552" y="174">occupied</text>
+  <line class="line" x1="438" y1="224" x2="754" y2="224"/>
+  <text class="small" x="544" y="266">available</text>
+  <line class="line" x1="438" y1="318" x2="754" y2="318"/>
+  <text class="small" x="544" y="348">available</text>
+  <text class="small" x="544" y="398">available</text>
+  <text class="small" x="544" y="448">available</text>
+  <line class="line" x1="438" y1="484" x2="754" y2="484"/>
+  <text class="small" x="544" y="522">available</text>
+  <text class="label" x="500" y="610">Virtual Memory</text>
+  <text class="addr" x="318" y="156">0x000</text>
+  <text class="addr" x="318" y="248">0x100</text>
+  <text class="addr" x="335" y="414">...</text>
+  <text class="addr" x="318" y="526">0xffff</text>
+
+  <text class="title" x="786" y="292">3. cuMemMap</text>
+  <path class="wire" d="M764 142 H836 C850 142,850 200,866 200 H906"/>
+
+  <text class="title" x="34" y="76">4. unordered_map</text>
+  <text class="title" x="34" y="102">::emplace</text>
+  <rect class="box" x="34" y="116" width="274" height="434"/>
+  <rect class="green" x="42" y="128" width="250" height="84"/>
+  <text class="small" x="82" y="180">ptr → metadata</text>
+  <line class="line" x1="38" y1="224" x2="302" y2="224"/>
+  <text class="label" x="82" y="608">Metadata Map</text>
+  <path class="wire-no" d="M430 166 H308"/>
+  <path class="wire" d="M308 166 H306"/>
+</svg>

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 540" font-family="system-ui, -apple-system, sans-serif">
-  <title>The hybrid engine memory choreography (训推一体)</title>
-  <desc>One GPU, two roles. The timeline shows how release_memory_occupation / resume_memory_occupation swap memory ownership between inference and training.</desc>
+  <title>Memory phase switch for colocated rollout and training</title>
+  <desc>The timeline shows how rollout memory is released before actor training and resumed before the next rollout on a shared GPU allocation.</desc>
 
   <defs>
     <marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -10,8 +10,8 @@
   </defs>
 
   <rect width="1000" height="540" fill="#ffffff"/>
-  <text x="500" y="40" text-anchor="middle" font-size="22" font-weight="600" fill="#27262b">The hybrid engine memory choreography</text>
-  <text x="500" y="62" text-anchor="middle" font-size="13" fill="#5c5962">训推一体 — one GPU, two roles. Serialize them in time; swap memory ownership with two function calls.</text>
+  <text x="500" y="40" text-anchor="middle" font-size="22" font-weight="600" fill="#27262b">Memory phase switch for colocated RL</text>
+  <text x="500" y="62" text-anchor="middle" font-size="13" fill="#5c5962">One GPU allocation alternates between a rollout memory shape and a training memory shape.</text>
 
   <!-- Timeline axis -->
   <line x1="80" y1="450" x2="940" y2="450" stroke="#27262b" stroke-width="1.5" marker-end="url(#arr3)"/>
@@ -63,7 +63,7 @@
   <!-- T=1: Release -->
   <g>
     <rect x="230" y="105" width="100" height="32" fill="#b85c00" opacity="0.85"/>
-    <text x="280" y="125" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">weights ↓</text>
+    <text x="280" y="125" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">weights/offload</text>
     <rect x="230" y="142" width="100" height="32" fill="#fff" stroke="#dd2e2e" stroke-dasharray="3,3"/>
     <text x="280" y="162" text-anchor="middle" font-size="10" fill="#dd2e2e" font-weight="600">freed</text>
     <rect x="230" y="179" width="100" height="22" fill="#fff" stroke="#dd2e2e" stroke-dasharray="3,3"/>
@@ -95,7 +95,7 @@
     <rect x="650" y="105" width="100" height="32" fill="#b85c00" opacity="0.85"/>
     <text x="700" y="125" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">new weights</text>
     <rect x="650" y="142" width="100" height="32" fill="#b85c00" opacity="0.55"/>
-    <text x="700" y="162" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">KV restored</text>
+    <text x="700" y="162" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">KV capacity</text>
     <rect x="650" y="179" width="100" height="22" fill="#b85c00" opacity="0.3"/>
     <text x="700" y="194" text-anchor="middle" font-size="10" fill="#fff" font-weight="600">CUDA graphs</text>
   </g>
@@ -139,10 +139,10 @@
   <text x="635" y="320" text-anchor="middle" font-size="10" fill="#026e57" font-weight="600">occupation()</text>
 
   <line x1="640" y1="350" x2="640" y2="350" stroke="#026e57"/>
-  <text x="635" y="345" text-anchor="middle" font-size="10" fill="#026e57">+ update_weights_from_distributed()</text>
+  <text x="635" y="345" text-anchor="middle" font-size="10" fill="#026e57">+ weight sync when actor changed</text>
 
   <!-- Key insight at bottom -->
   <rect x="200" y="370" width="600" height="50" rx="6" fill="#f5f2ff" stroke="#7253ed"/>
-  <text x="500" y="390" text-anchor="middle" font-size="12" font-weight="600" fill="#27262b">Key insight: the GPU is owned by exactly ONE role at any moment.</text>
-  <text x="500" y="408" text-anchor="middle" font-size="11" fill="#5c5962">Two functions encode the entire concurrency contract. No locks, no races, no torn reads.</text>
+  <text x="500" y="390" text-anchor="middle" font-size="12" font-weight="600" fill="#27262b">Key insight: the active memory shape changes at phase boundaries.</text>
+  <text x="500" y="408" text-anchor="middle" font-size="11" fill="#5c5962">Release/resume are the inference-engine side of a larger framework protocol.</text>
 </svg>

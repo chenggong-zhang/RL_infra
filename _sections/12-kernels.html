@@ -1,0 +1,320 @@
+
+
+      <section id="kernels">
+        <h2>The layer beneath: CUDA, Triton, and TileLang</h2>
+
+        <p>So far we have stayed at the RL infrastructure layer: how rollout, training, memory, cache, and weight sync are organized. This section goes one layer deeper. Those infrastructure choices eventually depend on GPU programs that implement attention, GEMM, normalization, softmax, and tensor movement. To understand why one rollout engine or training backend can be much faster than another, we need a basic map of the layer below PyTorch: CUDA, kernel libraries, and Python kernel DSLs such as Triton and TileLang.</p>
+
+        <figure>
+          <img src="diagrams/17-gpu-software-stack.svg" alt="Layered GPU software stack for RL infrastructure: RL frameworks at the top, training and inference engines below, then PyTorch operators, CUDA APIs, Triton and TileLang kernel DSLs, vendor libraries, and GPU hardware at the bottom.">
+          <figcaption><span class="fig-label">Figure 8.</span> The stack below RL infrastructure. Python appears in several different roles: ordinary framework control code, PyTorch tensor code, CUDA bindings, and kernel DSLs such as Triton or TileLang.</figcaption>
+        </figure>
+
+        <h3>A GPU mental model</h3>
+
+        <figure>
+          <div class="photo-grid">
+            <img src="https://developer-blogs.nvidia.com/wp-content/uploads/2022/03/SXM5-White-4-NEW-FINAL-625x291.jpg" alt="NVIDIA H100 SXM module photographed from above.">
+            <img src="https://developer-blogs.nvidia.com/wp-content/uploads/2020/05/HGX_A100_8_way.jpg" alt="NVIDIA HGX A100 8-GPU baseboard with multiple GPU modules.">
+          </div>
+          <figcaption><span class="fig-label">Physical anchor.</span> A single accelerator module such as H100 is already a dense compute device; a server platform such as HGX A100 places many such accelerators together. Images: NVIDIA Technical Blog, <a href="https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/" target="_blank">Hopper architecture</a> and <a href="https://developer.nvidia.com/blog/introducing-hgx-a100-most-powerful-accelerated-server-platform-for-ai-hpc/" target="_blank">HGX A100</a>.</figcaption>
+        </figure>
+
+        <p>At the lowest level, a computer manipulates bits through circuits. A bit is represented physically, for example by a voltage state that the circuit treats as <code>0</code> or <code>1</code>. Logic gates combine those bit signals: an <code>AND</code> gate asks whether two inputs are both <code>1</code>, an <code>OR</code> gate asks whether at least one is <code>1</code>, and a <code>NOT</code> gate flips the signal. Larger circuits compose these small decisions into arithmetic units, registers, and control logic. Arithmetic units perform operations such as addition or multiplication. Registers are tiny, fast storage locations that hold values currently being used. Control logic decides which operation should run next and how data should move through the machine.</p>
+
+        <figure>
+          <img src="diagrams/21b-logic-gates-illustration.png" alt="Lecture-note style illustration of 0/1 voltage states, AND OR NOT gates, and gates combining into arithmetic units and processor components.">
+          <figcaption><span class="fig-label">Logic gates.</span> The hardware story starts with simple 0/1 signals and gates. The details become complicated quickly, but the mental model is simple: many tiny bit operations are composed into units that can store values, add numbers, and execute instructions.</figcaption>
+        </figure>
+
+        <figure>
+          <img src="diagrams/21-bits-to-gpu.svg" alt="A conceptual ladder from bits to logic gates, arithmetic units, processors, and GPU SM organization.">
+          <figcaption><span class="fig-label">From bits upward.</span> We only need the high-level ladder: gates build units, units build processors, and GPUs organize many simple execution lanes into SMs.</figcaption>
+        </figure>
+
+        <p>A processor is an organized machine for repeatedly reading instructions, moving values through registers and memory, and applying arithmetic units to those values. A GPU uses the same basic ingredients, but spends them differently. Instead of concentrating most resources into a few very flexible cores, it spreads many arithmetic units and registers across many parallel execution lanes, so the same kind of numeric operation can run on many pieces of data at once.</p>
+
+        <figure>
+          <img src="diagrams/21c-gpu-processor-layout.png" alt="Lecture-note style illustration comparing a CPU with a few flexible cores to a GPU with many SMs and many execution lanes.">
+          <figcaption><span class="fig-label">GPU organization.</span> The GPU keeps the same basic ingredients as a processor, but repeats and arranges them for parallel numeric work: many SMs, many lanes, many registers, and shared memory close to the arithmetic units.</figcaption>
+        </figure>
+
+        <p>On NVIDIA GPUs, the repeated local compute units are called streaming multiprocessors, usually abbreviated as <code>SMs</code>. An SM has schedulers, registers, shared memory, and arithmetic units. A large GPU has many SMs, and each SM can keep many lightweight threads in flight.</p>
+
+        <div class="compare-box">
+          <div class="compare-card">
+            <h5>CPU: strong control, limited parallel lanes</h5>
+            <p><strong>Good at:</strong> branching logic, operating-system work, scheduling, data loading, Python control flow, and irregular tasks where each step may do something different.</p>
+            <p><strong>Weak at:</strong> applying the same numeric operation to millions of tensor elements. A CPU has powerful cores, but not enough parallel lanes to make large matrix and attention workloads cheap.</p>
+          </div>
+          <div class="compare-card">
+            <h5>GPU: many lanes, weaker control</h5>
+            <p><strong>Good at:</strong> regular numeric workloads such as GEMM, attention, softmax, normalization, and batched tensor movement, where many lanes can run similar instructions on different data.</p>
+            <p><strong>Weak at:</strong> highly irregular branching, small sequential tasks, and workloads that constantly move data without enough arithmetic reuse. A GPU is fast only when the work is shaped for it.</p>
+          </div>
+        </div>
+
+        <p>A <code>program</code> is a sequence of instructions that hardware can execute: load values, multiply or add them, compare conditions, store results, and move to the next instruction. At this level, the machine does not see "matrix multiplication" as a mathematical object. It sees a schedule of small steps through registers, arithmetic units, and memory. The role of code is to express the task in a human-writable form, then let compilers and runtimes lower it into such a program.</p>
+
+        <figure>
+          <img src="diagrams/21d-code-to-instructions.png" alt="Lecture-note style illustration showing human-written code lowered by a compiler or runtime into load multiply add store instructions that move data through registers, arithmetic units, memory, and control logic.">
+          <figcaption><span class="fig-label">From code to instructions.</span> Human-written code is not what the hardware executes directly. A compiler or runtime lowers it into instruction streams that move values through registers, arithmetic units, memory, and control logic.</figcaption>
+        </figure>
+
+        <p>Now we can define <code>kernel</code> and <code>thread</code>. A GPU <code>kernel</code> is the GPU-side function body that the runtime launches over many parallel work items. Unlike an ordinary procedure call, a kernel is called, or <em>launched</em>, once and returns once, but it is executed many times: one execution per GPU thread. A GPU <code>thread</code> is one such execution instance of the kernel body. Each thread receives a logical position in the launched work: which CUDA <code>block</code>, or thread group, it belongs to and where it sits inside that block. The kernel code uses that position to decide which part of the data this thread is responsible for.</p>
+
+        <p>This is why GPU threads are lightweight. They are not like independent CPU threads running complicated unrelated tasks. They are many simple copies of the same program, spread over a large numeric index space: tensor elements, row fragments, tile positions, or token-related slots.</p>
+
+        <p>GPU threads are not scheduled one by one. They are scheduled in small groups called <code>warps</code>; on NVIDIA hardware, a warp is usually 32 threads. Think of a warp as a small team of threads moving together: the team usually follows one instruction stream, while each thread applies that instruction to its own data position (<code>SIMT</code>, single instruction, multiple threads).</p>
+
+        <h3>CUDA: launching parallel work</h3>
+
+        <p>CUDA is NVIDIA's GPU programming platform. It is not only a library, and it is not ordinary C. It includes several layers that work together:</p>
+
+        <div class="primer-box">
+          <p><strong>CUDA C/C++ language extensions.</strong> CUDA adds GPU-specific syntax and built-ins to C/C++, such as <code>__global__</code>, <code>threadIdx.x</code>, <code>blockIdx.x</code>, and the launch syntax <code>&lt;&lt;&lt;...&gt;&gt;&gt;</code>.</p>
+          <p><strong>CUDA compiler toolchain.</strong> The CUDA compiler, commonly <code>nvcc</code>, compiles CUDA C++ into host code that runs on the CPU and device code that runs on the GPU.</p>
+          <p><strong>CUDA runtime and driver APIs.</strong> These APIs launch kernels, allocate GPU memory, copy data, manage streams and events, and synchronize work.</p>
+          <p><strong>CUDA libraries.</strong> Libraries such as cuBLAS, cuDNN, NCCL, and CUTLASS provide highly optimized building blocks for linear algebra, neural-network kernels, communication, and tensor-core programming.</p>
+        </div>
+
+        <p>The simplest CUDA example is elementwise addition. The kernel body says what one GPU thread should do; the launch configuration says how many thread groups should be created:</p>
+
+<pre class="with-source"><code>__global__ void add_kernel(float* out, const float* a, const float* b, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i &lt; n) {
+        out[i] = a[i] + b[i];
+    }
+}
+
+int block_size = 256;
+int num_blocks = (n + block_size - 1) / block_size;
+add_kernel&lt;&lt;&lt;num_blocks, block_size&gt;&gt;&gt;(out, a, b, n);</code></pre>
+
+        <p>This tiny example contains the CUDA idea. <code>add_kernel</code> is written once, but the launch creates many GPU threads. <code>threadIdx.x</code> is the thread's position inside its CUDA block. <code>blockIdx.x</code> is the block's position inside the launched grid. <code>blockDim.x</code> is the number of threads in each block. Together they compute <code>i</code>, the data position owned by this thread. CUDA therefore gives the programmer a way to turn an indexed computation over an array into many parallel thread executions.</p>
+
+        <p>The launch syntax in the example, <code>&lt;&lt;&lt;num_blocks, block_size&gt;&gt;&gt;</code>, is CUDA's way of creating this structure. It creates a <code>grid</code> with <code>num_blocks</code> CUDA blocks. Each block contains <code>block_size</code> GPU threads. The hardware scheduler places blocks onto SMs. Threads inside the same block can cooperate through shared memory and block-level synchronization.</p>
+
+        <figure>
+          <img src="diagrams/21e-cuda-index-mapping.png" alt="Lecture-note style illustration of CUDA index mapping from launch syntax to blocks, threads, the formula i equals blockIdx times blockDim plus threadIdx, and output array positions.">
+          <figcaption><span class="fig-label">CUDA index mapping.</span> The launch creates many thread executions. Each thread uses its block position and thread position to compute the data index it owns.</figcaption>
+        </figure>
+
+        <figure>
+          <img src="diagrams/21f-cuda-block-sm-scheduling.png" alt="Lecture-note style illustration showing that CUDA blocks are scheduled onto SMs, one SM can host multiple blocks, and threads in one block stay together for shared memory and synchronization.">
+          <figcaption><span class="fig-label">Block-to-SM scheduling.</span> A thread does not get its own SM. A whole CUDA block is scheduled onto an SM; one SM can host multiple resident blocks, and threads in the same block stay together so they can use shared memory and block-level synchronization.</figcaption>
+        </figure>
+
+        <h3>CUDA memory: where values live</h3>
+
+        <p>CUDA does more than launch threads and blocks. It also defines how GPU memory is allocated, accessed, and synchronized. There are two levels to keep separate. At the API level, CUDA lets the program allocate GPU memory, copy data, share memory between processes, and synchronize work. At the kernel level, the question is more local: when a thread needs a value, where does that value live, and how many times will the kernel have to fetch it?</p>
+
+        <p>The important memory spaces are not equally fast. <code>Registers</code> are private to one thread and are the fastest place to keep values currently being used. <code>Shared memory</code> is visible to threads inside one CUDA block; it lets those threads cooperate on a tile of data. <code>Global memory</code>, usually HBM on modern accelerators, is much larger, but reading it repeatedly is expensive. Hardware caches such as L2 sit between global memory and the SMs, but a kernel writer still has to care about access patterns.</p>
+
+        <figure>
+          <img src="diagrams/21g-cuda-memory-spaces.png" alt="Lecture-note style illustration of CUDA memory spaces: global memory or HBM, L2 cache, shared memory visible to one CUDA block, and registers private to one thread.">
+          <figcaption><span class="fig-label">CUDA memory spaces.</span> Registers are private to one thread; shared memory belongs to a CUDA block; global memory is large but expensive to read repeatedly. Fast kernels reuse data after moving it closer to the arithmetic units.</figcaption>
+        </figure>
+
+        <h3>PyTorch on CUDA, and why CUDA Graphs exist</h3>
+
+        <p>Most RL infrastructure code does not call CUDA kernels directly. It calls PyTorch. The CUDA connection appears when a PyTorch tensor is placed on a CUDA device:</p>
+
+<pre class="with-source"><code>x = torch.randn(4096, 4096, device="cuda")
+w = torch.randn(4096, 4096, device="cuda")
+
+y = x @ w
+z = torch.softmax(y, dim=-1)</code></pre>
+
+        <p>Putting a tensor on a CUDA device separates two things. The Python variable <code>x</code> is still a PyTorch object that the CPU-side Python program can hold, pass around, and inspect as metadata: shape, dtype, device, strides, and a pointer-like reference to storage. The numerical values of the tensor, however, live in GPU memory. So <code>device="cuda"</code> means the tensor's storage is allocated on a CUDA-capable GPU, not that Python itself is running on the GPU.</p>
+
+        <p>That is why the line <code>y = x @ w</code> does not multiply matrices in the Python interpreter. Python asks PyTorch to run a matrix multiply on CUDA tensors. PyTorch checks the tensor metadata, chooses an appropriate CUDA-backed implementation, often a vendor library such as cuBLAS or a generated kernel, and launches GPU work. The line <code>torch.softmax(...)</code> similarly becomes one or more GPU operations over buffers that live in GPU memory.</p>
+
+        <p>One detail is easy to miss: PyTorch CUDA calls are often asynchronous with respect to the CPU. The Python thread asks CUDA to do some GPU work, puts that work into a queue, and then may continue running before the GPU has finished. This is usually fine because later GPU operations in the same stream will wait in order. But if the CPU needs the result now, or if systems code is measuring time or reusing memory across components, it must explicitly wait:</p>
+
+<pre class="with-source"><code>y = x @ w                  # enqueue GPU work
+z = torch.softmax(y, -1)   # enqueue more GPU work
+
+torch.cuda.synchronize()   # wait until queued CUDA work is done</code></pre>
+
+        <p>Now consider what happens when the same CUDA workload repeats. In ordinary PyTorch eager execution, every iteration still walks through the host-side path again: Python calls a PyTorch op, PyTorch dispatches the op, CUDA launches the needed kernels, and the driver submits those launches to the GPU. The GPU may be doing the same shape of work each time, but the CPU side still rebuilds the launch sequence each time.</p>
+
+        <p><code>CUDA Graphs</code> are designed for that repeated-static case. If the operation pattern, tensor shapes, and memory addresses are stable, the system can capture the CUDA work once as a graph. Later iterations replay the captured graph instead of rediscovering and relaunching the same sequence from scratch. The computation is the same; the difference is that the launch path becomes cheaper and more predictable.</p>
+
+        <a class="source-badge" href="https://docs.pytorch.org/docs/stable/notes/cuda.html#cuda-graphs" target="_blank"><span class="file-path">PyTorch CUDA semantics</span><span class="file-meta">· CUDA Graphs and stream capture</span></a>
+        <p>Step 1: prepare the GPU memory that the graph will use. <code>static_x</code> and <code>static_w</code> are input buffers, and <code>static_out</code> is the output buffer. We save their addresses with <code>data_ptr()</code> only so we can later check that replay is using the same buffers, not newly allocated ones:</p>
+
+<pre class="with-source"><code>g = torch.cuda.CUDAGraph()
+
+static_x = torch.empty((2, 2), device="cuda")
+static_w = torch.empty((2, 2), device="cuda")
+static_out = torch.empty((2, 2), device="cuda")
+
+x_ptr = static_x.data_ptr()
+w_ptr = static_w.data_ptr()</code></pre>
+
+        <p>Step 2: capture the operation pattern once. This records GPU work that reads from <code>static_x</code> and <code>static_w</code>, then writes to <code>static_out</code>:</p>
+
+<pre class="with-source"><code>with torch.cuda.graph(g):
+    torch.add(static_x, static_w, out=static_out)</code></pre>
+
+        <p>After this capture, <code>g</code> contains the execution plan for this fixed CUDA work: read from the GPU memory address of <code>static_x</code>, read from the GPU memory address of <code>static_w</code>, run the add kernel, and write the result to the GPU memory address of <code>static_out</code>.</p>
+
+        <p>Step 3: replay the same captured work on new values. The contents change, but the storage addresses stay the same:</p>
+
+<pre class="with-source"><code>static_x.copy_(torch.ones((2, 2), device="cuda"))
+static_w.copy_(2 * torch.ones((2, 2), device="cuda"))
+g.replay()
+print(static_x.data_ptr() == x_ptr, static_w.data_ptr() == w_ptr)
+print(static_out.cpu())
+
+static_x.copy_(10 * torch.ones((2, 2), device="cuda"))
+static_w.copy_(20 * torch.ones((2, 2), device="cuda"))
+g.replay()
+print(static_x.data_ptr() == x_ptr, static_w.data_ptr() == w_ptr)
+print(static_out.cpu())</code></pre>
+
+<pre class="with-source"><code>True True
+tensor([[3., 3.],
+        [3., 3.]])
+
+True True
+tensor([[30., 30.],
+        [30., 30.]])</code></pre>
+
+        <p>The output is the lesson. The addresses are stable both times, but the numerical result changes from <code>3</code> to <code>30</code>. So the graph did not save the first values. It saved a reusable GPU execution pattern over fixed buffers.</p>
+
+        <h3>CUDA from Python</h3>
+
+        <p>The main lesson so far is that Python can touch CUDA at different depths. Most RL code stays at the PyTorch level: tensors live on CUDA devices, and PyTorch dispatches operations to CUDA kernels or vendor libraries. Sometimes, however, infrastructure code needs a lower-level CUDA handle: allocate memory directly, inspect devices, compile a kernel, use CUDA IPC, or coordinate communication.</p>
+
+        <p><a href="https://github.com/nvidia/cuda-python">NVIDIA/cuda-python</a> is the Python entry point for that lower layer. The package is not one abstraction; it is a family of interfaces. <code>cuda.bindings</code> exposes low-level CUDA driver, runtime, NVRTC, and NVVM APIs. <code>cuda.core</code> gives a more Pythonic interface to CUDA runtime and JIT compilation. <code>numba.cuda</code> is a Python kernel DSL that compiles a restricted subset of Python to CUDA kernels. Newer interfaces such as <code>cuda.tile</code> and <code>cuda.coop</code> expose tile programming and block/warp cooperation patterns.</p>
+
+        <h3>Triton: GPU kernels in Python</h3>
+
+        <p><a href="https://github.com/triton-lang/triton">Triton</a> is a Python-embedded language for writing GPU kernels. It does not replace CUDA as the underlying GPU platform. Instead, it replaces much of the CUDA C++ code a programmer would otherwise hand-write. The output is still GPU code; the input is a Python-shaped kernel body that the Triton compiler lowers to GPU execution.</p>
+
+        <p>The first idea to understand is block-level thinking. In the CUDA <code>add_kernel</code> above, the code computed one scalar index <code>i</code>, and one GPU thread owned that position. Triton raises the unit of reasoning. A Triton program instance owns a block, or tile, of positions. The programmer writes operations over vectors of offsets and values; by default, the compiler decides how that block-level work is mapped onto hardware threads.</p>
+
+        <p>This does not mean Triton automatically solves every performance problem. The programmer still chooses important tile shapes, memory layouts, masks, and sometimes autotuning configurations. The benefit is narrower and more practical: many custom tensor kernels can be written and revised inside a Python/PyTorch workflow, without building a CUDA C++ extension around every experiment. This is why Triton is common in research kernels and production inference stacks, often alongside CUDA C++, CUTLASS, and vendor libraries. The original <a href="http://www.eecs.harvard.edu/~htk/publication/2019-mapl-tillet-kung-cox.pdf">MAPL 2019 paper</a> frames the goal as higher productivity than CUDA while staying more flexible than fixed-function libraries.</p>
+
+        <p>The easiest way to see the difference is to write the same vector addition again, this time in Triton:</p>
+
+<a class="source-badge" href="https://github.com/triton-lang/triton/blob/main/python/tutorials/01-vector-add.py" target="_blank"><span class="file-path">python/tutorials/01-vector-add.py</span><span class="file-meta">· the canonical hello-world</span></a>
+<pre class="with-source"><code>@triton.jit
+def add_kernel(x_ptr,        # pointer to the first input vector
+               y_ptr,        # pointer to the second input vector
+               output_ptr,   # pointer to the output vector
+               n_elements,   # total number of elements
+               BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(axis=0)
+    block_start = pid * BLOCK_SIZE
+    offsets = block_start + tl.arange(0, BLOCK_SIZE)
+    mask = offsets &lt; n_elements
+    x = tl.load(x_ptr + offsets, mask=mask)
+    y = tl.load(y_ptr + offsets, mask=mask)
+    output = x + y
+    tl.store(output_ptr + offsets, output, mask=mask)</code></pre>
+
+        <p>The important syntax is small. <code>@triton.jit</code> means the function body is compiled for the GPU, not executed by the Python interpreter. <code>BLOCK_SIZE: tl.constexpr</code> marks <code>BLOCK_SIZE</code> as a compile-time constant: the compiler knows the tile length while it builds the kernel, and it specializes the kernel around that length. <code>tl.program_id(axis=0)</code> identifies which program instance is running — on a first reading, think of it as a CUDA block id. <code>tl.arange(0, BLOCK_SIZE)</code> creates the vector of positions owned by this instance. <code>tl.load</code> and <code>tl.store</code> move a whole block of values under a mask. The missing thing is also important: there is no <code>threadIdx</code>. The Triton code names the tile of work, not the individual hardware thread that handles each element.</p>
+
+        <p>The launch is also plain Python, and it mirrors the CUDA launch syntax:</p>
+
+<pre class="with-source"><code>grid = (triton.cdiv(n_elements, BLOCK_SIZE),)   # number of program instances
+add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=1024)</code></pre>
+
+        <p><code>triton.cdiv</code> is ceiling division — the same arithmetic as <code>(n + block_size - 1) / block_size</code> in the CUDA example. <code>add_kernel[grid](...)</code> is the Python counterpart of <code>&lt;&lt;&lt;num_blocks, block_size&gt;&gt;&gt;</code>, with one telling difference: the CUDA launch had to state both the number of blocks <em>and</em> the number of threads per block. The Triton launch only states how many program instances to create. By default, how many threads execute each instance is the compiler's business (it can be tuned with the <code>num_warps</code> option). One more practical detail: <code>x</code>, <code>y</code>, and <code>output</code> here are ordinary PyTorch tensors on a CUDA device. Triton accepts them directly and reads their GPU memory addresses — the same storage-on-GPU picture from the PyTorch subsection above.</p>
+
+        <table>
+          <thead><tr><th>CUDA (per-thread view)</th><th>Triton (per-block view)</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>blockIdx.x</code></td>
+              <td><code>tl.program_id(axis=0)</code></td>
+              <td>Which instance of the kernel am I?</td>
+            </tr>
+            <tr>
+              <td><code>i = blockIdx.x * blockDim.x + threadIdx.x</code></td>
+              <td><code>offsets = block_start + tl.arange(0, BLOCK_SIZE)</code></td>
+              <td>Which data positions do I own? (one scalar vs. a whole vector)</td>
+            </tr>
+            <tr>
+              <td><code>if (i &lt; n)</code></td>
+              <td><code>mask = offsets &lt; n_elements</code></td>
+              <td>Stay inside the array bounds</td>
+            </tr>
+            <tr>
+              <td><code>out[i] = a[i] + b[i]</code></td>
+              <td><code>tl.load</code> / <code>x + y</code> / <code>tl.store</code></td>
+              <td>Move data and compute (one element vs. a whole block)</td>
+            </tr>
+            <tr>
+              <td><code>&lt;&lt;&lt;num_blocks, block_size&gt;&gt;&gt;</code></td>
+              <td><code>add_kernel[grid](...)</code></td>
+              <td>Launch many instances</td>
+            </tr>
+            <tr>
+              <td><code>threadIdx.x</code></td>
+              <td>— (no equivalent)</td>
+              <td>The compiler assigns work to threads, not the programmer</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>TileLang: naming the memory spaces</h3>
+
+        <p><a href="https://github.com/tile-ai/tilelang">TileLang</a> is another Python-embedded language for GPU kernels, built on top of TVM. TVM is an open-source machine-learning compiler framework: it provides infrastructure for representing tensor programs, optimizing them, and generating code for different hardware backends. At the workflow level, TileLang resembles Triton: write a Python-shaped kernel, compile it, and call it on PyTorch CUDA tensors. The difference is what the language makes explicit.</p>
+
+        <p>Triton lets the programmer describe tile-level computation while leaving many placement choices to the compiler. TileLang exposes the memory choreography more directly. A kernel can name shared-memory buffers, register fragments, and explicit copies between memory spaces. This makes TileLang feel closer to a compact, Python-shaped version of hand-written CUDA: more control, but also more responsibility.</p>
+
+        <p>A small tiled matrix multiplication shows the style. Each program instance computes one tile of <code>C = A·B</code>. Tiles of <code>A</code> and <code>B</code> are copied from global memory into shared memory; the running output tile lives in a register fragment; the final result is copied back to global memory:</p>
+
+<a class="source-badge" href="https://github.com/tile-ai/tilelang/blob/main/examples/quickstart.py" target="_blank"><span class="file-path">examples/quickstart.py</span><span class="file-meta">· the canonical hello-world</span></a>
+<pre class="with-source"><code>@tilelang.jit
+def matmul(A, B, block_M: int, block_N: int, block_K: int):
+    M, N, K = T.const("M, N, K")
+    A: T.Tensor((M, K), T.float16)
+    B: T.Tensor((K, N), T.float16)
+    C = T.empty((M, N), T.float16)
+
+    with T.Kernel(T.ceildiv(N, block_N), T.ceildiv(M, block_M), threads=128) as (bx, by):
+        A_shared = T.alloc_shared((block_M, block_K), T.float16)
+        B_shared = T.alloc_shared((block_K, block_N), T.float16)
+        C_local  = T.alloc_fragment((block_M, block_N), T.float32)
+
+        T.clear(C_local)                                      # zero the accumulator
+        for ko in T.Pipelined(T.ceildiv(K, block_K), num_stages=3):
+            T.copy(A[by * block_M, ko * block_K], A_shared)   # global -&gt; shared
+            T.copy(B[ko * block_K, bx * block_N], B_shared)   # global -&gt; shared
+            T.gemm(A_shared, B_shared, C_local)               # multiply into registers
+
+        T.copy(C_local, C[by * block_M, bx * block_N])        # registers -&gt; global
+    return C</code></pre>
+
+        <p>The code is useful because the memory spaces are visible. <code>A_shared</code> and <code>B_shared</code> are shared-memory staging buffers. <code>C_local</code> is a register fragment used as the accumulator. <code>T.copy</code> marks movement between memory spaces, and <code>T.gemm</code> updates the accumulator. The same blocked matrix multiplication idea could be implemented in CUDA or Triton, but TileLang writes the staging plan into the surface syntax.</p>
+
+        <p>Using the kernel is a two-step affair, and the second step should look familiar:</p>
+
+<pre class="with-source"><code>matmul_kernel = matmul.compile(M=1024, N=1024, K=1024,
+                               block_M=128, block_N=128, block_K=32)
+c = matmul_kernel(a, b)   # a, b: PyTorch tensors on a CUDA device</code></pre>
+
+        <p>The <code>compile</code> step specializes the kernel to the chosen sizes, the way <code>BLOCK_SIZE: tl.constexpr</code> specialized the Triton kernel. The call itself takes PyTorch CUDA tensors directly, just as Triton did. TileLang also advertises compiler-side verification and portability features, including integration with Z3-based symbolic reasoning and backends beyond NVIDIA. For this survey, the simpler point is enough: TileLang is another route from Python to GPU kernels, with more explicit memory-space control than Triton.</p>
+
+        <h3>Summary: a map, not a syntax course</h3>
+
+        <p>The purpose of this section was not to teach CUDA, Triton, or TileLang syntax completely. It was to build a map of the layer below RL infrastructure: PyTorch tensors may store their data on CUDA devices; CUDA provides the execution and memory model for GPU work; CUDA Graphs record repeated GPU execution patterns; Triton and TileLang offer Python-shaped ways to write custom kernels above that lower layer.</p>
+
+        <p>If you want a systematic next step, start with Triton. Its tutorials, puzzles, and PyTorch integration make it the easiest kernel DSL to learn first. Read TileLang after that if you want a more explicit memory-space style or compiler-design ideas such as multi-backend lowering and symbolic verification. Use lower-level CUDA Python bindings when the problem is not "write a tensor kernel," but "control the CUDA runtime directly": driver APIs, IPC, device management, or specialized communication setup.</p>
+
+        <div class="study">
+          <div class="study-title">Study resources — kernel DSLs</div>
+          <ul>
+            <li><a href="https://triton-lang.org/" target="_blank">triton-lang.org</a> — tutorials (vector add, fused softmax, matmul)</li>
+            <li><a href="https://github.com/srush/Triton-Puzzles" target="_blank">srush/Triton-Puzzles</a> — Sasha Rush's puzzles, runnable without a GPU</li>
+            <li><a href="https://github.com/tile-ai/tilelang-puzzles" target="_blank">tile-ai/tilelang-puzzles</a> — 10 progressively harder puzzles for TileLang</li>
+            <li><a href="https://github.com/tile-ai/tilelang/tree/main/examples/deepseek_mla" target="_blank">tilelang/examples/deepseek_mla</a> — MLA decode reference implementation</li>
+            <li><a href="https://nvidia.github.io/cuda-python/cuda-core/latest/" target="_blank">cuda.core docs</a> · <a href="https://docs.nvidia.com/cuda/cutile-python/" target="_blank">cuda.tile docs</a></li>
+          </ul>
+        </div>
+      </section>

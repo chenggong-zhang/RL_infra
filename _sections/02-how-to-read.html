@@ -1,0 +1,22 @@
+
+
+      <section id="how-to-read">
+        <h2>How to read this survey</h2>
+
+        <p>As a theorist, my own way into this material is to treat it as a map rather than a manual. I do not try to memorize every API or file path up front. I first look for the minimal RL infrastructure loop: where samples are generated, where rewards and logprobs are attached, where the loss is computed, and when the policy used for generation stops matching the policy being optimized. From there, the central tension becomes easier to see: learning wants fresh data from the current policy, while efficient systems cache, batch, reuse work, and run pieces asynchronously. With that map in mind, the rest of the survey can be read selectively: the short path is the loop, the central tension, and the six engineering primitives; the longer path is the full framework landscape and the code links.</p>
+
+        <p>To make the survey easier to use, we can borrow a small idea from software engineering: a user story. Before building a feature, engineers often ask what kind of user they are building for, what that user wants to do, and what goal it helps them achieve. Here, the same idea helps describe what different readers should expect to get from the survey.</p>
+
+        <h4>User story: cost and scale</h4>
+
+        <p><strong>As a researcher trying to understand the computational cost of RL post-training,</strong> I want to know where the system spends time, memory, and network bandwidth, so that scale becomes part of the algorithmic picture rather than a separate engineering footnote. This makes details such as colocation, prefix caching, weight transfer, and partial rollout worth studying: each one changes what can be run, compared, or reproduced.</p>
+
+        <h4>User story: statistical interpretation</h4>
+
+        <p><strong>As a theorist reading an empirical RL result,</strong> I want to track which policy generated the data and which policy appears in the loss, so that I can tell when the implementation still matches the mathematical object the algorithm is supposed to optimize. Rollout may happen on SGLang while training happens on Megatron. The "old logprobs" in the loss may be recomputed, reused, corrected, or approximated. Async rollout may generate samples with stale weights. Read this way and each systems detail becomes a condition under which an RL estimator is interpretable.</p>
+
+        <h4>User story: changing the system without changing its meaning</h4>
+
+        <p><strong>As a software engineer modifying an RL infrastructure codebase,</strong> I want to know whether my change only moves data around or also changes what training means. The practical questions are simple: what fields must a rollout sample contain? When weights are updated, which caches must be cleared? Which masks decide what tokens enter the loss? Which version of the policy produced this batch? Read this way, schemas and APIs are not just plumbing; they are where the system records the assumptions other components rely on.</p>
+
+      </section>

@@ -1,0 +1,483 @@
+
+
+      <section id="hybrid-engine">
+        <h3>① The hybrid engine — 训推一体</h3>
+
+        <p>The five-stage loop already tells us when the actor is used. In Stage 1, the actor is the rollout policy that generates responses. In Stage 4, the actor is the trainable model whose weights are changed by the optimizer. Stage 5 exists because these two identities can temporarily diverge: the trainer may have newer weights than the rollout engine. A hybrid engine is the execution layer that tries to make those two actor identities share the same expensive GPU resources.</p>
+
+        <p><a href="https://arxiv.org/pdf/2409.19256">HybridFlow</a> is useful here because it treats "hybrid engine" as a concrete systems problem, not a slogan: actor training and actor generation should run on the same actor GPUs, but they usually want different parallel layouts. The paper describes the target as follows:</p>
+
+        <blockquote class="pull">
+          We further design a 3D-HybridEngine for efficient actor model resharding between training and generation phases, with zero memory redundancy and significantly reduced communication overhead.
+        </blockquote>
+
+        <p>In practice, this target breaks into three concrete execution questions: how the actor is partitioned during training and generation, how one RLHF iteration switches between those phases, and how the system moves between layouts without keeping a second actor copy.</p>
+
+        <h4>5.1 Parallel groups: the actor has two layouts</h4>
+
+        <div class="primer-box">
+          <strong>A small GPU primer.</strong>
+          <p>In distributed training code, one process is usually called a <em>rank</em>, and a rank usually owns one GPU. A <em>group</em> is a set of ranks that communicate with each other. When a model is too large or too expensive for one GPU, the system does not say "one GPU runs the model." It says "this group of GPUs together represents one logical model replica." The rest of this subsection is about how that group is organized.</p>
+        </div>
+
+        <p>The first idea is that "the actor" is not only a model object. It is also a particular organization of ranks. If the actor is split by <strong>pipeline parallelism (PP)</strong>, different rank groups hold different consecutive slices of the transformer layers: one group may run the early layers, another group the later layers, and activations are passed forward between them. If the actor is split by <strong>tensor parallelism (TP)</strong>, ranks in the same group hold different shards of the tensors inside one layer, such as different columns or rows of an attention or MLP weight matrix; those ranks have to communicate while computing that one logical layer. If the actor uses <strong>data parallelism (DP)</strong>, several logical actor replicas process different batches, while each replica represents the same model architecture and will later synchronize gradients or parameters with the others.</p>
+
+        <p>HybridFlow names the training layout as <code>p-t-d</code>: pipeline stages, tensor shards, and model replicas along the data-parallel dimension. Here "model replica" means one logical actor replica, which may already be spread across <code>p * t</code> GPUs; it does not mean every GPU stores a full unsharded actor. The generation layout is <code>p<sub>g</sub>-t<sub>g</sub>-d<sub>g</sub>-d</code>: generation pipeline groups, generation tensor groups, micro-DP groups inside each training replica, and the original training DP dimension.</p>
+
+        <p>The extra <code>d<sub>g</sub></code> comes from the workload difference described earlier in the paper. Actor training is computation-bound and often benefits from a larger model-parallel size. Actor generation is memory-bound; if it uses the same large model-parallel size as training, GPU compute can be underutilized. A smaller generation model-parallel group can therefore be paired with a larger generation data-parallel dimension. In other words, one training data-parallel replica can be reorganized into several micro-DP generation replicas, so the same actor GPUs can serve more generation microbatches.</p>
+
+        <div class="primer-box">
+          <strong>A concrete count.</strong>
+          <p>If the actor owns <code>N<sub>a</sub></code> GPUs, then <code>N<sub>a</sub> = p * t * d = p<sub>g</sub> * t<sub>g</sub> * d<sub>g</sub> * d</code>, so <code>d<sub>g</sub> = p * t / (p<sub>g</sub> * t<sub>g</sub>)</code>. For example, if one training replica uses <code>p * t = 4</code> GPUs, but one generation replica uses <code>p<sub>g</sub> * t<sub>g</sub> = 2</code> GPUs, then the same four GPUs can host <code>d<sub>g</sub> = 2</code> generation replicas. The final <code>d</code> is still the original outer training DP dimension.</p>
+        </div>
+
+        <h4>5.2 Workflow: one RLHF iteration is a phase switch</h4>
+
+        <p>Between actor training in iteration <code>i</code> and actor generation in iteration <code>i + 1</code>, the actor parameters updated in iteration <code>i</code> must be resharded for generation, and the prompt batch must be distributed to the generation replicas. During iteration <code>i + 1</code>, the engine gathers actor parameters within each micro-DP group, loads prompts, generates responses, all-gathers the generation results within each micro-DP group, and then re-partitions parameters according to the training parallelism. With weights, prompts, and responses redistributed, Stage 4 can compute the actor loss and update the actor again.</p>
+
+        <figure>
+          <svg viewBox="0 0 920 360" role="img" aria-labelledby="hybrid-workflow-title hybrid-workflow-desc">
+            <title id="hybrid-workflow-title">Hybrid engine workflow between actor training and generation</title>
+            <desc id="hybrid-workflow-desc">The diagram shows actor parameters moving from the training layout to the generation layout and back, while prompts and responses move through generation replicas into a training batch.</desc>
+            <defs>
+              <marker id="arrow-hybrid" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L8,3 z" fill="#6b5bd6"></path>
+              </marker>
+              <style>
+                .hw-title { font: 600 15px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #27262b; }
+                .hw-label { font: 600 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #5f3ceb; text-transform: uppercase; letter-spacing: .04em; }
+                .hw-text { font: 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #3f3d46; }
+                .hw-small { font: 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #686572; }
+                .hw-box { fill: #ffffff; stroke: #d9d4e2; stroke-width: 1.4; rx: 8; }
+                .hw-param { fill: #f5f2ff; stroke: #b7aaf6; }
+                .hw-data { fill: #f7fbff; stroke: #9cc4ff; }
+                .hw-train { fill: #fffaf0; stroke: #f1d49a; }
+                .hw-arrow { stroke: #6b5bd6; stroke-width: 2; fill: none; marker-end: url(#arrow-hybrid); }
+                .hw-lane { stroke: #ebe7f0; stroke-width: 1; }
+              </style>
+            </defs>
+
+            <text class="hw-title" x="24" y="32">Hybrid engine workflow: same actor GPUs, two layouts</text>
+            <line class="hw-lane" x1="24" y1="66" x2="896" y2="66"></line>
+
+            <text class="hw-label" x="24" y="102">Actor parameters</text>
+            <rect class="hw-box hw-train" x="170" y="78" width="150" height="64"></rect>
+            <text class="hw-text" x="190" y="104">after iteration i</text>
+            <text class="hw-small" x="190" y="126">training layout p-t-d</text>
+
+            <path class="hw-arrow" d="M325 110 H410"></path>
+            <rect class="hw-box hw-param" x="420" y="78" width="170" height="64"></rect>
+            <text class="hw-text" x="440" y="104">gather weights</text>
+            <text class="hw-small" x="440" y="126">inside micro-DP groups</text>
+
+            <path class="hw-arrow" d="M595 110 H680"></path>
+            <rect class="hw-box hw-data" x="690" y="78" width="165" height="64"></rect>
+            <text class="hw-text" x="710" y="104">generation layout</text>
+            <text class="hw-small" x="710" y="126">p<tspan baseline-shift="sub">g</tspan>-t<tspan baseline-shift="sub">g</tspan>-d<tspan baseline-shift="sub">g</tspan>-d</text>
+
+            <text class="hw-label" x="24" y="204">Prompt / response data</text>
+            <rect class="hw-box hw-data" x="170" y="180" width="150" height="64"></rect>
+            <text class="hw-text" x="190" y="206">load prompts</text>
+            <text class="hw-small" x="190" y="228">to generation replicas</text>
+
+            <path class="hw-arrow" d="M325 212 H410"></path>
+            <rect class="hw-box hw-data" x="420" y="180" width="170" height="64"></rect>
+            <text class="hw-text" x="440" y="206">generate responses</text>
+            <text class="hw-small" x="440" y="228">Stage 1 rollout</text>
+
+            <path class="hw-arrow" d="M595 212 H680"></path>
+            <rect class="hw-box hw-data" x="690" y="180" width="165" height="64"></rect>
+            <text class="hw-text" x="710" y="206">all-gather results</text>
+            <text class="hw-small" x="710" y="228">within micro-DP groups</text>
+
+            <path class="hw-arrow" d="M772 145 V160 H505 V174"></path>
+            <path class="hw-arrow" d="M772 246 V306 H595"></path>
+            <rect class="hw-box hw-param" x="420" y="274" width="170" height="64"></rect>
+            <text class="hw-text" x="440" y="300">re-partition weights</text>
+            <text class="hw-small" x="440" y="322">back to p-t-d</text>
+
+            <path class="hw-arrow" d="M420 306 H325"></path>
+            <rect class="hw-box hw-train" x="170" y="274" width="150" height="64"></rect>
+            <text class="hw-text" x="190" y="300">actor loss</text>
+            <text class="hw-small" x="190" y="322">Stage 4 update</text>
+          </svg>
+          <figcaption><span class="fig-label">Figure.</span> A paraphrase of HybridFlow's workflow: updated actor parameters are gathered for generation, prompts are loaded to generation replicas, generated results are gathered, and parameters are re-partitioned for actor training.</figcaption>
+        </figure>
+
+        <h4>5.3 Zero-redundancy resharding: why not keep two actors?</h4>
+
+        <p><strong>Resharding</strong> means changing which GPU owns which shard of the actor weights. After training, the actor weights are arranged for the training layout <code>p-t-d</code>. Before generation, the same weights must be arranged for <code>p<sub>g</sub>-t<sub>g</sub>-d<sub>g</sub>-d</code>. The problem is that a GPU's training shard may not be the shard it needs for generation.</p>
+
+        <div class="primer-box">
+          <strong>What is all-gather?</strong>
+          <p>If several GPUs each hold one shard of a tensor, an all-gather lets every GPU in a group receive the other shards in that group. It is useful for rebuilding a larger weight block from pieces, but it costs communication and temporary memory. A global all-gather is expensive because many GPUs exchange many shards; a smaller group all-gather is cheaper.</p>
+        </div>
+
+        <p>The naive memory-saving idea is to avoid two permanent actor copies and just all-gather weights during the transition. But that can still be wasteful. Suppose a GPU already holds a training shard it will need again when training resumes. If the generation grouping asks that same GPU to serve a completely different generation shard, the GPU has to keep the old training shard and also load the new generation shard. That extra preserved training shard is the redundancy HybridFlow is trying to remove.</p>
+
+        <p>Consider the 8-GPU example used in the paper. Training uses a <code>1-4-2</code> layout: one pipeline stage, tensor-parallel groups of size 4, and two data-parallel model replicas. Generation uses <code>1-2-2-2</code>: smaller tensor-parallel groups and two micro-DP generation replicas inside each training replica. It is enough to look at the first training replica, <code>G1-G4</code>; <code>G5-G8</code> repeats the same pattern.</p>
+
+        <p>Inside <code>G1-G4</code>, suppose training TP has split the model into four shards <code>A, B, C, D</code>. Generation TP has size 2, so each generation rank needs a half-model shard: either <code>A+B</code> or <code>C+D</code>. Vanilla consecutive grouping uses generation TP groups <code>[G1,G2]</code> and <code>[G3,G4]</code>. In that layout, <code>G2</code> is asked to serve <code>C+D</code> even though it originally held <code>B</code>, and <code>G3</code> is asked to serve <code>A+B</code> even though it originally held <code>C</code>. Those GPUs have no overlap between their training shard and generation shard, so they must keep extra training-weight memory for the later return to training.</p>
+
+        <p>HybridFlow changes the generation grouping. Because <code>t = 4</code> and <code>t<sub>g</sub> = 2</code>, the stride is <code>t / t<sub>g</sub> = 2</code>. The generation TP groups become <code>[G1,G3]</code> and <code>[G2,G4]</code>, while the micro-DP groups become <code>[G1,G2]</code> and <code>[G3,G4]</code>. Now <code>G1</code> and <code>G2</code> both serve the <code>A+B</code> half and can build it by all-gathering inside <code>[G1,G2]</code>; <code>G3</code> and <code>G4</code> do the same for <code>C+D</code>. Every GPU's generation shard overlaps with the training shard it already held.</p>
+
+        <figure>
+          <svg viewBox="0 0 920 620" role="img" aria-labelledby="reshard-title reshard-desc">
+            <title id="reshard-title">Vanilla and optimized generation grouping for zero-redundancy resharding</title>
+            <desc id="reshard-desc">A table-style schematic for the first training data-parallel replica. It compares vanilla consecutive generation tensor-parallel grouping with HybridFlow's stride-based optimized grouping.</desc>
+            <defs>
+              <style>
+                .rs-title { font: 600 15px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #27262b; }
+                .rs-panel { fill: #ffffff; stroke: #e1dce8; stroke-width: 1.3; rx: 10; }
+                .rs-panel-title { font: 600 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #27262b; }
+                .rs-text { font: 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #4a4852; }
+                .rs-small { font: 11px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #686572; }
+                .rs-cell { fill: #ffffff; stroke: #e4e0ea; stroke-width: 1; }
+                .rs-head { fill: #f7f7fa; stroke: #e4e0ea; stroke-width: 1; }
+                .rs-bad-cell { fill: #fff8f8; stroke: #efb0b0; stroke-width: 1; }
+                .rs-good-cell { fill: #f1fbf6; stroke: #8fd0aa; stroke-width: 1; }
+                .rs-bad { fill: #b42318; font-weight: 700; }
+                .rs-good { fill: #087443; font-weight: 700; }
+                .rs-purple { fill: #5f3ceb; font-weight: 700; }
+              </style>
+            </defs>
+
+            <text class="rs-title" x="24" y="32">Resharding inside one training DP replica: G1-G4</text>
+            <text class="rs-text" x="24" y="58">Training TP=4 gives four shards: G1 holds A, G2 holds B, G3 holds C, G4 holds D. Generation TP=2 needs half-model shards: A+B or C+D.</text>
+            <text class="rs-small" x="24" y="80">The second training DP replica, G5-G8, repeats the same pattern.</text>
+
+            <rect class="rs-panel" x="24" y="105" width="872" height="245"></rect>
+            <text class="rs-panel-title" x="44" y="133">Vanilla consecutive grouping</text>
+            <text class="rs-small" x="44" y="156">Generation TP groups: [G1,G2] and [G3,G4]. Rank 0 in each group serves A+B; rank 1 serves C+D.</text>
+
+            <rect class="rs-head" x="44" y="176" width="90" height="32"></rect><text class="rs-text" x="64" y="197">GPU</text>
+            <rect class="rs-head" x="134" y="176" width="140" height="32"></rect><text class="rs-text" x="154" y="197">Training shard</text>
+            <rect class="rs-head" x="274" y="176" width="190" height="32"></rect><text class="rs-text" x="294" y="197">Generation shard</text>
+            <rect class="rs-head" x="464" y="176" width="190" height="32"></rect><text class="rs-text" x="484" y="197">Overlap?</text>
+            <rect class="rs-head" x="654" y="176" width="210" height="32"></rect><text class="rs-text" x="674" y="197">Consequence</text>
+
+            <rect class="rs-good-cell" x="44" y="208" width="90" height="32"></rect><text class="rs-text" x="64" y="229">G1</text>
+            <rect class="rs-good-cell" x="134" y="208" width="140" height="32"></rect><text class="rs-text" x="154" y="229">A</text>
+            <rect class="rs-good-cell" x="274" y="208" width="190" height="32"></rect><text class="rs-text" x="294" y="229">A+B</text>
+            <rect class="rs-good-cell" x="464" y="208" width="190" height="32"></rect><text class="rs-good" x="484" y="229">yes</text>
+            <rect class="rs-good-cell" x="654" y="208" width="210" height="32"></rect><text class="rs-text" x="674" y="229">can reuse A</text>
+
+            <rect class="rs-bad-cell" x="44" y="240" width="90" height="32"></rect><text class="rs-text" x="64" y="261">G2</text>
+            <rect class="rs-bad-cell" x="134" y="240" width="140" height="32"></rect><text class="rs-text" x="154" y="261">B</text>
+            <rect class="rs-bad-cell" x="274" y="240" width="190" height="32"></rect><text class="rs-text" x="294" y="261">C+D</text>
+            <rect class="rs-bad-cell" x="464" y="240" width="190" height="32"></rect><text class="rs-bad" x="484" y="261">no</text>
+            <rect class="rs-bad-cell" x="654" y="240" width="210" height="32"></rect><text class="rs-bad" x="674" y="261">must preserve B separately</text>
+
+            <rect class="rs-bad-cell" x="44" y="272" width="90" height="32"></rect><text class="rs-text" x="64" y="293">G3</text>
+            <rect class="rs-bad-cell" x="134" y="272" width="140" height="32"></rect><text class="rs-text" x="154" y="293">C</text>
+            <rect class="rs-bad-cell" x="274" y="272" width="190" height="32"></rect><text class="rs-text" x="294" y="293">A+B</text>
+            <rect class="rs-bad-cell" x="464" y="272" width="190" height="32"></rect><text class="rs-bad" x="484" y="293">no</text>
+            <rect class="rs-bad-cell" x="654" y="272" width="210" height="32"></rect><text class="rs-bad" x="674" y="293">must preserve C separately</text>
+
+            <rect class="rs-good-cell" x="44" y="304" width="90" height="32"></rect><text class="rs-text" x="64" y="325">G4</text>
+            <rect class="rs-good-cell" x="134" y="304" width="140" height="32"></rect><text class="rs-text" x="154" y="325">D</text>
+            <rect class="rs-good-cell" x="274" y="304" width="190" height="32"></rect><text class="rs-text" x="294" y="325">C+D</text>
+            <rect class="rs-good-cell" x="464" y="304" width="190" height="32"></rect><text class="rs-good" x="484" y="325">yes</text>
+            <rect class="rs-good-cell" x="654" y="304" width="210" height="32"></rect><text class="rs-text" x="674" y="325">can reuse D</text>
+
+            <g transform="translate(0 55)">
+            <rect class="rs-panel" x="24" y="315" width="872" height="205"></rect>
+            <text class="rs-panel-title" x="44" y="343">Optimized grouping</text>
+            <text class="rs-small" x="44" y="366">Use stride t/t<tspan baseline-shift="sub">g</tspan>=2 for generation TP: [G1,G3] and [G2,G4]. Use adjacent micro-DP groups: [G1,G2] and [G3,G4].</text>
+
+            <rect class="rs-head" x="44" y="386" width="90" height="32"></rect><text class="rs-text" x="64" y="407">GPU</text>
+            <rect class="rs-head" x="134" y="386" width="140" height="32"></rect><text class="rs-text" x="154" y="407">Training shard</text>
+            <rect class="rs-head" x="274" y="386" width="190" height="32"></rect><text class="rs-text" x="294" y="407">Generation shard</text>
+            <rect class="rs-head" x="464" y="386" width="190" height="32"></rect><text class="rs-text" x="484" y="407">Built by micro-DP</text>
+            <rect class="rs-head" x="654" y="386" width="210" height="32"></rect><text class="rs-text" x="674" y="407">Overlap?</text>
+
+            <rect class="rs-good-cell" x="44" y="418" width="90" height="32"></rect><text class="rs-text" x="64" y="439">G1</text>
+            <rect class="rs-good-cell" x="134" y="418" width="140" height="32"></rect><text class="rs-text" x="154" y="439">A</text>
+            <rect class="rs-good-cell" x="274" y="418" width="190" height="32"></rect><text class="rs-text" x="294" y="439">A+B</text>
+            <rect class="rs-good-cell" x="464" y="418" width="190" height="32"></rect><text class="rs-text" x="484" y="439">[G1,G2]</text>
+            <rect class="rs-good-cell" x="654" y="418" width="210" height="32"></rect><text class="rs-good" x="674" y="439">yes, reuses A</text>
+
+            <rect class="rs-good-cell" x="44" y="450" width="90" height="32"></rect><text class="rs-text" x="64" y="471">G2</text>
+            <rect class="rs-good-cell" x="134" y="450" width="140" height="32"></rect><text class="rs-text" x="154" y="471">B</text>
+            <rect class="rs-good-cell" x="274" y="450" width="190" height="32"></rect><text class="rs-text" x="294" y="471">A+B</text>
+            <rect class="rs-good-cell" x="464" y="450" width="190" height="32"></rect><text class="rs-text" x="484" y="471">[G1,G2]</text>
+            <rect class="rs-good-cell" x="654" y="450" width="210" height="32"></rect><text class="rs-good" x="674" y="471">yes, reuses B</text>
+
+            <rect class="rs-good-cell" x="44" y="482" width="90" height="32"></rect><text class="rs-text" x="64" y="503">G3</text>
+            <rect class="rs-good-cell" x="134" y="482" width="140" height="32"></rect><text class="rs-text" x="154" y="503">C</text>
+            <rect class="rs-good-cell" x="274" y="482" width="190" height="32"></rect><text class="rs-text" x="294" y="503">C+D</text>
+            <rect class="rs-good-cell" x="464" y="482" width="190" height="32"></rect><text class="rs-text" x="484" y="503">[G3,G4]</text>
+            <rect class="rs-good-cell" x="654" y="482" width="210" height="32"></rect><text class="rs-good" x="674" y="503">yes, reuses C</text>
+
+            <rect class="rs-good-cell" x="44" y="514" width="90" height="32"></rect><text class="rs-text" x="64" y="535">G4</text>
+            <rect class="rs-good-cell" x="134" y="514" width="140" height="32"></rect><text class="rs-text" x="154" y="535">D</text>
+            <rect class="rs-good-cell" x="274" y="514" width="190" height="32"></rect><text class="rs-text" x="294" y="535">C+D</text>
+            <rect class="rs-good-cell" x="464" y="514" width="190" height="32"></rect><text class="rs-text" x="484" y="535">[G3,G4]</text>
+            <rect class="rs-good-cell" x="654" y="514" width="210" height="32"></rect><text class="rs-good" x="674" y="535">yes, reuses D</text>
+            </g>
+          </svg>
+          <figcaption><span class="fig-label">Figure.</span> A simplified version of the resharding example. Vanilla grouping gives G2 and G3 non-overlapping generation shards; optimized grouping uses stride-based TP groups and adjacent micro-DP groups so every GPU can reuse its existing training shard.</figcaption>
+        </figure>
+
+        <p>In this example, "zero redundancy" means there is no GPU like vanilla <code>G2</code> or <code>G3</code>: no rank has to preserve an old training shard while also loading a completely non-overlapping generation shard. The system still communicates. It all-gathers the missing half of the generation shard inside a small micro-DP group. The difference is that each rank keeps using the shard it already owns as part of the generation layout.</p>
+
+        <h4>5.4 What this looks like in verl + TensorRT-LLM</h4>
+
+        <p>The visible verl + TensorRT-LLM implementation answers a neighboring execution question: how a real RL system starts from one actor-rollout GPU pool, turns part of it into rollout serving workers, and lets TensorRT-LLM interpret those workers as model-parallel ranks. HybridFlow's optimized stride grouping remains a paper-level layout rule in this discussion; the code below shows the placement machinery that surrounds such a layout.</p>
+
+        <div class="primer-box">
+          <strong>What this code can show</strong>
+          <p>HybridFlow's optimized grouping decides how generation TP and micro-DP groups should be arranged to overlap with training shards. The verl code below shows the placement machinery around that idea: colocation, bundle assignment, serving-rank assignment, and local model-parallel layout. The exact zero-redundancy grouping rule remains separate, and the lower-level weight-sync and memory details are left to later primitives.</p>
+        </div>
+
+        <p>In the synchronous PPO trainer, <code>global_pool</code> is the default GPU budget for actor, rollout, critic, and reference roles. The actor-rollout role resolves to a resource pool; a Ray worker group is spawned on that pool; and the LLM server manager is created with that same worker group and pool:</p>
+
+<a class="source-badge" href="https://github.com/verl-project/verl/blob/7dc39fec1c37da4098b50e68840e78906b69f16a/verl/trainer/main_ppo_sync.py" target="_blank"><span class="file-path">verl/trainer/main_ppo_sync.py</span><span class="file-meta">· selected excerpts: actor and rollout use the same resource pool</span></a>
+<pre class="with-source"><code class="language-python"># init_resource_pool_mgr
+global_pool_id = <span class="code-hl">"global_pool"</span>
+resource_pool_spec = {
+    global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
+}
+self.resource_pool_manager = ResourcePoolManager(
+    resource_pool_spec=resource_pool_spec,
+    mapping=self.mapping,
+)
+
+# init_workers
+actor_rollout_resource_pool = (
+    self.resource_pool_manager.<span class="code-hl">get_resource_pool</span>(actor_role)
+)
+actor_rollout_cls = RayClassWithInitArgs(...)
+self.resource_pool_to_cls[actor_rollout_resource_pool][str(actor_role)] = actor_rollout_cls
+
+for <span class="code-hl">resource_pool</span>, class_dict in self.resource_pool_to_cls.items():
+    worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
+    wg_dict = RayWorkerGroup(
+        resource_pool=<span class="code-hl">resource_pool</span>,
+        ray_cls_with_init=worker_dict_cls,
+    )
+    all_wg.update(wg_dict.spawn(prefix_set=class_dict.keys()))
+
+self.actor_rollout_wg = all_wg[str(actor_role)]
+self.actor_rollout_wg.init_model()
+
+self.llm_server_manager = LLMServerManager.create(
+    config=self.config,
+    worker_group=<span class="code-hl">self.actor_rollout_wg</span>,
+    rollout_resource_pool=<span class="code-hl">actor_rollout_resource_pool</span>,
+)</code></pre>
+
+        <p>This code makes colocation precise, but only at the first level. <code>resource_pool_spec</code> describes the available GPU slots. <code>get_resource_pool(actor_role)</code> selects the pool for the combined actor-rollout role. <code>RayWorkerGroup(resource_pool=...)</code> launches the actor-rollout workers on that pool. Then <code>LLMServerManager.create(...)</code> receives both the created worker group and the same rollout resource pool. The next goal is to see how the generation side uses those two handles.</p>
+
+        <figure>
+          <svg viewBox="0 0 920 520" role="img" aria-labelledby="verl-placement-title verl-placement-desc">
+            <title id="verl-placement-title">verl colocated rollout placement map</title>
+            <desc id="verl-placement-desc">The diagram maps RayResourcePool, RayWorkerGroup, LLMServerManager, RolloutReplica, and TensorRT-LLM workers. The resource pool provides GPU bundles, the worker group provides colocated actor workers, the manager passes both to rollout replicas, and TensorRT-LLM launches serving ranks on selected bundles.</desc>
+            <defs>
+              <marker id="arrow-verl-placement" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L8,3 z" fill="#5361b8"></path>
+              </marker>
+              <style>
+                .vp-title { font: 700 15px system-ui, sans-serif; fill: #1f2937; }
+                .vp-sub { font: 12px system-ui, sans-serif; fill: #4b5563; }
+                .vp-code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; fill: #334155; }
+                .vp-small { font: 11px system-ui, sans-serif; fill: #64748b; }
+                .vp-arrow { stroke: #5361b8; stroke-width: 2; fill: none; marker-end: url(#arrow-verl-placement); }
+                .vp-dash { stroke: #7c8db5; stroke-width: 2; fill: none; stroke-dasharray: 6 5; marker-end: url(#arrow-verl-placement); }
+                .vp-pool { fill: #f5f8ff; stroke: #5b6fd6; stroke-width: 1.4; }
+                .vp-worker { fill: #f4fbf7; stroke: #3b8f63; stroke-width: 1.4; }
+                .vp-manager { fill: #fff8ed; stroke: #bf7b2c; stroke-width: 1.4; }
+                .vp-replica { fill: #f8f6ff; stroke: #7b62d8; stroke-width: 1.4; }
+                .vp-trt { fill: #f4fbfc; stroke: #2d8a9a; stroke-width: 1.4; }
+                .vp-chip { fill: #ffffff; stroke: #b7c2d6; stroke-width: 1; }
+              </style>
+            </defs>
+
+            <rect x="28" y="34" width="278" height="160" rx="8" class="vp-pool"></rect>
+            <text x="48" y="64" class="vp-title">RayResourcePool</text>
+            <text x="48" y="88" class="vp-code">actor_rollout_resource_pool</text>
+            <text x="48" y="112" class="vp-sub">GPU placement budget</text>
+            <rect x="48" y="132" width="46" height="34" rx="6" class="vp-chip"></rect>
+            <rect x="105" y="132" width="46" height="34" rx="6" class="vp-chip"></rect>
+            <rect x="162" y="132" width="46" height="34" rx="6" class="vp-chip"></rect>
+            <rect x="219" y="132" width="46" height="34" rx="6" class="vp-chip"></rect>
+            <text x="63" y="154" class="vp-code">B0</text>
+            <text x="120" y="154" class="vp-code">B1</text>
+            <text x="177" y="154" class="vp-code">B2</text>
+            <text x="234" y="154" class="vp-code">B3</text>
+
+            <rect x="28" y="248" width="278" height="172" rx="8" class="vp-worker"></rect>
+            <text x="48" y="278" class="vp-title">RayWorkerGroup</text>
+            <text x="48" y="302" class="vp-code">self.actor_rollout_wg</text>
+            <text x="48" y="326" class="vp-sub">colocated actor-rollout workers</text>
+            <rect x="48" y="348" width="46" height="34" rx="6" class="vp-chip"></rect>
+            <rect x="105" y="348" width="46" height="34" rx="6" class="vp-chip"></rect>
+            <rect x="162" y="348" width="46" height="34" rx="6" class="vp-chip"></rect>
+            <rect x="219" y="348" width="46" height="34" rx="6" class="vp-chip"></rect>
+            <text x="63" y="370" class="vp-code">W0</text>
+            <text x="120" y="370" class="vp-code">W1</text>
+            <text x="177" y="370" class="vp-code">W2</text>
+            <text x="234" y="370" class="vp-code">W3</text>
+            <text x="48" y="402" class="vp-small">training side calls update_actor on this group</text>
+
+            <rect x="354" y="150" width="216" height="164" rx="8" class="vp-manager"></rect>
+            <text x="374" y="180" class="vp-title">LLMServerManager</text>
+            <text x="374" y="205" class="vp-code">create(...)</text>
+            <text x="374" y="232" class="vp-sub">keeps both handles:</text>
+            <text x="374" y="256" class="vp-code">worker_group</text>
+            <text x="374" y="280" class="vp-code">rollout_resource_pool</text>
+
+            <rect x="628" y="72" width="258" height="176" rx="8" class="vp-replica"></rect>
+            <text x="648" y="102" class="vp-title">RolloutReplica r</text>
+            <text x="648" y="126" class="vp-code">init_hybrid_colocated</text>
+            <text x="648" y="154" class="vp-sub">selects serving workers</text>
+            <text x="648" y="180" class="vp-code">workers = W[r*k : (r+1)*k]</text>
+            <text x="648" y="207" class="vp-code">bundle_indices = B[r*k ...]</text>
+
+            <rect x="628" y="308" width="258" height="160" rx="8" class="vp-trt"></rect>
+            <text x="648" y="338" class="vp-title">TensorRT-LLM</text>
+            <text x="648" y="362" class="vp-code">AsyncLLM / RayExecutor</text>
+            <text x="648" y="390" class="vp-sub">launches serving ranks</text>
+            <text x="648" y="416" class="vp-code">rank i -> bundle_indices[i]</text>
+            <text x="648" y="443" class="vp-code">rank -> tp_rank -> weight shard</text>
+
+            <path d="M306 114 C326 114, 330 180, 354 198" class="vp-dash"></path>
+            <path d="M306 334 C330 334, 330 266, 354 250" class="vp-arrow"></path>
+            <path d="M570 204 C596 190, 604 164, 628 154" class="vp-arrow"></path>
+            <path d="M570 266 C596 286, 604 336, 628 372" class="vp-dash"></path>
+            <path d="M757 248 L757 308" class="vp-arrow"></path>
+
+            <text x="314" y="103" class="vp-small">bundles</text>
+            <text x="314" y="354" class="vp-small">workers</text>
+            <text x="585" y="186" class="vp-small">pass handles</text>
+            <text x="771" y="283" class="vp-small">launch</text>
+          </svg>
+        </figure>
+
+        <p>Read this picture from left to right. A <code>resource_pool</code> is not a model; it is the Ray-side GPU budget, represented by bundles such as <code>B0</code>, <code>B1</code>, and so on. A <code>worker_group</code> is the set of Ray workers created on that budget. Those workers can later be used by the actor/training side, while the rollout-serving path receives the same worker group and pool through <code>LLMServerManager</code>. A <code>RolloutReplica</code> is one serving replica: it selects a slice of workers and a matching slice of bundles. TensorRT-LLM then starts serving ranks on those bundles and interprets each rank as a tensor-parallel or pipeline-parallel piece of the inference model.</p>
+
+        <p>The TensorRT-LLM rollout path passes the colocated worker group and resource pool into each rollout replica:</p>
+
+<a class="source-badge" href="https://github.com/verl-project/verl/blob/7dc39fec1c37da4098b50e68840e78906b69f16a/verl/workers/rollout/llm_server.py#L313-L321" target="_blank"><span class="file-path">verl/workers/rollout/llm_server.py</span><span class="file-meta">· pass colocated actor workers into TRT-LLM rollout replicas</span></a>
+<pre class="with-source"><code class="language-python">if self.worker_group and self.rollout_config.name == "trtllm":
+    await asyncio.gather(
+        *[
+            server.<span class="code-hl">init_hybrid_colocated</span>(
+                <span class="code-hl">self.worker_group</span>,
+                <span class="code-hl">self.rollout_resource_pool</span>,
+            )
+            for server in self.rollout_replicas
+        ]
+    )</code></pre>
+
+        <p>This is where the two handles from the trainer enter the rollout-serving path. <code>self.worker_group</code> is the actor-rollout Ray worker group that was created on the shared pool. <code>self.rollout_resource_pool</code> is the pool object that still carries the Ray placement bundles. The manager does not yet decide tensor-parallel shards; it only hands each rollout replica the objects it needs to make that decision.</p>
+
+        <p>The receiving side selects its worker slice and its Ray bundle indices:</p>
+
+<a class="source-badge" href="https://github.com/verl-project/verl/blob/7dc39fec1c37da4098b50e68840e78906b69f16a/verl/workers/rollout/replica.py#L143-L157" target="_blank"><span class="file-path">verl/workers/rollout/replica.py</span><span class="file-meta">· assign bundles to a hybrid-colocated rollout replica</span></a>
+<pre class="with-source"><code class="language-python">async def init_hybrid_colocated(self, worker_group, resource_pool):
+    self.rollout_mode = RolloutMode.HYBRID
+    self.workers = <span class="code-hl">worker_group.workers</span>[
+        <span class="code-hl">self.world_size * self.replica_rank</span> :
+        <span class="code-hl">self.world_size * (self.replica_rank + 1)</span>
+    ]
+    self.resource_pool = <span class="code-hl">resource_pool</span>
+    self.bundle_indices = [
+        <span class="code-hl">self.replica_rank * self.world_size + idx</span>
+        for idx in range(self.world_size)
+    ]
+    await self.launch_servers()</code></pre>
+
+        <p>This function uses the two handles for different jobs. <code>worker_group.workers[...]</code> chooses the existing colocated workers assigned to this rollout replica. <code>self.resource_pool = resource_pool</code> keeps the shared placement pool for server launch. <code>bundle_indices</code> then maps the replica to a consecutive range of Ray bundles: for replica <code>r</code>, the range is <code>r * world_size, ..., r * world_size + world_size - 1</code>. This is the concrete verl placement rule in this path; HybridFlow's paper rule uses a different stride-based grouping.</p>
+
+        <p>verl passes the chosen bundles and the serving parallelism into the async inference engine:</p>
+
+<a class="source-badge" href="https://github.com/verl-project/verl/blob/7dc39fec1c37da4098b50e68840e78906b69f16a/verl/workers/rollout/trtllm_rollout/trtllm_async_server.py#L219-L289" target="_blank"><span class="file-path">verl/workers/rollout/trtllm_rollout/trtllm_async_server.py</span><span class="file-meta">· launch TensorRT-LLM with rollout parallelism</span></a>
+<pre class="with-source"><code class="language-python">llm_kwargs = {
+    "model": self.model_config.local_path,
+    "backend": "pytorch",
+    "orchestrator_type": "ray",
+    <span class="code-hl">"tensor_parallel_size": self.config.tensor_model_parallel_size</span>,
+    <span class="code-hl">"pipeline_parallel_size": self.config.pipeline_model_parallel_size</span>,
+    "moe_expert_parallel_size": self.config.expert_parallel_size,
+    "moe_tensor_parallel_size": self.config.moe_tensor_parallel_size,
+    <span class="code-hl">"placement_groups": self.pgs</span>,
+    <span class="code-hl">"placement_bundle_indices": self.bundle_indices</span>,
+    ...
+}
+
+self.llm = await AsyncLLM(**llm_kwargs)</code></pre>
+
+        <p>This call gives TensorRT-LLM two kinds of information. <code>placement_groups</code> and <code>placement_bundle_indices</code> tell Ray where to start the serving processes. <code>tensor_parallel_size</code> and <code>pipeline_parallel_size</code> tell TensorRT-LLM how many serving processes jointly hold one inference model. Put plainly: Ray chooses the GPU slot; TensorRT-LLM decides what role that process has inside the distributed model.</p>
+
+        <p>Inside TensorRT-LLM, the Ray executor creates one worker process per serving rank:</p>
+
+<a class="source-badge" href="https://github.com/NVIDIA/TensorRT-LLM/blob/v1.2.0rc0/tensorrt_llm/executor/ray_executor.py#L152-L162" target="_blank"><span class="file-path">tensorrt_llm/executor/ray_executor.py</span><span class="file-meta">· serving rank is placed on the selected bundle</span></a>
+<pre class="with-source"><code class="language-python">for rank in range(self.world_size):
+    pg = placement_groups[rank] if isinstance(placement_groups, list) else placement_groups
+    worker = RayWorkerWrapper.options(
+        scheduling_strategy=PlacementGroupSchedulingStrategy(
+            placement_group=pg,
+            placement_group_bundle_index=<span class="code-hl">self.bundle_indices[rank]</span>,
+        )
+    ).remote(
+        worker_cls,
+        worker_kwargs,
+        self.world_size,
+        <span class="code-hl">rank</span>,
+    )</code></pre>
+
+        <p>Read one iteration of this loop literally. Suppose <code>rank = 0</code>. Ray looks at <code>self.bundle_indices[0]</code> and starts a worker process on that bundle. The constructor also receives <code>rank=0</code>, so the process knows it is TensorRT-LLM serving rank 0. If <code>rank = 1</code>, Ray uses <code>self.bundle_indices[1]</code>, and the new process is told it is serving rank 1.</p>
+
+        <p>So <code>rank</code> is the name tag of the serving process, while <code>bundle_indices[rank]</code> is the physical GPU slot where that named process is placed. The next step uses the name tag, not the bundle number. A worker with <code>rank=0</code> will later compute the shard for TensorRT-LLM rank 0; a worker with <code>rank=1</code> will compute the shard for rank 1. Ray's job was only to put those named workers onto real GPU bundles.</p>
+
+        <p>Now that each worker has a TensorRT-LLM rank, TensorRT-LLM can derive the model-parallel coordinates from that rank:</p>
+
+<a class="source-badge" href="https://github.com/NVIDIA/TensorRT-LLM/blob/v1.2.0rc0/tensorrt_llm/mapping.py#L43-L587" target="_blank"><span class="file-path">tensorrt_llm/mapping.py</span><span class="file-meta">· serving rank becomes TP rank</span></a>
+<pre class="with-source"><code class="language-python">def __init__(self, world_size=1, rank=0, ..., tp_size=1, pp_size=1, ...):
+    if tp_size * pp_size * cp_size != world_size:
+        raise ValueError(...)
+
+    self.tp_size = <span class="code-hl">tp_size</span>
+    self.pp_size = pp_size
+    self.world_size = world_size
+    self.rank = <span class="code-hl">rank</span>
+
+@property
+def tp_rank(self) -> int:
+    return <span class="code-hl">self.rank % (self.tp_size * self.cp_size) // self.cp_size</span>
+
+@property
+def pp_rank(self) -> int:
+    return <span class="code-hl">self.rank // (self.tp_size * self.cp_size)</span>
+
+@property
+def tp_group(self) -> List[int]:
+    return self.tp_groups[self.pp_rank * self.cp_size + self.cp_rank]</code></pre>
+
+        <p>The input to <code>Mapping</code> is the worker's serving <code>rank</code> together with the serving layout sizes. <code>world_size</code> is the total number of serving workers. <code>tp_size</code> says how many workers split each tensor-parallel layer. <code>pp_size</code> says how many pipeline stages split the model by layers. The constructor checks that these numbers fit together, then stores the worker's <code>rank</code>.</p>
+
+        <p>This step is crucial: <code>rank</code> starts as a serving-worker id, but after <code>Mapping</code> it becomes a position in the model-parallel structure. <code>tp_rank</code> decides which tensor-parallel slice the worker owns; <code>pp_rank</code> decides which pipeline stage it belongs to.</p>
+
+        <p>When TensorRT-LLM builds a local linear layer, it reads <code>tp_size</code> and <code>tp_rank</code> from the mapping. Then it shrinks the local layer dimensions according to the tensor-parallel mode:</p>
+
+<a class="source-badge" href="https://github.com/NVIDIA/TensorRT-LLM/blob/v1.2.0rc0/tensorrt_llm/_torch/modules/linear.py#L2741-L2824" target="_blank"><span class="file-path">tensorrt_llm/_torch/modules/linear.py</span><span class="file-meta">· local layer shape determined by TP rank</span></a>
+<pre class="with-source"><code class="language-python">self.mapping = mapping or Mapping()
+self.tp_size = <span class="code-hl">self.mapping.tp_size</span>
+self.tp_rank = <span class="code-hl">self.mapping.tp_rank</span>
+self.tp_mode = tensor_parallel_mode
+
+local_in_features = in_features
+local_out_features = out_features
+
+if self.tp_mode == TensorParallelMode.ROW:
+    local_in_features = <span class="code-hl">in_features // self.tp_size</span>
+elif self.tp_mode == TensorParallelMode.COLUMN:
+    local_out_features = <span class="code-hl">out_features // self.tp_size</span>
+
+self.in_features = local_in_features
+self.out_features = local_out_features</code></pre>
+
+        <p>This is enough for the placement story in this subsection. The same actor-rollout pool has been turned into rollout replicas, Ray bundles, TensorRT-LLM ranks, <code>tp_rank</code> coordinates, and local layer shapes. The lower-level questions of exactly how updated tensor values are sliced, transported, released, and reloaded belong to the later primitives on memory choreography and weight synchronization.</p>
+
+      </section>

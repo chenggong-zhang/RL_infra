@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 560" role="img" aria-labelledby="title desc">
+  <title id="title">Broadcast-style weight transfer versus P2P shard-aware transfer</title>
+  <desc id="desc">A two-panel diagram comparing NCCL broadcast transfer, where TP and EP all-gather creates large tensors at PP head ranks that broadcast to inference ranks, with P2P shard-aware transfer, where source-side CPU SGLang replicas prepare serving-layout shards and send them to target inference ranks.</desc>
+  <defs>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#4267b2"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2f8f5b"/>
+    </marker>
+    <marker id="arrow-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8a8790"/>
+    </marker>
+    <style>
+      .bg { fill: #fbfaf7; }
+      .panel { fill: #ffffff; stroke: #d7d2c8; stroke-width: 1.4; rx: 10; }
+      .title { font: 700 22px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #24222a; }
+      .subtitle { font: 500 14px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #6d6873; }
+      .label { font: 700 13px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #34313a; }
+      .small { font: 500 12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #6d6873; }
+      .rank { fill: #f3f6fb; stroke: #8ea2cf; stroke-width: 1.2; rx: 7; }
+      .rank-green { fill: #f0f8f1; stroke: #82bd90; stroke-width: 1.2; rx: 7; }
+      .rank-muted { fill: #f4f3f1; stroke: #cac4ba; stroke-width: 1.2; rx: 7; }
+      .engine { fill: #fff7e6; stroke: #d8a94f; stroke-width: 1.2; rx: 7; }
+      .replica { fill: #f5efff; stroke: #a58bd3; stroke-width: 1.2; rx: 7; }
+      .wire-blue { fill: none; stroke: #4267b2; stroke-width: 2.2; marker-end: url(#arrow-blue); }
+      .wire-green { fill: none; stroke: #2f8f5b; stroke-width: 2.2; marker-end: url(#arrow-green); }
+      .wire-gray { fill: none; stroke: #8a8790; stroke-width: 1.8; marker-end: url(#arrow-gray); stroke-dasharray: 5 5; }
+      .note { fill: #f7f2e8; stroke: #dfc98a; stroke-width: 1; rx: 8; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="980" height="560"/>
+  <text class="title" x="40" y="44">Large-cluster weight transfer: same update, different traffic pattern</text>
+  <text class="subtitle" x="40" y="68">The rollout engine still loads weights; the question is who prepares and sends each serving-layout shard.</text>
+
+  <rect class="panel" x="34" y="94" width="438" height="400"/>
+  <text class="label" x="58" y="126">NCCL broadcast-style path</text>
+  <text class="small" x="58" y="148">TP/EP all-gather, then PP heads broadcast large tensors.</text>
+
+  <rect class="rank-muted" x="62" y="176" width="118" height="42"/>
+  <text class="label" x="82" y="201">train ranks</text>
+  <rect class="rank" x="62" y="252" width="118" height="50"/>
+  <text class="label" x="82" y="273">PP head</text>
+  <text class="small" x="82" y="290">large tensor</text>
+  <rect class="rank-muted" x="62" y="336" width="118" height="42"/>
+  <text class="label" x="83" y="361">ranks wait</text>
+
+  <rect class="engine" x="310" y="154" width="106" height="42"/>
+  <text class="label" x="331" y="179">infer r0</text>
+  <rect class="engine" x="310" y="218" width="106" height="42"/>
+  <text class="label" x="331" y="243">infer r1</text>
+  <rect class="engine" x="310" y="282" width="106" height="42"/>
+  <text class="label" x="331" y="307">infer r2</text>
+  <rect class="engine" x="310" y="346" width="106" height="42"/>
+  <text class="label" x="331" y="371">infer r3</text>
+
+  <path class="wire-gray" d="M 121 219 V 250"/>
+  <text class="small" x="134" y="238">TP/EP all-gather</text>
+  <path class="wire-blue" d="M 182 277 C 238 196, 260 176, 308 175"/>
+  <path class="wire-blue" d="M 182 277 C 236 238, 260 239, 308 239"/>
+  <path class="wire-blue" d="M 182 277 C 236 304, 260 303, 308 303"/>
+  <path class="wire-blue" d="M 182 277 C 238 364, 260 367, 308 367"/>
+  <text class="small" x="198" y="328">broadcast full gathered weights</text>
+
+  <rect class="note" x="68" y="414" width="348" height="48"/>
+  <text class="small" x="84" y="435">Repeated bytes, idle ranks, fixed group membership</text>
+  <text class="small" x="84" y="453">become bottlenecks at large model and cluster scale.</text>
+
+  <rect class="panel" x="508" y="94" width="438" height="400"/>
+  <text class="label" x="532" y="126">P2P / RDMA shard-aware path</text>
+  <text class="small" x="532" y="148">CPU SGLang replicas prepare serving-layout shards.</text>
+
+  <rect class="rank-green" x="532" y="158" width="104" height="42"/>
+  <text class="label" x="548" y="183">src rank 0</text>
+  <rect class="rank-green" x="532" y="224" width="104" height="42"/>
+  <text class="label" x="548" y="249">src rank 1</text>
+  <rect class="rank-green" x="532" y="290" width="104" height="42"/>
+  <text class="label" x="548" y="315">src rank 2</text>
+  <rect class="rank-green" x="532" y="356" width="104" height="42"/>
+  <text class="label" x="548" y="381">src rank 3</text>
+
+  <rect class="replica" x="666" y="158" width="104" height="42"/>
+  <text class="label" x="682" y="176">CPU replica</text>
+  <text class="small" x="690" y="193">shard r0</text>
+  <rect class="replica" x="666" y="224" width="104" height="42"/>
+  <text class="label" x="682" y="242">CPU replica</text>
+  <text class="small" x="690" y="259">shard r1</text>
+  <rect class="replica" x="666" y="290" width="104" height="42"/>
+  <text class="label" x="682" y="308">CPU replica</text>
+  <text class="small" x="690" y="325">shard r2</text>
+  <rect class="replica" x="666" y="356" width="104" height="42"/>
+  <text class="label" x="682" y="374">CPU replica</text>
+  <text class="small" x="690" y="391">shard r3</text>
+
+  <rect class="engine" x="816" y="158" width="106" height="42"/>
+  <text class="label" x="821" y="183">infer r0</text>
+  <rect class="engine" x="816" y="224" width="106" height="42"/>
+  <text class="label" x="821" y="249">infer r1</text>
+  <rect class="engine" x="816" y="290" width="106" height="42"/>
+  <text class="label" x="821" y="315">infer r2</text>
+  <rect class="engine" x="816" y="356" width="106" height="42"/>
+  <text class="label" x="821" y="381">infer r3</text>
+
+  <path class="wire-gray" d="M 638 179 H 664"/>
+  <path class="wire-gray" d="M 638 245 H 664"/>
+  <path class="wire-gray" d="M 638 311 H 664"/>
+  <path class="wire-gray" d="M 638 377 H 664"/>
+  <path class="wire-green" d="M 772 179 H 814"/>
+  <path class="wire-green" d="M 772 245 H 814"/>
+  <path class="wire-green" d="M 772 311 H 814"/>
+  <path class="wire-green" d="M 772 377 H 814"/>
+  <text class="small" x="650" y="140">prepare target shard</text>
+  <text class="small" x="780" y="140">RDMA send</text>
+
+  <rect class="note" x="540" y="414" width="366" height="48"/>
+  <text class="small" x="556" y="435">Transfer plan maps source ranks to target SGLang ranks.</text>
+  <text class="small" x="556" y="453">CPU replicas adapt layout; RDMA sends prepared shards.</text>
+</svg>

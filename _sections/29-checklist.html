@@ -1,0 +1,49 @@
+
+
+      <section id="checklist">
+        <h2>A researcher's checklist — what to verify before trusting an RL result</h2>
+
+        <p>If the empirical content of the previous sections distilled to anything actionable, it would be a short list of questions you should be able to answer about any RL paper before you treat its numbers as evidence for its theoretical claims. I list nine. They are intentionally ordered by how often they materially affect results — the first three matter more than the last three.</p>
+
+        <h4>1. Which framework was the training run on?</h4>
+
+        <p>The most important single question, and the one papers most often answer vaguely. "We used GRPO" tells you the algorithm. The framework choice — Miles vs verl vs SLIME vs OpenRLHF — tells you which set of engineering primitives shaped the run. Routinely, two groups training "the same algorithm" report different numbers because their frameworks make different choices about staleness, prefix caching, weight sync, and precision alignment.</p>
+
+        <h4>2. Inference engine and rollout topology?</h4>
+
+        <p>SGLang vs vLLM matters because of the RadixAttention prefix-cache difference (especially for GRPO group sampling). Colocated vs disaggregated rollout matters because of the weight-sync path. "vLLM with disaggregated rollout" and "SGLang with hybrid engine" can produce noticeably different sample-efficiency curves under the same algorithm and the same model. A paper that does not name the inference engine has not described its experimental setup.</p>
+
+        <h4>3. Precision regime, and what enforces train-infer consistency?</h4>
+
+        <p>BF16 train + BF16 infer is the safe case. FP8 inference + BF16 training is the dangerous case for MoE models without R3-style routing replay. INT4 inference + BF16 training requires QAT. The question to ask: <em>in what precision are the logprobs that drive the loss computed, and where do they come from</em>? If the answer is "FP8 inference engine" without further qualification, you should expect numerical drift. If the answer is "recomputed in BF16 on the training engine," good — that's the safe pattern.</p>
+
+        <h4>4. On-policy or async? Off-policy ratio cap?</h4>
+
+        <p>Strict on-policy RL is rare at any scale. If the framework uses partial rollout (most do, above 256 GPUs), the result is technically off-policy, and there should be either an explicit importance-sampling correction (Miles' TIS/MIS) or an explicit staleness bound (Kimi K1.5's curriculum scheduling, AReaL's bucket size). The question: <em>is the off-policy ratio reported, capped, or even monitored</em>? If none of those, the on-policy claim is unverified.</p>
+
+        <h4>5. Was logprob recomputed on the trainer or trusted from inference?</h4>
+
+        <p>The "BERT-era unsolved bug" — inference kernels fuse operations differently from training kernels, producing different logprobs for the same input. Every well-engineered framework recomputes logprobs on the training engine. If a paper trains on inference-engine logprobs, the loss has a numerical bias that grows with training. Worth checking in the framework's source even if the paper doesn't say.</p>
+
+        <h4>6. For MoE models: is routing replay enabled?</h4>
+
+        <p>The MoE-specific version of question 3. Without R3 (or equivalent), the gradient signal has a noise floor from routing divergence between inference and training. DeepSeek-V3, Qwen3-MoE, GPT-OSS, Mixtral — all need this. A paper training one of these without naming the routing-replay mechanism is implicitly trusting that the precision regimes agree exactly, which they typically don't.</p>
+
+        <h4>7. Group size N for GRPO?</h4>
+
+        <p>GRPO's variance reduction scales with group size. The prefix-cache savings also scale with group size (more completions sharing a prefix). The optimal N depends on the cluster, the model, and the task. Papers often report N=8 or N=16 with no ablation. If you're trying to reproduce or compare against a result, the group size is part of the experimental setup, not a hyperparameter.</p>
+
+        <h4>8. For multi-turn experiments: token budget, max_turns, truncation policy?</h4>
+
+        <p>Multi-turn trajectories have long tails. A 32-turn rollout with no per-turn limit gives different results from a 32-turn rollout with a 4096-token per-turn cap. Whether observation tokens are loss-masked (they should be) is part of the setup. Whether the chat-template preamble is repeated each turn (it shouldn't be — see the dummy-messages trick) is part of the setup. Papers comparing agents trained under different multi-turn settings often aren't comparing the same thing.</p>
+
+        <h4>9. Compute budget per training step, and where time is spent?</h4>
+
+        <p>The least-asked but most-revealing question. A training run reports "256 H100-days for the full schedule" and the breakdown between rollout, reward, and gradient update is typically 60% / 5% / 35%. If a paper compares two algorithms but doesn't break down where the time went, the comparison may be artifact of one method exploiting prefix caching better, not of the algorithm being inherently faster. The wandb-style timing breakdown (gen / reward / old_log_prob / values / adv / update_critic / update_actor) that verl's <code>marked_timer</code> blocks produce is what you actually want to see in a paper's appendix.</p>
+
+        <blockquote class="pull">
+          A paper that doesn't answer the first three of these has not described its experiment. A paper that doesn't answer the first six is not reproducible from its text alone. The 8th and 9th are luxury — but where the most interesting comparisons live.
+        </blockquote>
+
+        <p>None of this is to claim that papers should be ignored unless they answer all nine questions. It is to say that the empirical comparisons you make in your head while reading the field's papers should always include "and what is implicitly assumed about questions 1 through 6." The discipline of working through this checklist is what the survey's vocabulary is for.</p>
+      </section>

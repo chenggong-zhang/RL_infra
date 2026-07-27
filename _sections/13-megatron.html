@@ -1,0 +1,78 @@
+
+
+      <section id="megatron">
+        <h2>The training backbone: Megatron-LM</h2>
+
+        <p>By this point, the training object is visible: response tokens, masks, rewards or advantages, and policy logprobs have to line up before the actor loss is meaningful. The next question sits one layer lower. Once that object reaches the training engine, how is one actor update actually executed on a GPU cluster?</p>
+
+        <p>Megatron-LM is a good example for this layer because several RL infrastructure stacks use it directly as the training-side backend. Miles and slime wrap Megatron-style training workers around SGLang rollout, and verl can run its actor backend on Megatron as one of its supported training choices. It also exposes the central fact about this layer clearly, so we state it up front.</p>
+
+        <blockquote class="pull">
+          Megatron-LM is a reference training example built on Megatron Core. Megatron Core is the reusable layer: transformer building blocks, advanced parallelism strategies (TP, PP, DP, EP, and CP), mixed precision support (FP16, BF16, FP8, and FP4), and model architectures for custom training frameworks.
+        </blockquote>
+
+        <p>This quote tells us where to look. Megatron Core is the layer that owns the distributed training machinery: how the model is partitioned, how forward and backward are scheduled, how gradients are synchronized, and how the optimizer step is applied. RL infrastructure builds around that machinery. It supplies rollout data instead of ordinary pretraining text, computes an RL loss instead of next-token cross entropy, and then sends the updated actor back to the rollout side.</p>
+
+        <p>For someone already comfortable designing RL losses, this section is not mainly about the formula. It is about what happens after the formula enters a distributed training engine. Megatron decides which ranks see which slice of the batch, how large batches are broken into microbatches, when gradients are accumulated or synchronized, and which optimizer step actually creates the next policy version.</p>
+
+        <h3>Background: the actor as a distributed object</h3>
+
+        <p>A <strong>rank</strong> is one participating training process, usually associated with one GPU. A <strong>process group</strong> is a selected set of ranks that communicate for one purpose. Megatron builds several overlapping process groups because different parts of training need different communication patterns.</p>
+
+        <p>The algorithm can treat the actor as one policy <code>π<sub>θ</sub></code>. The training engine has to represent that policy through many partial states: one rank may hold a shard of a weight matrix, another may hold a later range of layers, and another replica may work on a different slice of the batch. Megatron coordinates those partial states so the optimizer step still updates one logical actor.</p>
+
+        <p>The ways of splitting the work are named by what is being split:</p>
+
+        <ul>
+          <li><strong>Tensor parallelism (TP)</strong> splits tensors inside a layer — for example, different ranks hold different columns or rows of a weight matrix, and must communicate while computing one logical layer. Because this communication happens inside many layers, systems usually keep a TP group within one node, where GPUs can use fast links such as <span class="glossary" tabindex="0">NVLink<span class="glossary-panel">NVLink is NVIDIA's high-bandwidth connection between GPUs inside the same server. It is much faster than sending tensor data through ordinary cross-machine networking, so it is a natural fit for tensor-parallel communication.</span></span>.</li>
+          <li><strong>Pipeline parallelism (PP)</strong> splits the transformer by layers. Earlier layers live on one group of ranks, later layers on another, and activations move from stage to stage. The communication is sparse and can cross machines.</li>
+          <li><strong>Data parallelism (DP)</strong> splits examples. Several ranks hold the same logical replica, each processes a different slice of the batch, and their gradients are synchronized before the optimizer step.</li>
+          <li><strong>Expert parallelism (EP)</strong> splits MoE experts. Different ranks own different experts, so token routing becomes part of the distributed execution plan.</li>
+          <li><strong>Context parallelism (CP)</strong> splits the sequence dimension itself across ranks, so one very long sequence can be processed by several GPUs at once.</li>
+        </ul>
+
+        <p>These dimensions compose. A rank can be part of a TP group, a PP stage, and a DP replica at the same time. That is why "training on 128 GPUs" is not enough information. The important question is how those GPUs are grouped, because the grouping decides which parameters are local, which activations must be sent, and when gradients are synchronized.</p>
+
+        <h3>Batch units: global batch, DP shard, microbatch</h3>
+
+        <p>Once the actor is distributed, "the batch" is no longer a single object seen by one process. There are several batch units, and they matter for loss design:</p>
+
+        <ul>
+          <li><strong>Global batch.</strong> The full collection of training examples or tokens intended to contribute to one optimizer update.</li>
+          <li><strong>Data-parallel shard.</strong> The slice of that global batch processed by one data-parallel replica.</li>
+          <li><strong>Microbatch.</strong> A smaller chunk run through forward and backward because the full shard would not fit in memory at once.</li>
+          <li><strong>Packed token batch.</strong> A tensor layout where several variable-length sequences may be concatenated, with metadata telling attention and loss code where sequence boundaries are.</li>
+        </ul>
+
+        <p>With that vocabulary, one actor update reads as a sequence of execution phases:</p>
+
+<pre><code>RL batch with tokens, masks, rewards / advantages
+  -> split into data-parallel shards and microbatches
+  -> run distributed forward passes across the parallel dimensions
+  -> compute token loss on the positions selected by the mask
+  -> run backward passes and accumulate gradients
+  -> synchronize the gradients that must agree across replicas
+  -> optimizer step: theta changes
+</code></pre>
+
+        <p>The word <strong>microbatch</strong> is the key one. A large RL batch may be too large to run in one forward/backward pass, so Megatron slices it into smaller pieces. Gradients from several microbatches can be accumulated before the optimizer step. During accumulation, the policy parameters have not changed. The actor becomes a new policy only when the optimizer step is applied.</p>
+
+        <div class="primer-box">
+          <p><strong>Gradient accumulation.</strong> If a global batch is too large to fit on the GPUs at once, the trainer can run several smaller microbatches one after another. Each microbatch contributes gradients to the same parameter buffers. The optimizer does not step after every microbatch; it waits until the configured accumulation window is complete. This makes several small forward/backward passes behave like one larger batch update, up to details such as loss scaling, normalization, and numerical order.</p>
+        </div>
+
+        <div class="study">
+          <div class="study-title">Study resources — Megatron-LM</div>
+          <ul>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM" target="_blank">NVIDIA/Megatron-LM</a> — repo root</li>
+            <li><a href="https://docs.nvidia.com/megatron-core/developer-guide/latest/index.html" target="_blank">Megatron Core docs</a> — parallelism guide, mixed precision, quickstart</li>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM/blob/main/train_rl.py" target="_blank"><code>train_rl.py</code></a> — top-level RL entrypoint</li>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/rl" target="_blank"><code>megatron/rl/</code></a> — Megatron's own RL module (the native RL stack)</li>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/rl/rl_utils.py" target="_blank"><code>rl_utils.py</code></a> — the GRPO loss with all corrections</li>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/rl/sequence_packing_utils.py" target="_blank"><code>sequence_packing_utils.py</code></a> — the packing logic</li>
+            <li><a href="https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/post_training" target="_blank"><code>megatron/post_training/</code></a> — quantization and distillation paths</li>
+            <li><a href="https://arxiv.org/abs/1909.08053" target="_blank">Megatron-LM paper (arxiv 1909.08053)</a> — the original tensor-parallel architecture</li>
+            <li><a href="https://github.com/NVIDIA-NeMo/Megatron-Bridge" target="_blank">Megatron-Bridge</a> — bidirectional HuggingFace ↔ Megatron checkpoint conversion</li>
+          </ul>
+        </div>
+      </section>
